@@ -647,9 +647,17 @@ response headers.
    zero), so shortening the backend limit shortens the UI window instead of
    leaving the warning past the refusal point.
 
+4. **CI could not pass on a fresh checkout, and the reason was a stale
+   assumption.** The workflow ran `bunx convex codegen`, justified by a comment
+   saying `src/convex/_generated` is gitignored. It is not: five generated files
+   are tracked, so the step was both unnecessary and fatal — `convex codegen`
+   needs a configured deployment and exited 1 with "No CONVEX_DEPLOYMENT set",
+   failing `verify` on the first push to `main`. The step is removed; typecheck
+   now reads the committed generated types.
+
 ### Open findings (updated)
 
-4. **The live domain's headers do not match this repository's `vercel.json`.**
+5. **The live domain's headers do not match this repository's `vercel.json`.**
    `https://taengine.freebuff.app` answers with `cache-control: public,
    max-age=0, must-revalidate` (the file says `no-store, must-revalidate`),
    `strict-transport-security: max-age=63072000` (the file says `31536000`) and
@@ -657,10 +665,12 @@ response headers.
    overrides file headers at project level; the parity check proves the files
    agree with each other, not that the host has applied them. Re-check the
    response headers after the next rebuild.
-5. **Parity is proven for Netlify statically, not on a live Netlify deploy.**
+6. **Parity is proven for Netlify statically, not on a live Netlify deploy.**
    There is no Netlify site in this workspace to curl, so the guarantee is that
    the config says the same thing as the reference — Netlify's own application
    of the blocks is unverified here.
-6. `taengine.freebuff.app` still runs no Worker: it gets no nonce CSP and no
+7. `taengine.freebuff.app` still runs no Worker: it gets no nonce CSP and no
    RPC-config injection, and only picks up a source change when Vercel rebuilds
-   from the branch it tracks.
+   from the branch it tracks. GitHub reports no deployments on this repository
+   (`/deployments` is empty), so the Vercel project behind that domain is not
+   wired to `silk202/bnb-bot` — a push cannot rebuild it.

@@ -38,12 +38,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # src/convex/_generated is gitignored, so a fresh checkout must
-      # regenerate it before anything typechecks. Works offline — no
-      # deployment or secrets required.
-      - name: Convex codegen
-        run: bunx convex codegen --typecheck disable
-
       - name: Lint (non-blocking — pre-existing findings)
         run: bun run lint
         continue-on-error: true
