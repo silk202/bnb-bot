@@ -81,9 +81,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Convex codegen
-        run: bunx convex codegen --typecheck disable
-
       - name: Check deploy key
         id: key
         env:
