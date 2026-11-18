@@ -674,3 +674,53 @@ response headers.
    from the branch it tracks. GitHub reports no deployments on this repository
    (`/deployments` is empty), so the Vercel project behind that domain is not
    wired to `silk202/bnb-bot` — a push cannot rebuild it.
+
+## Nineteenth pass — 2026-11-18 (arm badge on every operator surface)
+
+Reviewed: `src/lib/arm-status.ts`, `src/pages/terminal/Overview.tsx`,
+`src/pages/terminal/Bot.tsx`, `src/pages/terminal/Contract.tsx`,
+`src/convex/pinGuard.ts`, the published production response for
+`site-a8bf043e…freebuff.page`.
+
+### Fixed during review
+
+1. **The stale-arm warning existed on exactly one page.** It lived as local
+   helpers in `Contract.tsx`, so an operator who landed on the Overview — the
+   page the terminal opens on — or on the Flasher could flip to live mode with
+   an arm that the guard was about to refuse. The rules now live in one module,
+   `src/lib/arm-status.ts`, which all three pages import; the derivation still
+   comes from `ARM_MAX_AGE_MS`, and the comparison is the guard's own
+   `age > ARM_MAX_AGE_MS` (not `>=`), so the UI cannot claim one extra
+   millisecond of validity the backend does not grant.
+2. **The Flasher's footer badge was a mock.** It rendered "PAPER MODE" and "No
+   real BNB is ever moved by the terminal" unconditionally — including while
+   the terminal was live on chain, which is the one place that sentence must
+   never be wrong. It now follows `state.mode` and says what live mode actually
+   depends on (the profit guard and the armed contract) when live.
+3. **The Overview and the Flasher now show the arm's graded state.** Both
+   render "Stale arm" (amber) or "Arm expired" (rose) plus the same sentence the
+   Contract page shows, and only when a deployment is actually armed — an
+   unarmed terminal gets no invented warning.
+4. **`isBscChain` was imported unused in `Bot.tsx`**, which failed `eslint` on
+   the file. Removed; the gate is green again.
+
+### Open findings (updated)
+
+5. **The badges are computed at render, not on a timer.** Ages advance when the
+   page re-renders (the Convex state subscription keeps an active terminal
+   fresh), so an idle tab can understate an age until the next update. The
+   Contract page has the same trade-off; a shared interval would fix all three
+   at once.
+6. **No unit test covers the thresholds after the move.** `armStatus` was
+   untested where it lived and is untested where it moved: the `>` boundary at
+   `ARM_MAX_AGE_MS` and the headroom boundary at `ARM_STALE_MS - 7 days` are
+   verified by reading the comparison against `pinGuard.ts`, not by a test.
+   This is the cheapest remaining gap to close (three pure cases, no Convex).
+7. **The production Sites environment is published and verified, but the domain
+   is still not wired.** `taengine.freebuff.app` continues to serve a Vercel
+   build (`assets/index-BsVghlH7.js`, HSTS `63072000`, no CSP); the Sites
+   production origin serves this tree (`assets/index-BmTDXfEb.js`, `no-store`,
+   per-response nonce CSP, injected RPC config). Nothing in this workspace can
+   repoint the Freebuff project page or the domain: there is no credential for
+   the Freebuff web API, no Vercel token, and `repos/silk202/bnb-bot/deployments`
+   is empty.

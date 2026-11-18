@@ -6,13 +6,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { useGasPrice } from "@/hooks/use-gas-price";
 import { useTerminal } from "@/hooks/use-terminal";
+import { armStatus } from "@/lib/arm-status";
 import { BNB_NETWORKS, type NetworkKey } from "@/lib/chain";
 import {
   CHAIN_INFO,
   effectiveRpc,
   FLASH_LENDER_INFO,
   gasCostBnb,
-  isBscChain,
   lenderFeeLabel,
   lenderForRun,
 } from "@/lib/flashbolt";
@@ -58,6 +58,13 @@ export default function Bot() {
   const chain = CHAIN_INFO[chainKey];
   const networkKey: NetworkKey =
     state?.network === "testnet" ? "testnet" : "mainnet";
+  // The arm this page's live mode depends on, graded by the same module the
+  // Contract page and the Overview read — flipping to live on a stale arm is
+  // exactly the moment an operator needs to know pins will be refused.
+  const deployment = state?.deployments?.[chainKey];
+  const armedAddress =
+    deployment?.contractAddress ?? state?.deployedContractAddress;
+  const arm = armStatus(deployment?.armedAt);
   // Private RPC overrides (set on the Contract page) win over public RPCs;
   // BNB testnet always uses the public testnet endpoint.
   const rpcUrl =
@@ -121,9 +128,6 @@ export default function Bot() {
   };
 
   const handleMode = async (mode: "paper" | "live") => {
-    const armedAddress =
-      state?.deployments?.[chainKey]?.contractAddress ??
-      state?.deployedContractAddress;
     if (mode === "live" && !armedAddress) {
       toast.info("Live mode requires your deployed contract", {
         description:
@@ -217,6 +221,28 @@ export default function Bot() {
                   <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
                     Paper keeps funds off-chain; live needs your deployed contract.
                   </div>
+                  {armedAddress && arm.tone !== "ok" && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <Badge
+                        className={
+                          arm.tone === "danger"
+                            ? "border-rose-500/25 bg-rose-500/10 text-rose-400"
+                            : "border-amber-500/25 bg-amber-500/10 text-amber-400"
+                        }
+                      >
+                        {arm.tone === "danger" ? "Arm expired" : "Stale arm"}
+                      </Badge>
+                      <span
+                        className={
+                          arm.tone === "danger"
+                            ? "text-[11px] leading-4 text-rose-400"
+                            : "text-[11px] leading-4 text-amber-400"
+                        }
+                      >
+                        {arm.message}
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <div className="flex rounded-full border border-border/70 bg-background/50 p-1">
                   {(["paper", "live"] as const).map((mode) => (
@@ -546,10 +572,18 @@ export default function Bot() {
               </ul>
             )}
             <div className="mt-4 flex items-center gap-2 rounded-xl border border-primary/25 bg-primary/8 px-3.5 py-2.5 text-[11px] text-muted-foreground">
-              <Badge className="border-amber-500/30 bg-amber-500/10 text-amber-400">
-                PAPER MODE
+              <Badge
+                className={
+                  (state?.mode ?? "paper") === "live"
+                    ? "border-rose-500/30 bg-rose-500/10 text-rose-400"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                }
+              >
+                {(state?.mode ?? "paper") === "live" ? "LIVE ON CHAIN" : "PAPER MODE"}
               </Badge>
-              No real BNB is ever moved by the terminal.
+              {(state?.mode ?? "paper") === "live"
+                ? "Live trades move real BNB — the profit guard and your armed contract decide every execution."
+                : "No real BNB is ever moved by the terminal."}
             </div>
           </CardContent>
         </Card>
