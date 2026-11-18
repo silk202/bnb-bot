@@ -1,5 +1,9 @@
 import { api } from "@/convex/_generated/api";
-import { ARM_MAX_AGE_MS } from "@/convex/pinGuard";
+import {
+  armStatus,
+  armStampTitle,
+  formatArmAge,
+} from "@/lib/arm-status";
 import { TerminalContextStrip } from "@/components/TerminalContextStrip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -162,78 +166,6 @@ const CHECKLIST = [
   { title: "Multi-asset loans", desc: "Any deep quote asset — WBNB, USDT, USDC, discovered live" },
   { title: "Emergency exit", desc: "Owner can withdraw stuck tokens at any time" },
 ];
-
-// The pin guard is the only authority on when an arm stops authorizing a pin,
-// so the page reads its limit instead of keeping a second copy that can drift
-// from the server's. `ARM_STALE_MS` is derived from it, not chosen separately.
-const ARM_LIMIT_MS = ARM_MAX_AGE_MS;
-const ARM_LIMIT_DAYS = Math.round(ARM_MAX_AGE_MS / 86_400_000);
-// Warn for the last week of the limit: pins will refuse the arm soon, and
-// re-arming needs a save while the operator is paying attention. Derived, so a
-// shorter limit shrinks the window instead of leaving it past the limit.
-const ARM_WARN_HEADROOM_MS = 7 * 86_400_000;
-const ARM_STALE_MS = Math.max(0, ARM_MAX_AGE_MS - ARM_WARN_HEADROOM_MS);
-
-type ArmTone = "ok" | "warn" | "danger";
-
-/** "3d 4h ago" — and honest about a deployment saved before arm stamps existed. */
-function formatArmAge(stamp?: number | null, now = Date.now()): string {
-  if (typeof stamp !== "number" || !Number.isFinite(stamp)) return "not recorded";
-  const age = Math.max(0, now - stamp);
-  const minutes = Math.floor(age / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ${hours % 24}h ago`;
-}
-
-function armStampTitle(stamp?: number | null): string {
-  return typeof stamp === "number" && Number.isFinite(stamp)
-    ? new Date(stamp).toISOString()
-    : "No timestamp: this deployment was armed before arm stamps were recorded.";
-}
-
-/**
- * Graded staleness for the arm a pin decision would rely on. The hard stop is
- * the backend guard's 30-day limit; a stale arm is flagged a week before it,
- * because an operator who learns about expiry from a refusal has already lost
- * the window. Nothing here claims a pin is available when it is not.
- */
-function armStatus(
-  stamp?: number | null,
-  now = Date.now(),
-): { tone: ArmTone; message: string } {
-  if (typeof stamp !== "number" || !Number.isFinite(stamp)) {
-    return {
-      tone: "danger",
-      message:
-        "No arm timestamp: bytecode pins refuse this deployment until it is saved here again, which records one. Re-saving an existing stamp does not refresh it.",
-    };
-  }
-  const age = Math.max(0, now - stamp);
-  const daysLeft = Math.ceil((ARM_LIMIT_MS - age) / 86_400_000);
-  if (age > ARM_LIMIT_MS) {
-    const days = Math.floor(age / 86_400_000);
-    return {
-      tone: "danger",
-      message: `Stale arm: ${days} days old, past the ${ARM_LIMIT_DAYS}-day limit — bytecode pins are refused. Deploy or save another address to re-arm.`,
-    };
-  }
-  if (age > ARM_STALE_MS) {
-    const days = Math.floor(age / 86_400_000);
-    return {
-      tone: "warn",
-      message: `Stale arm: ${days} days old. Pins accept it for ${daysLeft} more ${daysLeft === 1 ? "day" : "days"}, then refuse it until a new address is armed.`,
-    };
-  }
-  const days = Math.floor(age / 86_400_000);
-  return {
-    tone: "ok",
-    message: `Fresh arm: ${days === 0 ? "armed today" : `${days} ${days === 1 ? "day" : "days"} old`}, pins accept it for ${daysLeft} more ${daysLeft === 1 ? "day" : "days"}.`,
-  };
-}
 
 export default function Contract() {
   const { state, setSettings, saveDeployment } = useTerminal();

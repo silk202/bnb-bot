@@ -14,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useTerminal } from "@/hooks/use-terminal";
 import { CHAIN_INFO } from "@/lib/flashbolt";
 import { classifyExecutionMethod } from "@/lib/execution-method";
+import { armStatus } from "@/lib/arm-status";
 import { VaultSignerCard, type VaultSignerCardAdapter } from "@/components/VaultSignerCard";
 import {
   removeFromVault as evmRemoveFromVault,
@@ -261,6 +262,10 @@ function StatusBanner() {
   const armedAddress =
     state?.deployments?.[chainKey]?.contractAddress ??
     state?.deployedContractAddress;
+  // The same graded staleness the Contract page shows, from the same module:
+  // an operator who lands here must not have to open another page to learn
+  // that pins are about to refuse this arm.
+  const arm = armStatus(state?.deployments?.[chainKey]?.armedAt);
 
   const handleToggleBot = async () => {
     await setBotRunning({ running: !running });
@@ -294,11 +299,33 @@ function StatusBanner() {
             <Badge className="border-amber-500/30 bg-amber-500/10 text-amber-400">
               {state?.mode === "live" ? "LIVE ON CHAIN" : "PAPER MODE"}
             </Badge>
+            {armedAddress && arm.tone !== "ok" && (
+              <Badge
+                className={
+                  arm.tone === "danger"
+                    ? "border-rose-500/25 bg-rose-500/10 text-rose-400"
+                    : "border-amber-500/25 bg-amber-500/10 text-amber-400"
+                }
+              >
+                {arm.tone === "danger" ? "Arm expired" : "Stale arm"}
+              </Badge>
+            )}
           </div>
           <p className="mt-0.5 truncate text-xs text-muted-foreground">
             last scan {formatAgo(state?.lastScanAt)} · opportunities expire
             after 90s
           </p>
+          {armedAddress && arm.tone !== "ok" && (
+            <p
+              className={
+                arm.tone === "danger"
+                  ? "mt-0.5 text-[11px] leading-4 text-rose-400"
+                  : "mt-0.5 text-[11px] leading-4 text-amber-400"
+              }
+            >
+              {arm.message}
+            </p>
+          )}
         </div>
       </div>
 
