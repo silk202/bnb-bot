@@ -1,0 +1,43 @@
+
+[drill:all] FlashBolt combined live drill — 2026-11-01T00:12:08.828Z
+
+══════════════════════════════════════════════════════════════
+  FLASHBOLT COMBINED DRILL · SOL FlashBolt · Solana devnet
+══════════════════════════════════════════════════════════════
+
+[devnet-drill] SOL FlashBolt live-path drill — 2026-11-01T00:12:08.918Z
+[devnet-drill] cluster: devnet (https://api.devnet.solana.com)
+
+  ✓ Stage 1 · vault seal/lock/unlock (AES-256-GCM) (136ms) — CY8im5qW…
+  ✓ Stage 2 · in-memory ed25519 signing (sub-ms) (16ms) — sig 3NL9oGPAGbRd…
+[devnet-drill] drill address (deterministic, devnet-only): CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K
+
+══════════════════════════════════════════════════════════════
+  FLASHBOLT COMBINED DRILL · BNB FlashBolt · BSC testnet
+══════════════════════════════════════════════════════════════
+
+[evm-drill] BNB FlashBolt live-path drill — 2026-11-01T00:12:16.270Z
+[evm-drill] network: BSC testnet (https://data-seed-prebsc-1-s1.binance.org:8545)
+
+  ✓ Stage 1 · EVM vault seal/lock/unlock (AES-256-GCM) (192ms) — 0x329513F6…
+  ✓ Stage 2 · in-memory secp256k1 signing (viem) (7ms) — sig 0xf86580850254… recovers to 0x329513…
+[evm-drill] drill address (deterministic, testnet-only): 0x329513F68b697e83a769800A45fB84C568B47901
+
+══════════════════════════════════════════════════════════════
+[drill:all] ══ COMBINED VERDICT: 0/2 subsystems fully passed in 39242ms ══
+══════════════════════════════════════════════════════════════
+  ✗ Stage 3 · devnet funding (real SOL) FAILED (6686ms): both funding paths refused (daily faucet limit)
+
+[devnet-drill] ✗ Cannot continue — devnet faucet refused funding (rate limit?).
+[devnet-drill]   Fund the drill address manually and re-run:
+[devnet-drill]   CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K
+
+[drill:all] SOL FlashBolt · Solana devnet: FAILED (exit 1 )
+  ✗ Stage 3 · BSC testnet funding (real testBNB) FAILED (31573ms): every faucet refused or timed out
+
+[evm-drill] ✗ Cannot continue — no testBNB funding path succeeded.
+[evm-drill]   Fund the drill address manually and re-run:
+[evm-drill]   0x329513F68b697e83a769800A45fB84C568B47901
+[evm-drill]   https://testnet.bnbchain.org/faucet-smart
+
+[drill:all] BNB FlashBolt · BSC testnet: FAILED (exit 1 )

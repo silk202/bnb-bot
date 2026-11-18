@@ -1,0 +1,35 @@
+{
+  "name": "FlashBolt — BNB Chain & Solana Flash-Loan Arbitrage Terminal",
+  "short_name": "FlashBolt",
+  "description": "Scan live multi-DEX spreads on BNB Chain and Solana with real market data, copy Telegram signals, run 24/7 engines, and execute real on-chain routes from your own wallet.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#131416",
+  "theme_color": "#131416",
+  "categories": ["finance", "utilities"],
+  "lang": "en",
+  "dir": "ltr",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

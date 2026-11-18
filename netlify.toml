@@ -1,0 +1,76 @@
+[build]
+  command = "bun run build"
+  publish = "dist"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Every rule below mirrors public/_headers, the same way vercel.json does.
+# `bun scripts/check-headers-parity.mjs` resolves all three files per path and
+# fails the release if any host is missing, guessing or extra.
+#
+# Content-Security-Policy is absent for the same reason it is absent from
+# _headers and vercel.json: the nonce is minted per response by
+# sites/worker.js, and a static header cannot carry one.
+#
+# Rule order matters on Netlify: all matching blocks apply and the later value
+# wins, so the catch-all `/*` block stays last.
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/overlay/*"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+    X-Content-Type-Options = "nosniff"
+
+# Full-source archive: force a download into the local Downloads folder.
+[[headers]]
+  for = "/downloads/*"
+  [headers.values]
+    Content-Type = "application/zip"
+    Content-Disposition = "attachment"
+    Cache-Control = "public, max-age=3600"
+    X-Content-Type-Options = "nosniff"
+
+# Must follow /downloads/* so the gzip type wins for the .tar.gz builds.
+[[headers]]
+  for = "/downloads/*.tar.gz"
+  [headers.values]
+    Content-Type = "application/gzip"
+    Content-Disposition = "attachment"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-store, must-revalidate"
+
+[[headers]]
+  for = "/logo.svg"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+[[headers]]
+  for = "/manifest.webmanifest"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+[[headers]]
+  for = "/robots.txt"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Strict-Transport-Security = "max-age=31536000"
+    X-Robots-Tag = "noindex, nofollow"
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"

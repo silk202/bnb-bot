@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "FlashBolt Sniper Overlay — DEXView / GMGN / Ave",
+  "version": "2.9.0",
+  "description": "Full FlashBolt sniper engine on DEXView, GMGN and Ave.ai: ON/OFF bot toggle, site-chain auto-sync, instant new-token capture, simulated-gated auto buy/sell, automatic payout, UTC clock.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "clipboardWrite",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://dexscreener.com/*",
+    "https://dexview.com/*",
+    "https://gmgn.ai/*",
+    "https://ave.ai/*",
+    "https://*.dexview.com/*",
+    "https://*.gmgn.ai/*",
+    "https://*.ave.ai/*",
+    "https://api.dexscreener.com/*",
+    "https://api.geckoterminal.com/*",
+    "https://flexible-frog-776.convex.site/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "FlashBolt Sniper Overlay"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://dexscreener.com/*",
+        "https://dexview.com/*",
+        "https://gmgn.ai/*",
+        "https://ave.ai/*",
+        "https://*.dexview.com/*",
+        "https://*.gmgn.ai/*",
+        "https://*.ave.ai/*"
+      ],
+      "js": [
+        "overlay.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ]
+}

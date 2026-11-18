@@ -1,0 +1,26 @@
+# Freebuff Sites deployment (Workers + static assets).
+#
+# This used to declare `pages_build_output_dir = "dist"`, which is a Pages-only
+# key: `wrangler deploy` rejects a config that has neither `main` nor `assets`
+# ("The Wrangler configuration has neither a main script nor static assets"),
+# and that is exactly what the Publish button's automatic deploy hit.
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH for the deploy: Worker entry,
+# compatibility date and asset directory. The Sites deploy call needs the same
+# values in sites.deploy.json, so that file mirrors this one and
+# `bun run check:deploy-config` (part of `bun run verify`) fails the build if the
+# two ever disagree. There is no third copy: the local Wrangler override that
+# used to repeat these values was removed, and `wrangler dev` reads this file.
+#
+# The app is a client-side Vite/React SPA. `bun run build` writes dist/, and
+# sites/worker.js serves it through the ASSETS binding (plus the RPC-config
+# injection for HTML documents). SPA fallback lives here now, so the Pages-only
+# public/_redirects file is not required by this deploy path.
+name = "flashbolt"
+compatibility_date = "2024-09-23"
+main = "sites/worker.js"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"

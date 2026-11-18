@@ -1,0 +1,109 @@
+# One push updates every surface concurrently:
+#   1. This workflow verifies the whole app (typecheck, tests, production
+#      build — which rebuilds the overlay artifacts) and uploads the overlay
+#      zips/userscript as a downloadable artifact.
+#   2. The Convex backend deploys automatically when CONVEX_DEPLOY_KEY is
+#      configured as a repo secret (Settings → Secrets → Actions).
+#   3. Vercel / Netlify / Cloudflare Pages / Render each auto-build from the
+#      same push via their native git integration — their zero-config build
+#      settings live in vercel.json / netlify.toml / wrangler.toml /
+#      render.yaml (all run `bun run build`, which includes the overlay
+#      rebuild). No workflow needed for those; connect the repo once.
+#
+# NOTE: `bun run lint` is run as a NON-BLOCKING step below (continue-on-error)
+# because the repo carries pre-existing lint findings; typecheck + tests are
+# the hard gates.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # src/convex/_generated is gitignored, so a fresh checkout must
+      # regenerate it before anything typechecks. Works offline — no
+      # deployment or secrets required.
+      - name: Convex codegen
+        run: bunx convex codegen --typecheck disable
+
+      - name: Lint (non-blocking — pre-existing findings)
+        run: bun run lint
+        continue-on-error: true
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      # `bun run build` = tsc -b && bun run overlay && vite build — the
+      # overlay artifacts (extension zips + userscript served by the app's
+      # Downloads page) are rebuilt from the same version consts on every
+      # push, so they can never drift from the app.
+      - name: Production build
+        run: bun run build
+        env:
+          VITE_CONVEX_URL: ${{ vars.VITE_CONVEX_URL }}
+
+      - name: Upload overlay artifacts (downloads surface)
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay-${{ github.sha }}
+          path: |
+            public/overlay/*.zip
+            public/overlay/*.user.js
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy-convex:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Convex codegen
+        run: bunx convex codegen --typecheck disable
+
+      - name: Check deploy key
+        id: key
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: |
+          if [ -n "$CONVEX_DEPLOY_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CONVEX_DEPLOY_KEY secret not configured - skipping backend deploy"
+          fi
+
+      - name: Deploy Convex functions
+        if: steps.key.outputs.present == 'true'
+        run: bunx convex deploy
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}

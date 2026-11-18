@@ -1,0 +1,56 @@
+# Security headers for every response. Verified applied by the Workers static
+# assets layer on the Sites preview (not only by Cloudflare Pages) — see
+# reports/code-review-2026-11-16.md, fifteenth pass.
+#
+# Content-Security-Policy is NOT here on purpose: a nonce cannot be expressed
+# in a static header, and the nonce must match the one stamped on this
+# response's script tags. sites/worker.js mints a per-response nonce, stamps
+# every script/style tag and sends the matching policy, so the policy exists
+# exactly where its nonce does. A host that serves dist/ without the Worker
+# (Vercel) gets no policy rather than a broken one.
+#
+# Every other rule below is mirrored in vercel.json and netlify.toml, and
+# `bun scripts/check-headers-parity.mjs` resolves all three files per path and
+# fails the release if any host is missing, extra or different.
+#
+# Deliberately absent: Cross-Origin-Opener-Policy — the app talks to wallet
+# providers through popups, and COOP severs the opener handle those flows use.
+/*
+  Strict-Transport-Security: max-age=31536000
+  X-Robots-Tag: noindex, nofollow
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+/index.html
+  Cache-Control: no-store, must-revalidate
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/overlay/*
+  Cache-Control: public, max-age=3600
+  X-Content-Type-Options: nosniff
+
+# Full-source archive (account menu → Download source). Served as an
+# attachment so a click — or a direct URL hit — saves the file into the
+# machine's Downloads folder instead of rendering it in the tab.
+/downloads/*
+  Content-Type: application/zip
+  Content-Disposition: attachment
+  Cache-Control: public, max-age=3600
+  X-Content-Type-Options: nosniff
+
+/downloads/*.tar.gz
+  Content-Type: application/gzip
+  Content-Disposition: attachment
+
+/logo.svg
+  Cache-Control: public, max-age=86400
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=86400
+
+/robots.txt
+  Cache-Control: public, max-age=3600

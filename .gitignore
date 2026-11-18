@@ -1,0 +1,144 @@
+# ─── Dependencies ────────────────────────────────────────
+node_modules
+
+# ─── Environment & secrets — never commit real values ────
+.env
+.env.*
+!.env.example
+
+# ─── Database export dumps (contain ALL user data — never commit) ──
+*.jsonl
+export/
+flashbolt-export*/
+*.export.zip
+
+# ─── Build outputs ───────────────────────────────────────
+dist
+dist-ssr
+build
+output
+coverage
+*.tsbuildinfo
+
+# ─── Convex temp files ──────────────────────────────────
+# `src/convex/_generated` is deliberately NOT ignored: the React app imports
+# it (`@/convex/_generated/api`), so ignoring it left a clean checkout — and
+# therefore any CI / publish build — with unresolvable modules until codegen
+# ran. Convex's own guidance is to commit these bindings.
+src/convex/_*.ts
+src/convex/_*.py
+
+# ─── Vercel ──────────────────────────────────────────────
+.vercel
+
+# ─── Netlify ─────────────────────────────────────────────
+.netlify
+
+# ─── Render ──────────────────────────────────────────────
+.render
+
+# ─── Cloudflare Pages / Workers / Wrangler ──────────────
+.wrangler
+.worker-dev
+.dev.vars
+cloudflare-worker/dist
+
+# ─── Vly / Freebuff local state ─────────────────────────
+.vly
+freebuff.local.json
+
+# ─── SST / serverless ───────────────────────────────────
+sst-env.d.ts
+.sst
+
+# ─── Logs & OS junk ─────────────────────────────────────
+*.log
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+._*
+
+# ─── Tooling & editors ──────────────────────────────────
+.turbo
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# ─── Package manager ────────────────────────────────────
+.bun
+.npm
+.yarn
+.pnp.*
+
+# ─── Lock files (bun.lockb is binary, keep it) ──────────
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ─── Stale scratch build copy (probe output — never committed) ──
+isolate/
+
+# ─── Misc build caches ──────────────────────────────────
+.eslintcache
+.prettiercache
+.parcel-cache
+.vite
+
+# ─── Source code archives (generated for download) ──────
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+flashbolt-*.zip
+flashbolt-*.tar.gz
+mirror-*.zip
+mirror-*.tar.gz
+# Overlay artifacts are deterministic builds served by the app and committed:
+!public/overlay/*.zip
+# Full-source archive served by the account menu's direct download
+# (scripts/package-source.sh) — must ship inside dist/downloads/:
+!public/downloads/*.zip
+!public/downloads/*.tar.gz
+
+# ─── Scanner Overlay ad-hoc build outputs (custom --out dirs) ──
+/dist/overlay/
+/extension-build/
+
+# ─── Desktop app builds ─────────────────────────────────
+out/
+release/
+desktop-dist/
+
+# ─── CLI scripts (scratch/generated outputs stay ignored; every
+#     operational script referenced by package.json or the docs stays
+#     tracked so a fresh clone's `bun run …` commands all work) ────
+scripts/*.sh
+!scripts/setup.sh
+!scripts/git-sync.sh
+!scripts/verify-release.sh
+!scripts/check-mirror-sync.sh
+!scripts/package-mirror.sh
+!scripts/package-source.sh
+!scripts/report-drill-status.sh
+!scripts/check-4-tasks.sh
+scripts/*.ps1
+!scripts/setup.ps1
+!scripts/flashbolt-windows.ps1
+
+# ─── Scratch / probe files ───────────────────────────────
+scripts/probe.txt
+scripts/*.out
+.cache/
+
+# ─── Mirror-check scratch (check:mirror unzip target) ────
+.mirror-check/
+/freebuff-sites-build/
+
+# Sites deploys straight from dist/ (see sites.deploy.json); there is no staged
+# copy to keep in sync — an older sites-assets/ tree was stale by design.
+# NOTE: .task-baseline (the protected deployment's build stamp) is COMMITTED on
+# purpose — a fresh clone or CI run needs the same comparison point as the
+# machine that recorded it, and an out-of-date baseline is itself a finding.

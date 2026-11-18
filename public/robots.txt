@@ -1,0 +1,5 @@
+# FlashBolt — the app is access-gated and intentionally not indexed.
+# All frontend/backend functionality lives behind the gate and in the
+# server-side Convex deployment, never in crawlable static files.
+User-agent: *
+Disallow: /

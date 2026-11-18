@@ -1,0 +1,71 @@
+services:
+  - type: web
+    name: flashbolt
+    runtime: static
+    buildCommand: bun run build
+    staticPublishPath: dist
+    headers:
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+      - path: /overlay/*
+        name: Cache-Control
+        value: public, max-age=3600
+      - path: /overlay/*
+        name: X-Content-Type-Options
+        value: nosniff
+      # Full-source archive: save it, never render it.
+      - path: /downloads/*
+        name: Content-Type
+        value: application/zip
+      - path: /downloads/*
+        name: Content-Disposition
+        value: attachment
+      - path: /downloads/*
+        name: Cache-Control
+        value: public, max-age=3600
+      - path: /index.html
+        name: Cache-Control
+        value: no-store, must-revalidate
+      - path: /logo.svg
+        name: Cache-Control
+        value: public, max-age=86400
+      - path: /manifest.webmanifest
+        name: Cache-Control
+        value: public, max-age=86400
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=()
+    routes:
+      # SPA fallback — but never swallow real static files (overlay artifacts,
+      # hashed assets, manifest, robots).
+      - type: rewrite
+        source: /assets/*
+        destination: /assets/:splat
+      - type: rewrite
+        source: /overlay/*
+        destination: /overlay/:splat
+      - type: rewrite
+        source: /downloads/*
+        destination: /downloads/:splat
+      - type: rewrite
+        source: /logo.svg
+        destination: /logo.svg
+      - type: rewrite
+        source: /robots.txt
+        destination: /robots.txt
+      - type: rewrite
+        source: /manifest.webmanifest
+        destination: /manifest.webmanifest
+      - type: rewrite
+        source: /*
+        destination: /index.html
