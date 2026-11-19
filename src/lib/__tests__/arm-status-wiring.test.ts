@@ -99,28 +99,45 @@ function clockVariable(name: string, source: string): string {
   return declared[1];
 }
 
-/** Throws unless every armStatus call on the page receives the page's clock. */
-function assertWired(name: string, source: string): void {
-  const clock = clockVariable(name, source);
-  const calls = callArgs(source, "armStatus");
-  if (calls.length === 0) {
-    throw new Error(`${name} calls armStatus nowhere — the guard tested nothing`);
+/**
+ * Throws unless every clock-consuming call on the page receives the page's
+ * clock. `armStatus` must exist (the badge is the whole point); `formatArmAge`
+ * is checked wherever a page shows an age, because a frozen "3h 0m ago" next to
+ * a live badge is the same regression half-fixed.
+ */
+function assertClockCalls(
+  name: string,
+  source: string,
+  callee: "armStatus" | "formatArmAge",
+  clock: string,
+  required: boolean,
+): void {
+  const calls = callArgs(source, callee);
+  if (required && calls.length === 0) {
+    throw new Error(`${name} calls ${callee} nowhere — the guard tested nothing`);
   }
   for (const args of calls) {
     if (args.length !== 2) {
       throw new Error(
-        `${name}: armStatus(${args.join(", ")}) does not pass the ticking clock as its second argument (expected \`${clock}\`)`,
+        `${name}: ${callee}(${args.join(", ")}) does not pass the ticking clock as its second argument (expected \`${clock}\`)`,
       );
     }
     if (args[1] !== clock) {
       throw new Error(
-        `${name}: armStatus's second argument is \`${args[1]}\`, not the ticking clock \`${clock}\``,
+        `${name}: ${callee}'s second argument is \`${args[1]}\`, not the ticking clock \`${clock}\``,
       );
     }
     if (args[0].includes("Date.now")) {
-      throw new Error(`${name}: armStatus reads Date.now() inline instead of the shared clock`);
+      throw new Error(`${name}: ${callee} reads Date.now() inline instead of the shared clock`);
     }
   }
+}
+
+/** Throws unless every armStatus (and any displayed age) uses the page clock. */
+function assertWired(name: string, source: string): void {
+  const clock = clockVariable(name, source);
+  assertClockCalls(name, source, "armStatus", clock, true);
+  assertClockCalls(name, source, "formatArmAge", clock, false);
 }
 
 describe("arm status wiring — the clock reaches every page", () => {
@@ -130,6 +147,25 @@ describe("arm status wiring — the clock reaches every page", () => {
       expect(() => assertWired(page.name, source)).not.toThrow();
     });
   }
+
+  test("Contract passes the same clock into every displayed arm age", () => {
+    const source = readFileSync(
+      new URL("../../pages/terminal/Contract.tsx", import.meta.url),
+      "utf8",
+    );
+    // current arm, first armed, last saved — three labels under the badge.
+    expect(callArgs(source, "formatArmAge")).toHaveLength(3);
+  });
+
+  test("the guard fails when an age label drops the clock", () => {
+    const broken = `
+      import { useNow } from "@/hooks/use-now";
+      const now = useNow();
+      const arm = armStatus(deployment?.armedAt, now);
+      const age = formatArmAge(deployment?.armedAt);
+    `;
+    expect(() => assertWired("Broken", broken)).toThrow(/formatArmAge.*second argument/);
+  });
 
   test("the guard fails when the second argument is dropped", () => {
     const broken = `
