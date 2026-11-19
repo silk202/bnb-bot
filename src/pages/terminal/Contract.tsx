@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useTerminal } from "@/hooks/use-terminal";
+import { useNow } from "@/hooks/use-now";
 import {
   BNB_NETWORKS,
   buildDeployData,
@@ -191,8 +192,11 @@ export default function Contract() {
   const deploySlug = isBscChain(chainKey) ? BNB_NETWORKS[network].networkSlug : chainKey;
   // Per-chain deployment: each chain arms its own contract + router.
   const deployment = state?.deployments?.[chainKey];
+  // A single shared clock keeps the badge and the three ages moving while the
+  // page sits open; it re-reads the wall time instead of accumulating ticks.
+  const now = useNow();
   // Graded staleness for the arm this page's pin actions would rely on.
-  const armState = armStatus(deployment?.armedAt);
+  const armState = armStatus(deployment?.armedAt, now);
   const armedAddress =
     deployment?.contractAddress || state?.deployedContractAddress || "";
   const [copied, setCopied] = useState(false);
@@ -1066,19 +1070,19 @@ export default function Contract() {
                 <span title={armStampTitle(deployment?.armedAt)}>
                   current arm{" "}
                   <span className="font-mono text-foreground">
-                    {formatArmAge(deployment?.armedAt)}
+                    {formatArmAge(deployment?.armedAt, now)}
                   </span>
                 </span>
                 <span title={armStampTitle(deployment?.firstArmedAt)}>
                   first armed{" "}
                   <span className="font-mono text-foreground">
-                    {formatArmAge(deployment?.firstArmedAt)}
+                    {formatArmAge(deployment?.firstArmedAt, now)}
                   </span>
                 </span>
                 <span title={armStampTitle(deployment?.affirmedAt)}>
                   last saved{" "}
                   <span className="font-mono text-foreground">
-                    {formatArmAge(deployment?.affirmedAt)}
+                    {formatArmAge(deployment?.affirmedAt, now)}
                   </span>
                 </span>
               </div>

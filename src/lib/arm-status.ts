@@ -65,9 +65,16 @@ export function armStatus(
   }
   if (age > ARM_STALE_MS) {
     const days = Math.floor(age / 86_400_000);
+    // At exactly the limit the guard still accepts (`age > ARM_LIMIT_MS`
+    // refuses), so "0 more days" would be both wrong and alarming: say what is
+    // true — there is less than a day left.
+    const remaining =
+      daysLeft > 0
+        ? `Pins accept it for ${daysLeft} more ${daysLeft === 1 ? "day" : "days"}, then refuse it until a new address is armed.`
+        : "Pins accept it for less than a day, then refuse it until a new address is armed.";
     return {
       tone: "warn",
-      message: `Stale arm: ${days} days old. Pins accept it for ${daysLeft} more ${daysLeft === 1 ? "day" : "days"}, then refuse it until a new address is armed.`,
+      message: `Stale arm: ${days} days old. ${remaining}`,
     };
   }
   const days = Math.floor(age / 86_400_000);

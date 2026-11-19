@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { useGasPrice } from "@/hooks/use-gas-price";
+import { useNow } from "@/hooks/use-now";
 import { useTerminal } from "@/hooks/use-terminal";
 import { armStatus } from "@/lib/arm-status";
 import { BNB_NETWORKS, type NetworkKey } from "@/lib/chain";
@@ -32,7 +33,7 @@ import {
   TrendingUp,
   Wallet,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { toast } from "sonner";
 
 function formatAgo(ts: number): string {
@@ -45,12 +46,10 @@ function formatAgo(ts: number): string {
 export default function Bot() {
   const { state, executions, pnlSummary, setBotRunning, setMode, setSettings, liveOnly } =
     useTerminal();
-  const [, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  // The Flasher shows second-level activity, so it keeps its one-second
+  // cadence — but the tick re-reads the wall clock and also feeds the arm age,
+  // so the badge cannot keep saying "just now" on an arm that is expiring.
+  const now = useNow(1000);
 
   const running = state?.botRunning ?? true;
   const cadence = state?.cadence ?? 15;
@@ -64,7 +63,7 @@ export default function Bot() {
   const deployment = state?.deployments?.[chainKey];
   const armedAddress =
     deployment?.contractAddress ?? state?.deployedContractAddress;
-  const arm = armStatus(deployment?.armedAt);
+  const arm = armStatus(deployment?.armedAt, now);
   // Private RPC overrides (set on the Contract page) win over public RPCs;
   // BNB testnet always uses the public testnet endpoint.
   const rpcUrl =

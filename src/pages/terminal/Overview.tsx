@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useTerminal } from "@/hooks/use-terminal";
+import { useNow } from "@/hooks/use-now";
 import { CHAIN_INFO } from "@/lib/flashbolt";
 import { classifyExecutionMethod } from "@/lib/execution-method";
 import { armStatus } from "@/lib/arm-status";
@@ -265,7 +266,8 @@ function StatusBanner() {
   // The same graded staleness the Contract page shows, from the same module:
   // an operator who lands here must not have to open another page to learn
   // that pins are about to refuse this arm.
-  const arm = armStatus(state?.deployments?.[chainKey]?.armedAt);
+  const now = useNow();
+  const arm = armStatus(state?.deployments?.[chainKey]?.armedAt, now);
 
   const handleToggleBot = async () => {
     await setBotRunning({ running: !running });
