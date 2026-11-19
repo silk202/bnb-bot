@@ -225,91 +225,129 @@ export async function walletSignBase64Tx(
 }
 
 // ---------------------------------------------------------------------------
-// The end-to-end live route: plan → build both legs → sign → return payloads
+// One Jupiter leg — build, tip (protected), gate, sign, submit, confirm
 // ---------------------------------------------------------------------------
 
-export interface SignedSolRoute {
-  /** Base64 SIGNED buy-leg tx (wallet's signature included). */
-  buySignedTxBase64: string;
-  /** Base64 SIGNED sell-leg tx. */
-  sellSignedTxBase64: string;
-  plan: SolLiveRoutePlan;
+/** Structural copy of the jito module's simulation expectation (no type import). */
+type LegExpectation = {
+  accounts?: string[];
+  maxLamportSpend?: bigint;
+  minLamportGain?: bigint;
+  maxComputeUnits?: number;
+};
+
+/**
+ * Submit ONE Jupiter swap leg. Shared by the arb route and the sniper so the
+ * Jito tip, the zero-gas simulation gate and confirmation are identical on
+ * every path. The tip is attached to the UNSIGNED transaction: a signed
+ * transaction cannot be modified afterwards, which is exactly how the relay
+ * previously advertised a tip it never paid.
+ */
+async function submitJupiterLeg(opts: {
+  quote: JupiterQuoteResponse;
+  provider: SolSigningProvider;
+  pubkey: string;
+  slippageBps: number;
+  priorityFeeMicroLamports?: number;
+  solRpcUrl: string;
+  jitoEngines?: string[];
+  expectation?: LegExpectation;
+}): Promise<
+  | { ok: true; sig: string; engine: string }
+  | { ok: false; engine: string; error: string }
+> {
+  const { addJitoTipToUnsignedTx, jitoSendProtectedTx, simulateSolTx, solSendPublicTx } =
+    await import("./solana-jito");
+  try {
+    const built = await jupiterBuildSwapTransaction(opts.quote, {
+      userPublicKey: opts.pubkey,
+      slippageBps: opts.slippageBps,
+      priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
+    });
+    let unsigned = built.swapTransaction;
+    if (opts.jitoEngines && opts.jitoEngines.length > 0) {
+      unsigned = (
+        await addJitoTipToUnsignedTx(unsigned, {
+          payer: opts.pubkey,
+          rpcUrl: opts.solRpcUrl,
+          engines: opts.jitoEngines,
+        })
+      ).txBase64;
+    }
+
+    // Verdict BEFORE the wallet prompt: a would-fail leg refuses without a
+    // signature. A transport error is not a verdict — the post-sign gate runs.
+    try {
+      const pre = await simulateSolTx(unsigned, {
+        rpcUrl: opts.solRpcUrl,
+        expectation: opts.expectation,
+      });
+      if (!pre.ok) {
+        return {
+          ok: false,
+          engine: "preflight-sim",
+          error: pre.error ?? "pre-sign simulation failed — nothing was signed or spent",
+        };
+      }
+    } catch {
+      // No verdict available — sign and let the post-sign gate decide.
+    }
+
+    const signed = await walletSignBase64Tx(opts.provider, unsigned);
+    const post = await simulateSolTx(signed, {
+      rpcUrl: opts.solRpcUrl,
+      expectation: opts.expectation,
+    });
+    if (!post.ok) {
+      return { ok: false, engine: "sim", error: post.error ?? "simulation failed — zero gas spent" };
+    }
+
+    const sent =
+      opts.jitoEngines && opts.jitoEngines.length > 0
+        ? await jitoSendProtectedTx(signed, { bundleOnly: true, engines: opts.jitoEngines })
+        : await solSendPublicTx(signed, { rpcUrl: opts.solRpcUrl });
+    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl);
+    if (!confirm.confirmed) {
+      return {
+        ok: false,
+        engine: sent.engine,
+        error: confirm.err ?? "transaction did not confirm",
+      };
+    }
+    return { ok: true, sig: sent.id, engine: sent.engine };
+  } catch (e) {
+    return {
+      ok: false,
+      engine: "none",
+      error: e instanceof Error ? e.message : "swap leg failed",
+    };
+  }
 }
 
 /**
- * Build + sign BOTH legs of the live arb for a mint with the connected
- * wallet. Every step is real: quotes are real, the swap txs are real, the
- * signature is the wallet's. Sequential atomicity: the sell tx is built
- * from the buy leg's expected out; both are signed BEFORE any broadcast so
- * the pair lands back-to-back (the sell reverts safely via slippage if the
- * buy landed differently).
+ * Pure realized-profit math: the wallet's SOL balance after the round trip
+ * minus its balance before the buy. Network fees, priority fees, ATA rent and
+ * the Jito tip are already reflected in the delta, so this is the number the
+ * operator actually kept — not a re-quote.
  */
-export async function buildAndSignLiveArb(opts: {
-  provider: SolSigningProvider;
-  mint: string;
-  loanLamports: number;
-  slippageBps: number;
-  priorityFeeMicroLamports?: number;
-  /** RPC used for the pre-sign simulation gates (verdict before signature). */
-  solRpcUrl: string;
-}): Promise<SignedSolRoute> {
-  const { provider, mint, loanLamports, slippageBps } = opts;
-  const pubkey = provider.publicKey?.toString();
-  if (!pubkey) {
-    throw new Error("Wallet is connected but exposes no public key — unlock it and reconnect.");
+export function realizedNetLamports(
+  initialLamports: number,
+  finalLamports: number,
+  principalLamports: number,
+): { netLamports: number; netPct: number } {
+  // No measurement, no profit: an unreadable balance must never be read as
+  // "started at zero and gained everything".
+  if (!Number.isFinite(initialLamports) || !Number.isFinite(finalLamports)) {
+    return { netLamports: 0, netPct: 0 };
   }
-
-  const plan = await priceSolRoundTrip(mint, loanLamports, slippageBps);
-  if (!plan) {
-    throw new Error("No executable Jupiter route for this token right now — route dropped honestly.");
-  }
-
-  const buyQuote = await jupiterQuoteSolToToken(mint, loanLamports, slippageBps);
-  const buyUnsigned = await jupiterBuildSwapTransaction(buyQuote, {
-    userPublicKey: pubkey,
-    slippageBps,
-    priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
-  });
-  // Verdict BEFORE the first signature: a would-fail buy leg refuses the
-  // whole route with the wallet never having opened. Transport errors carry
-  // no verdict and fall through — the post-sign simulation gate still runs.
-  const { simulateSolTx } = await import("./solana-jito");
-  try {
-    const buySim = await simulateSolTx(buyUnsigned.swapTransaction, { rpcUrl: opts.solRpcUrl });
-    if (!buySim.ok) {
-      throw new Error(
-        `buy leg would fail on-chain (${buySim.error ?? "simulation error"}) — route refused before any signature, zero gas`,
-      );
-    }
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith("buy leg would fail")) throw e;
-    // simulateTransaction transport hiccup — not a verdict; continue.
-  }
-  const sellQuote = await jupiterQuoteTokenToSol(mint, buyQuote.outAmount, slippageBps);
-  const sellUnsigned = await jupiterBuildSwapTransaction(sellQuote, {
-    userPublicKey: pubkey,
-    slippageBps,
-    priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
-  });
-
-  const buySignedTxBase64 = await walletSignBase64Tx(provider, buyUnsigned.swapTransaction);
-  // The sell leg is only signed after ITS own pre-sign simulation passes —
-  // a failing exit never asks the wallet for a second signature. The buy
-  // signature (if obtained) is never broadcast by this module on that path.
-  try {
-    const sellSim = await simulateSolTx(sellUnsigned.swapTransaction, { rpcUrl: opts.solRpcUrl });
-    if (!sellSim.ok) {
-      throw new Error(
-        `sell leg would fail on-chain (${sellSim.error ?? "simulation error"}) — buy leg signed but NOT broadcast, nothing spent`,
-      );
-    }
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith("sell leg would fail")) throw e;
-    // Transport hiccup — not a verdict; proceed (post-sign gate decides).
-  }
-  const sellSignedTxBase64 = await walletSignBase64Tx(provider, sellUnsigned.swapTransaction);
-
-  return { buySignedTxBase64, sellSignedTxBase64, plan };
+  const initial = initialLamports;
+  const final = finalLamports;
+  const principal = Number.isFinite(principalLamports) ? principalLamports : 0;
+  const netLamports = Math.round(final - initial);
+  return {
+    netLamports,
+    netPct: principal > 0 ? (netLamports / principal) * 100 : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +442,9 @@ export async function fetchTokenBalanceRaw(
   const json = await postRpc<{ value?: Array<{ account: { data: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }> }>(
     rpcUrl,
     "getTokenAccountsByOwner",
-    [owner, { mint }, { encoding: "jsonParsed" }],
+    // `confirmed` matches the confirmation the execution path waits for; the
+    // default (finalized) can lag a just-confirmed buy and look like zero.
+    [owner, { mint }, { encoding: "jsonParsed", commitment: "confirmed" }],
   );
   let total = 0n;
   for (const acc of json?.value ?? []) {
@@ -666,15 +706,28 @@ export async function executeLiveSnipeBuy(opts: {
       slippageBps: opts.slippageBps,
       priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
     });
+    const { addJitoTipToUnsignedTx, simulateSolTx, jitoSendProtectedTx, solSendPublicTx } =
+      await import("./solana-jito");
+    // Jito only selects a bundle-only tx that pays a tip, and a signed tx can
+    // no longer be modified — attach the tip to the unsigned bytes first.
+    let unsignedTx = unsigned.swapTransaction;
+    if (opts.jitoEngines && opts.jitoEngines.length > 0) {
+      unsignedTx = (
+        await addJitoTipToUnsignedTx(unsignedTx, {
+          payer: pubkey,
+          rpcUrl: opts.solRpcUrl,
+          engines: opts.jitoEngines,
+        })
+      ).txBase64;
+    }
     // PRE-FLIGHT 2 — zero-gas simulation of the EXACT unsigned tx against
     // live chain state BEFORE the wallet prompt: a would-fail swap (route
     // moved, ATA rent, slippage) is refused with the real on-chain failure
     // instead of a doomed Phantom "Failed to simulate" confirm dialog. A
     // transport-level sim error is NOT a verdict — execution continues and
     // the post-sign simulation gate still applies.
-    const { simulateSolTx, jitoSendProtectedTx, solSendPublicTx } = await import("./solana-jito");
     try {
-      const preSignSim = await simulateSolTx(unsigned.swapTransaction, {
+      const preSignSim = await simulateSolTx(unsignedTx, {
         rpcUrl: opts.solRpcUrl,
         expectation: solBuySimExpectation(pubkey, amountLamports),
       });
@@ -689,7 +742,7 @@ export async function executeLiveSnipeBuy(opts: {
     } catch {
       // No verdict available — proceed to sign; the post-sign gate decides.
     }
-    const signedTxBase64 = await walletSignBase64Tx(provider, unsigned.swapTransaction);
+    const signedTxBase64 = await walletSignBase64Tx(provider, unsignedTx);
 
     const sim = await simulateSolTx(signedTxBase64, {
       rpcUrl: opts.solRpcUrl,
@@ -715,7 +768,7 @@ export async function executeLiveSnipeBuy(opts: {
 export interface LiveSnipeSellOutcome {
   ok: boolean;
   sellSig?: string;
-  /** Realized net vs the recorded entry cost, lamports (quote-time). */
+  /** Submission channel actually used (Jito engine or public RPC URL). */
   engine: string;
   error?: string;
   soldRaw?: string;
@@ -752,12 +805,23 @@ export async function executeLiveSnipeSell(opts: {
       slippageBps: opts.slippageBps,
       priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
     });
+    const { addJitoTipToUnsignedTx, simulateSolTx, jitoSendProtectedTx, solSendPublicTx } =
+      await import("./solana-jito");
+    let unsignedTx = unsigned.swapTransaction;
+    if (opts.jitoEngines && opts.jitoEngines.length > 0) {
+      unsignedTx = (
+        await addJitoTipToUnsignedTx(unsignedTx, {
+          payer: pubkey,
+          rpcUrl: opts.solRpcUrl,
+          engines: opts.jitoEngines,
+        })
+      ).txBase64;
+    }
     // Pre-sign zero-gas simulation — same refusal-before-prompt discipline
     // as the buy leg (wallet never opens for a would-fail exit). Transport
     // errors carry no verdict and fall through to the post-sign gate.
-    const { simulateSolTx, jitoSendProtectedTx, solSendPublicTx } = await import("./solana-jito");
     try {
-      const preSignSim = await simulateSolTx(unsigned.swapTransaction, {
+      const preSignSim = await simulateSolTx(unsignedTx, {
         rpcUrl: opts.solRpcUrl,
         // Balance deltas are reported for the exit (an exit must never be
         // judged on lamport gain alone — priority fees and rent move it).
@@ -774,7 +838,7 @@ export async function executeLiveSnipeSell(opts: {
     } catch {
       // No verdict available — proceed to sign; the post-sign gate decides.
     }
-    const signedTxBase64 = await walletSignBase64Tx(provider, unsigned.swapTransaction);
+    const signedTxBase64 = await walletSignBase64Tx(provider, unsignedTx);
 
     const sim = await simulateSolTx(signedTxBase64, {
       rpcUrl: opts.solRpcUrl,
@@ -803,10 +867,18 @@ export interface LiveArbOutcome {
   buySig?: string;
   /** Real sell-leg signature (present once the sell was broadcast). */
   sellSig?: string;
-  /** Real quoted net in lamports (sellOut − buyIn at execution quotes). */
+  /**
+   * REALIZED net in lamports: the wallet's SOL balance after the sell minus
+   * its balance before the buy. Fees, priority fee, ATA rent and any Jito tip
+   * are already inside that delta, so this is what the operator actually kept.
+   */
   netLamports: number;
-  /** Net ROI percent at execution quotes. */
+  /** Realized net ROI against the clip that was deployed. */
   netPct: number;
+  /** Quote-time expected net across both legs — for comparison, not profit. */
+  quotedNetLamports?: number;
+  /** Quote-time expected ROI. */
+  quotedNetPct?: number;
   /** Submission channel actually used. */
   engine: string;
   /** Honest failure description when ok is false. */
@@ -821,13 +893,22 @@ export interface LiveArbOutcome {
 }
 
 /**
+ * Venue labels from a real Jupiter route plan (empty strings dropped).
+ */
+function routeLabels(quote: JupiterQuoteResponse): string[] {
+  return (quote.routePlan ?? []).map((s) => s.swapInfo?.label ?? "").filter(Boolean);
+}
+
+/**
  * Execute a REAL two-leg live arb end-to-end with the connected wallet:
- * build both legs from live Jupiter quotes → wallet signs → zero-gas
- * simulation of the buy leg → submit through Jito (protected) or the public
- * RPC → wait for the buy to confirm → submit the sell → wait. Every number
- * in the outcome is real; any failure aborts honestly with what actually
- * happened (the sell is only fired after the buy confirms — if the buy
- * itself failed, nothing more is broadcast).
+ * quote the buy → simulate → sign → submit (Jito protected when enabled) →
+ * confirm → read the tokens actually received → quote/simulate/sign/submit the
+ * sell for exactly that amount → confirm → measure the wallet's SOL delta.
+ *
+ * The sell is deliberately built AFTER the buy confirms. A pre-buy sell
+ * simulation can only fail (the wallet does not hold the tokens yet), and the
+ * old order therefore refused every fresh route after signing the buy. Profit
+ * is reported from the post-sell balance, not from a re-quote.
  */
 export async function executeLiveArb(opts: {
   mint: string;
@@ -857,24 +938,27 @@ export async function executeLiveArb(opts: {
   if (!provider?.publicKey) {
     return { ok: false, netLamports: 0, netPct: 0, engine: "none", venues: [], error: "no-wallet" };
   }
-  const { simulateSolTx, jitoSendProtectedTx, solSendPublicTx } = await import("./solana-jito");
+  const pubkey = provider.publicKey.toString();
   const { onPhase, solRpcUrl, jitoEngines, mint, slippageBps } = opts;
-  const send = async (signedBase64: string): Promise<{ id: string; engine: string }> =>
-    jitoEngines && jitoEngines.length > 0
-      ? jitoSendProtectedTx(signedBase64, { bundleOnly: true, engines: jitoEngines })
-      : solSendPublicTx(signedBase64, { rpcUrl: solRpcUrl });
+  const fail = (
+    engine: string,
+    error: string,
+    extra: Partial<LiveArbOutcome> = {},
+  ): LiveArbOutcome => ({
+    ok: false,
+    netLamports: 0,
+    netPct: 0,
+    engine,
+    venues: [],
+    error,
+    ...extra,
+  });
 
   try {
-    // Balance pre-flight BEFORE the first wallet prompt: the two-leg route
-    // is refused inline (exact shortfall numbers) when the wallet cannot
-    // cover the loan size + fees/rent. With fitToWallet the clip is instead
-    // FITTED down to what the wallet can front so an oversized signal lands
-    // as a real, smaller trade — never a doomed Phantom popup.
-    const afford = await preflightSolBuyBalance(
-      solRpcUrl,
-      provider.publicKey.toString(),
-      opts.loanLamports,
-    );
+    // Balance pre-flight BEFORE the first wallet prompt: the route is refused
+    // inline (exact shortfall numbers) when the wallet cannot cover the clip
+    // plus fees/rent. With fitToWallet the clip shrinks instead.
+    const afford = await preflightSolBuyBalance(solRpcUrl, pubkey, opts.loanLamports);
     let loanLamports = opts.loanLamports;
     let fit: LiveArbOutcome["fit"];
     if (!afford.ok) {
@@ -884,92 +968,96 @@ export async function executeLiveArb(opts: {
         fit = { requestedLamports: opts.loanLamports, loanLamports };
         onPhase?.("fitted");
       } else {
-        return {
-          ok: false,
-          netLamports: 0,
-          netPct: 0,
-          engine: "preflight-balance",
-          venues: [],
-          error: opts.fitToWallet ? walletFit.message : afford.message,
-        };
+        return fail("preflight-balance", opts.fitToWallet ? walletFit.message : afford.message);
       }
     }
+
     onPhase?.("quoting");
-    const signed = await buildAndSignLiveArb({
+    const buyQuote = await jupiterQuoteSolToToken(mint, loanLamports, slippageBps);
+    const buyVenues = routeLabels(buyQuote);
+
+    // REALIZED-PROFIT BASELINE — read before the buy, so the closing delta is
+    // a measurement of this round trip rather than an estimate.
+    const initialSol = await solRpcCall<number>(solRpcUrl, "getBalance", [
+      pubkey,
+      { commitment: "confirmed" },
+    ]);
+    const tokenBefore = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint).catch(() => "0");
+
+    onPhase?.("buy");
+    const buy = await submitJupiterLeg({
+      quote: buyQuote,
       provider,
-      mint,
-      loanLamports,
+      pubkey,
       slippageBps,
       priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
       solRpcUrl,
+      jitoEngines,
+      expectation: solBuySimExpectation(pubkey, loanLamports),
     });
-    const venues = [...signed.plan.buyVenueLabels, ...signed.plan.sellVenueLabels];
-
-    onPhase?.("simulating");
-    const sim = await simulateSolTx(signed.buySignedTxBase64, { rpcUrl: solRpcUrl });
-    if (!sim.ok) {
-      return {
-        ok: false,
-        netLamports: 0,
-        netPct: 0,
-        engine: jitoEngines?.length ? "jito" : "public",
-        venues,
-        error: sim.error ?? "buy-leg simulation failed — tx dropped, zero gas",
-      };
-    }
-
-    onPhase?.("buy");
-    const buy = await send(signed.buySignedTxBase64);
+    if (!buy.ok) return fail(buy.engine, buy.error, { venues: buyVenues });
     onPhase?.("buy-confirm");
-    const buyC = await waitForSigConfirm(buy.id, solRpcUrl);
-    if (!buyC.confirmed) {
-      return {
-        ok: false,
-        buySig: buy.id,
-        netLamports: 0,
-        netPct: 0,
-        engine: buy.engine,
-        venues,
-        error: buyC.err ?? "buy leg did not confirm — sell never fired",
-      };
+
+    // Sell ONLY what this route bought: the delta over the pre-buy balance, so
+    // an arb signal never liquidates tokens the wallet already held.
+    const tokenAfter = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint);
+    const boughtRaw = BigInt(tokenAfter) - BigInt(tokenBefore);
+    if (boughtRaw <= 0n) {
+      return fail(
+        "buy",
+        `buy ${buy.sig.slice(0, 10)}… confirmed but no tokens arrived (balance ${tokenBefore} → ${tokenAfter}) — not selling existing holdings`,
+        { buySig: buy.sig, venues: buyVenues },
+      );
     }
 
+    // Quote/simulate/sign the sell AFTER the buy lands, against tokens actually
+    // held. The old order simulated it before the buy, when the balance was
+    // still zero, so every fresh route refused after the buy was signed.
     onPhase?.("sell");
-    const sell = await send(signed.sellSignedTxBase64);
-    onPhase?.("sell-confirm");
-    const sellC = await waitForSigConfirm(sell.id, solRpcUrl);
-    if (!sellC.confirmed) {
-      return {
-        ok: false,
-        buySig: buy.id,
-        sellSig: sell.id,
-        netLamports: 0,
-        netPct: 0,
-        engine: sell.engine,
-        venues,
-        error: sellC.err ?? "sell leg failed on-chain (tokens held — sell manually or retry)",
-      };
+    const sellQuote = await jupiterQuoteTokenToSol(mint, boughtRaw.toString(), slippageBps);
+    const venues = [...buyVenues, ...routeLabels(sellQuote)];
+    const sell = await submitJupiterLeg({
+      quote: sellQuote,
+      provider,
+      pubkey,
+      slippageBps,
+      priorityFeeMicroLamports: opts.priorityFeeMicroLamports,
+      solRpcUrl,
+      jitoEngines,
+      expectation: { accounts: [pubkey], maxComputeUnits: 1_400_000 },
+    });
+    if (!sell.ok) {
+      return fail(
+        sell.engine,
+        `${sell.error} — buy ${buy.sig.slice(0, 10)}… landed and the bought tokens are held; sell manually`,
+        { buySig: buy.sig, venues },
+      );
     }
+    onPhase?.("sell-confirm");
 
+    const finalSol = await solRpcCall<number>(solRpcUrl, "getBalance", [
+      pubkey,
+      { commitment: "confirmed" },
+    ]);
+    const realized = realizedNetLamports(initialSol, finalSol, loanLamports);
+    const quotedNet = Number(sellQuote.outAmount) - Number(buyQuote.inAmount);
     return {
       ok: true,
-      buySig: buy.id,
-      sellSig: sell.id,
-      netLamports: signed.plan.expectedNetLamports,
-      netPct: signed.plan.expectedNetPct,
+      buySig: buy.sig,
+      sellSig: sell.sig,
+      netLamports: realized.netLamports,
+      netPct: realized.netPct,
+      quotedNetLamports: quotedNet,
+      quotedNetPct: loanLamports > 0 ? (quotedNet / loanLamports) * 100 : 0,
       engine: sell.engine,
       venues,
       fit,
     };
   } catch (e) {
-    return {
-      ok: false,
-      netLamports: 0,
-      netPct: 0,
-      engine: jitoEngines?.length ? "jito" : "public",
-      venues: [],
-      error: e instanceof Error ? e.message : "live route failed",
-    };
+    return fail(
+      jitoEngines?.length ? "jito" : "public",
+      e instanceof Error ? e.message : "live route failed",
+    );
   }
 }
 

@@ -245,6 +245,116 @@ export async function jitoSendBundle(
   throw new Error("Jito bundle submission failed: " + errors[0]);
 }
 
+/**
+ * Jito tip accounts — fetched from the block engine itself (`getTipAccounts`)
+ * and cached per engine. Hard-coding a list here would silently rot when Jito
+ * rotates accounts, and a wrong tip account means the bundle never lands.
+ */
+const tipAccountCache = new Map<string, string[]>();
+
+export async function fetchJitoTipAccounts(engine: string): Promise<string[]> {
+  const base = engine.replace(/\/$/, "");
+  const cached = tipAccountCache.get(base);
+  if (cached && cached.length > 0) return cached;
+  const rpc = await postJson<{ result?: string[]; error?: { message?: string } }>(
+    base + "/api/v1/bundles",
+    { jsonrpc: "2.0", id: 1, method: "getTipAccounts", params: [] },
+  );
+  if (rpc.error) throw new Error(rpc.error.message ?? "getTipAccounts rejected");
+  if (!Array.isArray(rpc.result) || rpc.result.length === 0) {
+    throw new Error("Jito returned no tip accounts — protected submission is unavailable");
+  }
+  tipAccountCache.set(base, rpc.result);
+  return rpc.result;
+}
+
+/** Deterministic pick from the fetched list (seeded in tests). */
+export function pickJitoTipAccount(accounts: string[], seed = Math.random()): string {
+  if (accounts.length === 0) throw new Error("no Jito tip accounts to pick from");
+  const clamped = Math.min(0.999999, Math.max(0, Number.isFinite(seed) ? seed : 0));
+  return accounts[Math.floor(clamped * accounts.length)]!;
+}
+
+/**
+ * Attach the Jito tip to an UNSIGNED base64 transaction, before the wallet
+ * signs. `bundleOnly=true` submissions are only selected when the transaction
+ * itself pays a tip; without this instruction the relay claim in the UI is
+ * false and the bundle is dropped. Address lookup tables are resolved so the
+ * message can be decompiled and recompiled without losing accounts.
+ *
+ * Refuses (rather than silently sending an untipped tx) when the tip accounts,
+ * a lookup table or the 1232-byte packet limit cannot be satisfied.
+ */
+export async function addJitoTipToUnsignedTx(
+  unsignedBase64: string,
+  opts: {
+    payer: string;
+    rpcUrl: string;
+    engines?: readonly string[];
+    tipLamports?: number;
+  },
+): Promise<{ txBase64: string; tipLamports: number; tipAccount: string }> {
+  const engines = opts.engines ?? JITO_BLOCK_ENGINES.mainnet;
+  const tipAccounts = await fetchJitoTipAccounts(engines[0] ?? JITO_BLOCK_ENGINES.mainnet[0]!);
+  const tipAccount = pickJitoTipAccount(tipAccounts);
+  const tipLamports = Math.max(
+    JITO_MIN_TIP_LAMPORTS,
+    Math.floor(Number.isFinite(opts.tipLamports) ? (opts.tipLamports as number) : JITO_MIN_TIP_LAMPORTS),
+  );
+
+  const { Connection, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } =
+    await import("@solana/web3.js");
+  const { Buffer } = await import("buffer");
+  const tx = VersionedTransaction.deserialize(new Uint8Array(Buffer.from(unsignedBase64, "base64")));
+
+  const lookups = [];
+  const connection = new Connection(opts.rpcUrl, "confirmed");
+  for (const lookup of tx.message.addressTableLookups) {
+    const res = await connection.getAddressLookupTable(lookup.accountKey);
+    if (!res.value) {
+      throw new Error(
+        `lookup table ${lookup.accountKey.toBase58()} is not available — cannot attach the Jito tip safely`,
+      );
+    }
+    lookups.push(res.value);
+  }
+
+  const message = TransactionMessage.decompile(tx.message, {
+    addressLookupTableAccounts: lookups,
+  });
+  if (message.payerKey.toBase58() !== opts.payer) {
+    throw new Error(
+      `transaction fee payer ${message.payerKey.toBase58()} is not the signing wallet ${opts.payer} — refusing to add a tip`,
+    );
+  }
+  message.instructions.push(
+    SystemProgram.transfer({
+      fromPubkey: new PublicKey(opts.payer),
+      toPubkey: new PublicKey(tipAccount),
+      lamports: tipLamports,
+    }),
+  );
+
+  const compiled = message.compileToV0Message(lookups);
+  // Wire format needs one (zeroed) signature slot per required signer; the
+  // wallet fills them when it signs the serialized bytes.
+  const next = new VersionedTransaction(compiled);
+  next.signatures = new Array(compiled.header.numRequiredSignatures).fill(
+    new Uint8Array(64),
+  ) as Uint8Array[];
+  const bytes = next.serialize();
+  if (bytes.length > 1232) {
+    throw new Error(
+      `attaching the Jito tip would make the transaction ${bytes.length} bytes, above the 1232-byte packet limit — shrink the route`,
+    );
+  }
+  return {
+    txBase64: Buffer.from(bytes).toString("base64"),
+    tipLamports,
+    tipAccount,
+  };
+}
+
 /** Human label for the relay column — mirrors the BNB terminal's relay field. */
 export const JITO_RELAY_LABEL = "Jito block-engine (protected)";
 

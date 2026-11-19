@@ -198,3 +198,75 @@ Items 1–6 are small, testable changes in the existing TypeScript engine and do
 not touch the deployed EVM contract or require a program deployment. Item 7 is
 the multi-week program build the V3 document describes, and it is blocked on
 source, toolchain, a funded authority, and audit.
+
+## Remediation — 2026-11-19 (sell order, tip, realized PnL, vault gate)
+
+Four of the findings above are fixed in the TypeScript engine. No EVM code, no
+contract, and no deployment was touched.
+
+### Sell leg runs after the buy, against tokens actually held
+
+`buildAndSignLiveArb` is gone. `executeLiveArb` now quotes the buy, submits and
+confirms it, reads the token balance delta over the pre-buy balance, and only
+then quotes/simulates/signs/submits the sell for exactly the tokens this route
+bought (`src/lib/solana-live-execution.ts`). Pre-existing holdings are no longer
+sold by an arb signal, and a fresh route no longer dies at a sell simulation
+that ran while the wallet still held zero tokens.
+
+### The Jito tip is attached before signing
+
+`addJitoTipToUnsignedTx` (`src/lib/solana-jito.ts`) fetches the tip accounts
+from the block engine itself (`getTipAccounts`, cached per engine — no
+hard-coded list to rot), decompiles the unsigned transaction (resolving address
+lookup tables through the RPC), appends a `SystemProgram.transfer` tip, checks
+the 1232-byte packet limit, and re-serializes with placeholder signature slots.
+If the tip accounts, a lookup table or the size limit cannot be satisfied, it
+refuses instead of submitting an untipped "protected" transaction.
+
+Both legs of the arb and both sniper legs go through one `submitJupiterLeg`
+helper, so the tip is applied on every Jito path (`executeLiveSnipeBuy`,
+`executeLiveSnipeSell`, `executeLiveArb`), before the wallet signs.
+
+### Profit is realized, not re-quoted
+
+`executeLiveArb` records the wallet's SOL balance before the buy and after the
+sell confirms (commitment `confirmed`, matching the confirmation it waits for)
+and reports `netLamports` / `netPct` from that delta. Priority fee, Jito tip,
+ATA rent and network fees are inside the number. The quote-time expectation is
+kept separately as `quotedNetLamports` / `quotedNetPct`. `realizedNetLamports`
+returns zero rather than inventing profit from an unreadable balance, and token
+balances are now read at `confirmed` commitment so a just-landed buy is not
+mistaken for zero.
+
+### The vault signer refuses foreign transactions
+
+`vaultSignerVerdict` (`src/lib/solana-vault.ts`) gates the in-memory key before
+it signs: the fee payer must be the vaulted address, every program must be on
+`VAULT_ALLOWED_PROGRAMS` (Jupiter v6, SPL Token, Token-2022, ATA, Compute
+Budget, Memo, System), and System instructions are limited to `transfer` (the
+tip). Unknown programs and authority-changing System instructions are refused
+with the offending program/instruction named.
+
+### Verification
+
+- `bun test`: 662 pass / 0 fail (54 files).
+- `tsc -b --noEmit` clean; eslint clean on every touched file.
+- New tests: `src/lib/solana-vault-signer.test.ts` (fee payer, unknown program,
+  System non-transfer, malformed data, allowlist), `src/lib/solana-live-execution.test.ts`
+  (realized gain/loss, rounding, unreadable balances, zero clip), and a tip test
+  in `src/lib/solana-jito.test.ts` that deserializes the result and asserts a
+  real System transfer was appended with the right payer and signature slots.
+
+### Still open
+
+- **No flash-loan adapter.** The route is still a self-funded round trip; the
+  lender labels remain display-only until a provider adapter borrows and repays
+  inside one transaction.
+- **No execution-time profit floor.** The scanner's floor still applies to the
+  DexScreener spread; `executeLiveArb` does not yet receive a minimum realized
+  profit.
+- **Cluster integrity.** `testnet` still maps to devnet and no genesis-hash
+  check runs before signing.
+- **Tip insertion with address lookup tables has not been exercised against a
+  live RPC here** — the unit test covers a message without lookups; the ALT
+  fetch path is typechecked and reviewed, not run.

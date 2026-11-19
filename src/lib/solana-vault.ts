@@ -67,9 +67,8 @@ function activeStorage(): VaultStorage | null {
 
 // ── Module memory — the ONLY place plaintext material and keys live ──
 let aesKey: CryptoKey | null = null;
-let cachedSalt: Uint8Array | null = null;
 const memorySecrets = new Map<string, Uint8Array>(); // address → 64-byte secret
-let watchOnly = new Set<string>(); // addresses imported without a secret
+const watchOnly = new Set<string>(); // addresses imported without a secret
 
 // ── base64 helpers (Uint8Array-safe) ──
 function b64encode(bytes: Uint8Array): string {
@@ -179,7 +178,6 @@ export async function unlockVault(passphrase: string): Promise<boolean> {
     return false;
   }
   aesKey = key;
-  cachedSalt = salt;
   memorySecrets.clear();
   for (const [address, entry] of Object.entries(blob.wallets)) {
     try {
@@ -239,7 +237,6 @@ export async function importToVault(
     const salt = crypto.getRandomValues(new Uint8Array(16));
     key = await deriveAesKey(passphrase, salt);
     blob = { v: 1, salt: b64encode(salt), wallets: {} };
-    cachedSalt = salt;
   }
 
   blob.wallets[wallet.address] = await encryptSecret(key, secret);
@@ -265,7 +262,6 @@ export function addWatchOnlyAddress(address: string): boolean {
 export function lockVault(): void {
   memorySecrets.clear();
   aesKey = null;
-  cachedSalt = null;
 }
 
 /**
@@ -292,7 +288,6 @@ export function removeFromVault(address: string): boolean {
     if (Object.keys(blob.wallets).length === 0) {
       activeStorage()?.removeItem(STORAGE_KEY);
       aesKey = null;
-      cachedSalt = null;
     } else {
       writeBlob(blob);
     }
@@ -382,6 +377,79 @@ function encodeBs58(bytes: Uint8Array): string {
 }
 
 /**
+ * Programs the in-memory signer will sign for. The vault has no wallet
+ * confirmation dialog, so the transaction it is handed must be one a FlashBolt
+ * route can actually need: a DEX aggregator swap, SPL token movement and the
+ * compute/system/tip bookkeeping around it. Anything else is refused by name
+ * instead of being signed blindly.
+ */
+export const VAULT_ALLOWED_PROGRAMS: Record<string, string> = {
+  JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4: "Jupiter aggregator v6",
+  TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA: "SPL Token",
+  TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb: "Token-2022",
+  ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL: "Associated Token Account",
+  ComputeBudget111111111111111111111111111111: "Compute Budget",
+  "11111111111111111111111111111111": "System (transfer only)",
+  MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr: "Memo",
+};
+
+/** The only System instruction the vault signs: `transfer` (u32 LE index 2). */
+const SYSTEM_TRANSFER_IX = 2;
+
+export interface VaultSignerInstruction {
+  programId: string;
+  data?: Uint8Array | null;
+}
+
+export type VaultSignerVerdict = { ok: true } | { ok: false; error: string };
+
+function systemInstructionIndex(data?: Uint8Array | null): number {
+  if (!data || data.length < 4) return -1;
+  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0, true);
+}
+
+/**
+ * Pure gate the in-memory signer applies before touching the key:
+ *  • the fee payer must be the vaulted address (no paying for someone else's
+ *    transaction),
+ *  • every program must be allowlisted above,
+ *  • System instructions are limited to `transfer` (a tip), so an `assign` or
+ *    authority-changing instruction is never signed silently.
+ */
+export function vaultSignerVerdict(opts: {
+  signer: string;
+  feePayer: string | null;
+  instructions: VaultSignerInstruction[];
+}): VaultSignerVerdict {
+  if (!opts.feePayer) return { ok: false, error: "transaction has no fee payer" };
+  if (opts.feePayer !== opts.signer) {
+    return {
+      ok: false,
+      error: `fee payer ${opts.feePayer} is not the vault signer ${opts.signer}`,
+    };
+  }
+  for (const ix of opts.instructions) {
+    const label = VAULT_ALLOWED_PROGRAMS[ix.programId];
+    if (!label) {
+      return {
+        ok: false,
+        error: `program ${ix.programId} is not on the vault's approved list`,
+      };
+    }
+    if (ix.programId === "11111111111111111111111111111111") {
+      const index = systemInstructionIndex(ix.data);
+      if (index !== SYSTEM_TRANSFER_IX) {
+        return {
+          ok: false,
+          error: `System instruction #${index} is not a transfer — the vault only signs a tip transfer`,
+        };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/**
  * The vault's REAL signing provider for an imported wallet: an in-memory
  * Keypair signing synchronously — no extension, no prompt. Returns null
  * while locked (the caller must fall back to the injected wallet honestly).
@@ -404,10 +472,27 @@ export function makeKeypairSigner(address: string, secret64: Uint8Array): SolSig
       const { Keypair, VersionedTransaction, Transaction } = await import("@solana/web3.js");
       const keypair = Keypair.fromSecretKey(secret64);
       if (tx instanceof VersionedTransaction) {
+        const msg = tx.message;
+        const feePayer = msg.staticAccountKeys[0]?.toBase58() ?? null;
+        const instructions = msg.compiledInstructions.map((ix) => ({
+          programId: msg.staticAccountKeys[ix.programIdIndex]!.toBase58(),
+          data: ix.data,
+        }));
+        const verdict = vaultSignerVerdict({ signer: address, feePayer, instructions });
+        if (!verdict.ok) throw new Error(`Vault signer refused: ${verdict.error}`);
         tx.sign([keypair]); // real ed25519 signature, in-process
         return tx;
       }
       if (tx instanceof Transaction) {
+        const verdict = vaultSignerVerdict({
+          signer: address,
+          feePayer: tx.feePayer?.toBase58() ?? null,
+          instructions: tx.instructions.map((ix) => ({
+            programId: ix.programId.toBase58(),
+            data: ix.data,
+          })),
+        });
+        if (!verdict.ok) throw new Error(`Vault signer refused: ${verdict.error}`);
         tx.partialSign(keypair);
         return tx;
       }
