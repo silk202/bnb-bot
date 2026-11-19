@@ -22,6 +22,14 @@
  */
 
 import { LAMPORTS_PER_SOL } from "./solana-jito";
+import {
+  SOL_VAULT_MIN_SWAP_LAMPORTS,
+  clusterPinVerdict,
+  profitFloorVerdict,
+  solProfitFloorLamports,
+  solWalletRole,
+  type SolWalletRole,
+} from "./solana-policy";
 import { fetchWithTimeout } from "./fetch-timeout";
 
 // ---------------------------------------------------------------------------
@@ -890,6 +898,14 @@ export interface LiveArbOutcome {
    * (requested vs executed lamports) — the report should say so.
    */
   fit?: { requestedLamports: number; loanLamports: number };
+  /** Which wallet signed: the in-app vault or a connected external wallet. */
+  walletRole: SolWalletRole;
+  /** The execution-time profit floor (lamports) this route was judged on. */
+  floorLamports?: number;
+  /** False when the post-buy exit quote netted below the floor. */
+  floorMet?: boolean;
+  /** False when the closing balance could not be read (netLamports is 0). */
+  netMeasured?: boolean;
 }
 
 /**
@@ -932,13 +948,39 @@ export async function executeLiveArb(opts: {
    * as a real, smaller trade. Below the floor the refusal stands.
    */
   fitToWallet?: boolean;
+  /**
+   * Genesis hash the RPC must report before any quote or signature. When set,
+   * a mismatched / unreadable hash refuses with both values (cluster pin).
+   */
+  expectedGenesis?: string;
+  /** Execution-time profit floor as a percent of the deployed clip. */
+  minProfitPct?: number;
+  /** Absolute profit floor in lamports; the larger of this and the percent wins. */
+  minProfitLamports?: number;
+  /**
+   * Minimum clip in lamports. Defaults to the vault floor (0.05 SOL) for a
+   * vault-signed route and 0 for an external wallet.
+   */
+  minLoanLamports?: number;
   onPhase?: (phase: string) => void;
 }): Promise<LiveArbOutcome> {
   const provider = await resolveLiveSigner(opts.provider);
   if (!provider?.publicKey) {
-    return { ok: false, netLamports: 0, netPct: 0, engine: "none", venues: [], error: "no-wallet" };
+    return {
+      ok: false,
+      netLamports: 0,
+      netPct: 0,
+      engine: "none",
+      venues: [],
+      error: "no-wallet",
+      walletRole: "none",
+    };
   }
   const pubkey = provider.publicKey.toString();
+  // The in-app vault is the VAULT wallet; a connected extension is EXTERNAL.
+  // Only the vault carries the 0.05 SOL minimum clip below.
+  const { vaultSignerAddresses } = await import("./solana-vault");
+  const walletRole = solWalletRole(pubkey, vaultSignerAddresses());
   const { onPhase, solRpcUrl, jitoEngines, mint, slippageBps } = opts;
   const fail = (
     engine: string,
@@ -950,11 +992,26 @@ export async function executeLiveArb(opts: {
     netPct: 0,
     engine,
     venues: [],
+    walletRole,
     error,
     ...extra,
   });
 
   try {
+    // ── CLUSTER PIN ── verify the RPC serves the pinned chain BEFORE any
+    // quote or signature. A refused read is a refusal, not a pass.
+    if (opts.expectedGenesis !== undefined) {
+      onPhase?.("cluster");
+      let observed: string | null = null;
+      try {
+        observed = await solRpcCall<string>(solRpcUrl, "getGenesisHash", []);
+      } catch {
+        observed = null;
+      }
+      const pin = clusterPinVerdict(opts.expectedGenesis, observed);
+      if (!pin.ok) return fail("cluster-pin", pin.message);
+    }
+
     // Balance pre-flight BEFORE the first wallet prompt: the route is refused
     // inline (exact shortfall numbers) when the wallet cannot cover the clip
     // plus fees/rent. With fitToWallet the clip shrinks instead.
@@ -972,17 +1029,75 @@ export async function executeLiveArb(opts: {
       }
     }
 
+    // Vault minimum clip — a vault-signed Jupiter swap below 0.05 SOL is
+    // fee/rent noise, so it is refused with the exact numbers.
+    const minLoan =
+      opts.minLoanLamports ??
+      (walletRole === "vault" ? SOL_VAULT_MIN_SWAP_LAMPORTS : 0);
+    if (loanLamports < minLoan) {
+      return fail(
+        "min-clip",
+        `Clip ${fmtSol(loanLamports)} SOL is below the ${fmtSol(minLoan)} SOL minimum for the ${walletRole} wallet — nothing was signed or spent.`,
+      );
+    }
+
+    // REALIZED-PROFIT BASELINE — read before the buy, so the closing delta is
+    // a measurement of this round trip rather than an estimate. A read
+    // failure ABORTS: without a real starting balance the profit report would
+    // be invented, and tokenBefore=0 would sell pre-existing holdings.
+    onPhase?.("baseline");
+    let initialSol: number;
+    let tokenBefore: string;
+    try {
+      initialSol = await solRpcCall<number>(solRpcUrl, "getBalance", [
+        pubkey,
+        { commitment: "confirmed" },
+      ]);
+      if (typeof initialSol !== "number" || !Number.isFinite(initialSol)) {
+        throw new Error("getBalance returned no numeric balance");
+      }
+      tokenBefore = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : "RPC read failed";
+      return fail(
+        "preflight-read",
+        `Could not read the pre-trade baseline (${why}) — refusing to sign: without a measured starting balance the realised profit would be invented.`,
+      );
+    }
+
     onPhase?.("quoting");
     const buyQuote = await jupiterQuoteSolToToken(mint, loanLamports, slippageBps);
     const buyVenues = routeLabels(buyQuote);
 
-    // REALIZED-PROFIT BASELINE — read before the buy, so the closing delta is
-    // a measurement of this round trip rather than an estimate.
-    const initialSol = await solRpcCall<number>(solRpcUrl, "getBalance", [
-      pubkey,
-      { commitment: "confirmed" },
-    ]);
-    const tokenBefore = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint).catch(() => "0");
+    // ── EXECUTION-TIME PROFIT FLOOR ── price the exit against the buy output
+    // before signing. The sell transaction is still built AFTER the buy (the
+    // tokens do not exist yet), but this quote is exact enough to refuse a
+    // route that cannot clear the floor.
+    onPhase?.("floor");
+    const floor = solProfitFloorLamports(
+      loanLamports,
+      opts.minProfitPct,
+      opts.minProfitLamports,
+    );
+    let preSellQuote: JupiterQuoteResponse;
+    try {
+      preSellQuote = await jupiterQuoteTokenToSol(mint, buyQuote.outAmount, slippageBps);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : "exit quote failed";
+      return fail("profit-floor", `Could not price the exit leg (${why}) — nothing was signed.`, {
+        venues: buyVenues,
+      });
+    }
+    const preQuotedNet = Number(preSellQuote.outAmount) - Number(buyQuote.inAmount);
+    const floorCheck = profitFloorVerdict(preQuotedNet, floor);
+    if (!floorCheck.ok) {
+      return fail("profit-floor", floorCheck.message, {
+        quotedNetLamports: Math.round(preQuotedNet),
+        quotedNetPct: loanLamports > 0 ? (preQuotedNet / loanLamports) * 100 : 0,
+        floorLamports: floor.floorLamports,
+        venues: [...buyVenues, ...routeLabels(preSellQuote)],
+      });
+    }
 
     onPhase?.("buy");
     const buy = await submitJupiterLeg({
@@ -999,8 +1114,19 @@ export async function executeLiveArb(opts: {
     onPhase?.("buy-confirm");
 
     // Sell ONLY what this route bought: the delta over the pre-buy balance, so
-    // an arb signal never liquidates tokens the wallet already held.
-    const tokenAfter = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint);
+    // an arb signal never liquidates tokens the wallet already held. An
+    // unreadable balance aborts the sell rather than guessing an amount.
+    let tokenAfter: string;
+    try {
+      tokenAfter = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : "token balance read failed";
+      return fail(
+        "read-after-buy",
+        `Buy ${buy.sig.slice(0, 10)}… confirmed but the token balance could not be read (${why}) — not selling a guessed amount; the bought tokens are held, sell manually.`,
+        { buySig: buy.sig, venues: buyVenues },
+      );
+    }
     const boughtRaw = BigInt(tokenAfter) - BigInt(tokenBefore);
     if (boughtRaw <= 0n) {
       return fail(
@@ -1016,6 +1142,11 @@ export async function executeLiveArb(opts: {
     onPhase?.("sell");
     const sellQuote = await jupiterQuoteTokenToSol(mint, boughtRaw.toString(), slippageBps);
     const venues = [...buyVenues, ...routeLabels(sellQuote)];
+    // Re-check the floor on the exit quote for the tokens actually bought. The
+    // position is still closed (holding it is worse than a thin exit), but the
+    // outcome says plainly that the executed exit fell below the floor.
+    const exitNet = Number(sellQuote.outAmount) - Number(buyQuote.inAmount);
+    const floorMet = exitNet >= floor.floorLamports;
     const sell = await submitJupiterLeg({
       quote: sellQuote,
       provider,
@@ -1035,23 +1166,39 @@ export async function executeLiveArb(opts: {
     }
     onPhase?.("sell-confirm");
 
-    const finalSol = await solRpcCall<number>(solRpcUrl, "getBalance", [
-      pubkey,
-      { commitment: "confirmed" },
-    ]);
-    const realized = realizedNetLamports(initialSol, finalSol, loanLamports);
-    const quotedNet = Number(sellQuote.outAmount) - Number(buyQuote.inAmount);
+    // Closing balance — the realized number. A read failure is reported as an
+    // unmeasured PnL (net 0), never as a fabricated gain; the sell did land.
+    let measuredFinalSol: number | null = null;
+    try {
+      const value = await solRpcCall<number>(solRpcUrl, "getBalance", [
+        pubkey,
+        { commitment: "confirmed" },
+      ]);
+      measuredFinalSol =
+        typeof value === "number" && Number.isFinite(value) ? value : null;
+    } catch {
+      measuredFinalSol = null;
+    }
+    const realized = realizedNetLamports(
+      initialSol,
+      measuredFinalSol ?? initialSol,
+      loanLamports,
+    );
     return {
       ok: true,
       buySig: buy.sig,
       sellSig: sell.sig,
-      netLamports: realized.netLamports,
-      netPct: realized.netPct,
-      quotedNetLamports: quotedNet,
-      quotedNetPct: loanLamports > 0 ? (quotedNet / loanLamports) * 100 : 0,
+      netLamports: measuredFinalSol === null ? 0 : realized.netLamports,
+      netPct: measuredFinalSol === null ? 0 : realized.netPct,
+      netMeasured: measuredFinalSol !== null,
+      quotedNetLamports: Math.round(exitNet),
+      quotedNetPct: loanLamports > 0 ? (exitNet / loanLamports) * 100 : 0,
       engine: sell.engine,
       venues,
       fit,
+      walletRole,
+      floorLamports: floor.floorLamports,
+      floorMet,
     };
   } catch (e) {
     return fail(

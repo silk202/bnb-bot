@@ -262,11 +262,43 @@ with the offending program/instruction named.
 - **No flash-loan adapter.** The route is still a self-funded round trip; the
   lender labels remain display-only until a provider adapter borrows and repays
   inside one transaction.
-- **No execution-time profit floor.** The scanner's floor still applies to the
-  DexScreener spread; `executeLiveArb` does not yet receive a minimum realized
-  profit.
-- **Cluster integrity.** `testnet` still maps to devnet and no genesis-hash
-  check runs before signing.
 - **Tip insertion with address lookup tables has not been exercised against a
   live RPC here** — the unit test covers a message without lookups; the ALT
   fetch path is typechecked and reviewed, not run.
+
+## Second pass — read-abort, execution-time floor, cluster pin, rails
+
+Engine and terminal changes, still TypeScript only (no EVM, no program):
+
+- **Abort on read failure.** `executeLiveArb` refuses (`preflight-read`) when
+  the pre-trade SOL or token balance cannot be read, instead of the old
+  `.catch(() => "0")` that would have sold pre-existing holdings; a failed
+  read after the buy refuses to sell a guessed amount (`read-after-buy`), and
+  an unreadable closing balance reports `netMeasured: false` with net 0 rather
+  than inventing a gain.
+- **Execution-time profit floor.** The buy output is priced back to SOL before
+  anything is signed; `profitFloorVerdict` compares the quoted net against the
+  operator's percent floor on the clip that actually lands and refuses with
+  both numbers (`profit-floor`). After the buy, the exit quote is re-checked and
+  `floorMet: false` is reported if a thinner exit was unavoidable to close the
+  position.
+- **Cluster pin, former and current.** `solana-policy.ts` pins the canonical
+  genesis hashes; `executeLiveArb` reads `getGenesisHash` before quoting and
+  refuses a mismatch or an unreadable hash with both values (`cluster-pin`).
+  Strategy shows the former (pinned) and current (observed) hash and the
+  observed chain; the scanner passes the pin on every live route.
+- **Two rails + vault minimum.** `solExecutionRail` selects Jupiter swaps or
+  the FlashboltSolana program. The vault wallet carries a 0.05 SOL minimum
+  clip; an extension wallet is the **external** wallet and keeps wallet-fit
+  sizing with no vault floor. The solcontract rail reports its exact blockers
+  (program ID, operator authorization, mainnet audit) and the scanner refuses
+  it explicitly — it never falls through to a Jupiter swap under a contract
+  label.
+- **Program handoff.** `reports/solana-program-handoff-2026-11-19.md` documents
+  the source layout, toolchain install, build, devnet deploy, the app wiring
+  and the remaining IDL-driven instruction builder; `scripts/solana-program-preflight.sh`
+  reports exactly which artifact/toolchain/funding steps are missing.
+- **Verification.** `bun run typecheck` clean; `bun test` (full suite) green;
+  new `src/lib/solana-policy.test.ts` covers pins, roles, floor math and rail
+  readiness. Lint on the touched pages still reports their pre-existing
+  `react-hooks` violations (unchanged count), and the new modules are clean.

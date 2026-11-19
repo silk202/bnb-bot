@@ -19,6 +19,7 @@
     "verify": "bash scripts/verify-release.sh",
     "check:mirror": "bash scripts/check-mirror-sync.sh",
     "check:readiness": "bun scripts/readiness-report.mjs",
+    "check:solana-program": "bash scripts/solana-program-preflight.sh",
     "check:rpc": "bun scripts/rpc-diagnostics.mjs",
     "check:deploy-config": "bun scripts/check-deploy-config.mjs",
     "check:headers": "bun scripts/check-headers-parity.mjs",

@@ -140,6 +140,21 @@ const schema = defineSchema(
       solMinLiquidityUsd: v.number(),
       // Per-cluster RPC override for the SOL flasher (empty = official URLs).
       solRpcOverrides: v.optional(v.record(v.string(), v.string())),
+      // Execution rail: "jupiter" = real Jupiter swaps from the armed wallet;
+      // "solcontract" = the FlashboltSolana program (needs a deployed program,
+      // explicit authorization and — on mainnet — the audit sign-off).
+      solExecutionRail: v.optional(
+        v.union(v.literal("jupiter"), v.literal("solcontract")),
+      ),
+      // Deployed FlashboltSolana program ID (empty = none deployed).
+      solContractProgramId: v.optional(v.string()),
+      // Operator authorization binding the contract rail to the vault wallet.
+      solContractAuthorized: v.optional(v.boolean()),
+      // Independent audit sign-off — required before mainnet contract use.
+      solAuditApproved: v.optional(v.boolean()),
+      // Pinned cluster genesis hash; the engine refuses to sign when the RPC
+      // reports a different (or unreadable) hash. Empty = built-in per cluster.
+      solPinnedGenesis: v.optional(v.string()),
       // Addresses of Solana wallets imported into the SOL sniper via /import.
       // Only PUBLIC addresses live here — private keys/mnemonics are validated
       // locally and never leave the operator's browser session.

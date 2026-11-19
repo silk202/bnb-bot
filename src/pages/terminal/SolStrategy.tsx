@@ -23,6 +23,14 @@ import {
   solSubmissionPath,
   type SolCluster,
 } from "@/lib/solana-jito";
+import { solRpcCall } from "@/lib/solana-live-execution";
+import {
+  SOL_CLUSTER_GENESIS,
+  SOL_VAULT_MIN_SWAP_LAMPORTS,
+  solClusterByGenesis,
+  solRailVerdict,
+  type SolExecutionRail,
+} from "@/lib/solana-policy";
 import { SOL_DEXES } from "@/lib/solana";
 import { SOL_MAX_LOAN_CAP, SOL_MIN_LOAN } from "@/lib/flashbolt";
 import { cn } from "@/lib/utils";
@@ -53,6 +61,15 @@ export default function SolStrategy() {
   /* ── Testnet / Mainnet setup ── */
   const [solNetwork, setSolNetwork] = useState<SolCluster>("mainnet");
   const [solRpcOverride, setSolRpcOverride] = useState("");
+  /* ── Execution rail + cluster pin ── */
+  const [rail, setRail] = useState<SolExecutionRail>("jupiter");
+  const [programId, setProgramId] = useState("");
+  const [contractAuthorized, setContractAuthorized] = useState(false);
+  const [auditApproved, setAuditApproved] = useState(false);
+  const [pinnedGenesis, setPinnedGenesis] = useState("");
+  const [observedGenesis, setObservedGenesis] = useState<string | null>(null);
+  const [pinLoading, setPinLoading] = useState(false);
+  const [pinError, setPinError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Sync local state when the persisted settings arrive/update.
@@ -70,7 +87,52 @@ export default function SolStrategy() {
         state.solRpcOverrides[state.solNetwork ?? "mainnet"] ?? "",
       );
     }
-  }, [state?.minProfit, state?.cadence, state?.maxLoan, state?.slippage, state?.dexWhitelists, state?.solNetwork, state?.solRpcOverrides]);
+    if (state?.solExecutionRail) setRail(state.solExecutionRail);
+    if (state?.solContractProgramId !== undefined) setProgramId(state.solContractProgramId);
+    if (state?.solContractAuthorized !== undefined) setContractAuthorized(state.solContractAuthorized);
+    if (state?.solAuditApproved !== undefined) setAuditApproved(state.solAuditApproved);
+    if (state?.solPinnedGenesis !== undefined) setPinnedGenesis(state.solPinnedGenesis);
+  }, [state?.minProfit, state?.cadence, state?.maxLoan, state?.slippage, state?.dexWhitelists, state?.solNetwork, state?.solRpcOverrides, state?.solExecutionRail, state?.solContractProgramId, state?.solContractAuthorized, state?.solAuditApproved, state?.solPinnedGenesis]);
+
+  // Read the cluster's CURRENT genesis hash from the same RPC execution uses,
+  // so the pin shows former (pinned) and current side by side. Read-only.
+  useEffect(() => {
+    let cancelled = false;
+    const rpc = resolveSolRpcUrl(solNetwork, { [solNetwork]: solRpcOverride });
+    void (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      setPinLoading(true);
+      setPinError(null);
+      try {
+        const hash = await solRpcCall<string>(rpc, "getGenesisHash", []);
+        if (!cancelled) setObservedGenesis(typeof hash === "string" ? hash : null);
+      } catch (e) {
+        if (cancelled) return;
+        setObservedGenesis(null);
+        setPinError(e instanceof Error ? e.message : "RPC read failed");
+      } finally {
+        if (!cancelled) setPinLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [solNetwork, solRpcOverride]);
+
+  const clusterKey = solNetwork === "testnet" ? "devnet" : "mainnet";
+  const expectedGenesis =
+    pinnedGenesis.trim() || SOL_CLUSTER_GENESIS[clusterKey];
+  const observedCluster = solClusterByGenesis(observedGenesis);
+  const pinMatches =
+    observedGenesis !== null && observedGenesis === expectedGenesis;
+  const railVerdict = solRailVerdict({
+    rail,
+    cluster: solNetwork,
+    programId,
+    authorized: contractAuthorized,
+    auditApproved,
+  });
 
   const toggleVenue = (key: string) => {
     setDexWhitelist((prev) =>
@@ -120,10 +182,16 @@ export default function SolStrategy() {
           ...(state?.solRpcOverrides ?? {}),
           [solNetwork]: solRpcOverride.trim(),
         },
+        // Execution rail + contract authorization + cluster pin.
+        solExecutionRail: rail,
+        solContractProgramId: programId.trim(),
+        solContractAuthorized: contractAuthorized,
+        solAuditApproved: auditApproved,
+        solPinnedGenesis: pinnedGenesis.trim(),
       });
       toast.success("SOL strategy saved", {
         description:
-          `Cluster ${SOL_CLUSTER_LABEL[solNetwork]} · settings persist across reloads and drive the SOL Scanner's guard stack.`,
+          `Cluster ${SOL_CLUSTER_LABEL[solNetwork]} · rail ${rail === "jupiter" ? "Jupiter swaps" : "solcontract"} · ${railVerdict.ok ? "execution armed" : "execution blocked until the listed requirements are met"} · settings drive the SOL Scanner's guard stack.`,
       });
     } catch (err) {
       // Honest failure surface — e.g. a paused backend must never vanish as
@@ -424,6 +492,168 @@ export default function SolStrategy() {
                       Public RPC <span className="font-mono">sendTransaction</span> — no dependable devnet block-engine
                     </p>
                   )}
+                </div>
+              </div>
+
+              {/* Execution rail — vault Jupiter swaps vs the solcontract program */}
+              <div className="space-y-3 rounded-xl border border-border/60 bg-background/40 px-3.5 py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">Execution rail</div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Both rails sign with the <strong>vault wallet</strong>; a connected extension is always the
+                      <strong> external wallet</strong>. Jupiter executes real swaps today — solcontract waits on the
+                      deployed FlashboltSolana program.
+                    </p>
+                  </div>
+                  <Badge variant="outline" className="text-[10px]">
+                    {rail === "jupiter" ? "Jupiter" : "solcontract"}
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRail("jupiter")}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left transition-colors",
+                      rail === "jupiter"
+                        ? "border-emerald-500/40 bg-emerald-500/5"
+                        : "border-border/60 bg-background/40 hover:border-primary/40",
+                    )}
+                  >
+                    <div className="text-xs font-semibold text-foreground">Vault · Jupiter</div>
+                    <div className="text-[10px] text-muted-foreground">
+                      real swaps · min {(SOL_VAULT_MIN_SWAP_LAMPORTS / 1_000_000_000).toFixed(2)} SOL
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRail("solcontract")}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left transition-colors",
+                      rail === "solcontract"
+                        ? "border-emerald-500/40 bg-emerald-500/5"
+                        : "border-border/60 bg-background/40 hover:border-primary/40",
+                    )}
+                  >
+                    <div className="text-xs font-semibold text-foreground">Vault · solcontract</div>
+                    <div className="text-[10px] text-muted-foreground">
+                      FlashboltSolana program · needs deployment + authorization
+                    </div>
+                  </button>
+                </div>
+                <label className="space-y-1.5">
+                  <span className="text-[11px] font-semibold text-muted-foreground">
+                    FlashboltSolana program ID (empty = not deployed)
+                  </span>
+                  <Input
+                    value={programId}
+                    onChange={(e) => setProgramId(e.target.value)}
+                    className="h-8 font-mono text-xs"
+                    placeholder="program id from solana program deploy"
+                    spellCheck={false}
+                  />
+                </label>
+                <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/40 px-3 py-2">
+                  <div>
+                    <div className="text-[11px] font-semibold text-foreground">Authorize contract rail for the vault</div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Required before the program may sign — off by default.
+                    </p>
+                  </div>
+                  <Switch checked={contractAuthorized} onCheckedChange={setContractAuthorized} />
+                </div>
+                <div className="flex items-center justify-between rounded-lg border border-border/50 bg-background/40 px-3 py-2">
+                  <div>
+                    <div className="text-[11px] font-semibold text-foreground">Independent audit sign-off</div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Mainnet contract execution stays off until this is on.
+                    </p>
+                  </div>
+                  <Switch checked={auditApproved} onCheckedChange={setAuditApproved} />
+                </div>
+                <div
+                  className={cn(
+                    "rounded-lg border px-3 py-2 text-[10px] leading-4",
+                    railVerdict.ok
+                      ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-400"
+                      : "border-amber-500/30 bg-amber-500/5 text-amber-400",
+                  )}
+                >
+                  {railVerdict.message}
+                  {railVerdict.blockers.length > 0 && (
+                    <ul className="mt-1 list-disc pl-4">
+                      {railVerdict.blockers.map((b) => (
+                        <li key={b}>{b}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {/* Cluster pin — former (pinned) and current (observed) genesis */}
+              <div className="space-y-3 rounded-xl border border-border/60 bg-background/40 px-3.5 py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">Cluster pin — genesis hash</div>
+                    <p className="text-[10px] text-muted-foreground">
+                      The engine reads <span className="font-mono">getGenesisHash</span> and refuses to sign when the RPC
+                      serves a different chain. No pin = the built-in hash for the selected cluster.
+                    </p>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      "text-[10px]",
+                      pinMatches
+                        ? "border-emerald-500/30 text-emerald-400"
+                        : "border-amber-500/30 text-amber-400",
+                    )}
+                  >
+                    {pinMatches ? "PINNED" : pinLoading ? "READING" : "UNVERIFIED"}
+                  </Badge>
+                </div>
+                <div className="space-y-1 rounded-lg border border-border/50 bg-background/40 px-3 py-2 font-mono text-[10px]">
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-muted-foreground">Former · pinned</span>
+                    <span className="break-all text-right text-foreground/90">{expectedGenesis}</span>
+                  </div>
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-muted-foreground">Current · observed</span>
+                    <span
+                      className={cn(
+                        "break-all text-right",
+                        pinMatches ? "text-emerald-400" : "text-amber-400",
+                      )}
+                    >
+                      {observedGenesis ?? (pinLoading ? "reading…" : pinError ?? "unreadable")}
+                    </span>
+                  </div>
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-muted-foreground">Chain</span>
+                    <span className="text-right text-foreground/90">
+                      {observedCluster ? `observed ${observedCluster}` : "unknown"} · expected {clusterKey}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    value={pinnedGenesis}
+                    onChange={(e) => setPinnedGenesis(e.target.value)}
+                    className="h-8 flex-1 font-mono text-[10px]"
+                    placeholder={SOL_CLUSTER_GENESIS[clusterKey]}
+                    spellCheck={false}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 text-[10px]"
+                    disabled={!observedGenesis}
+                    onClick={() => observedGenesis && setPinnedGenesis(observedGenesis)}
+                  >
+                    Use current
+                  </Button>
                 </div>
               </div>
 

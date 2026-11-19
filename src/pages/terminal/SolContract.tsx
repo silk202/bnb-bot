@@ -1,17 +1,22 @@
 /**
  * SOL Contract — the Solana terminal's on-chain execution status.
  *
- * Solana has no V2-router-style contract to deploy: flash borrows route
- * through the lender programs (Solend / MarginFi / Kamino) and atomic
- * multi-hop routes settle via Jito bundles or a single atomic transaction.
- * This page states the real requirements honestly — no fake contract
- * wizard — and arms live mode once a wallet signer is connected.
+ * Two rails exist, and this page says exactly which one is armed:
+ *
+ *  • Jupiter — real swaps from the armed wallet (vault or external). No
+ *    program is involved, so nothing has to be deployed. The vault rail
+ *    carries a 0.05 SOL minimum clip.
+ *  • solcontract — the FlashboltSolana program. It needs a deployed program
+ *    ID, an explicit operator authorization for the vault wallet and, on
+ *    mainnet, the independent audit sign-off. Until all three exist the rail
+ *    refuses; nothing is mocked to look deployed.
  */
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TerminalContextStrip } from "@/components/TerminalContextStrip";
 import { useTerminal } from "@/hooks/use-terminal";
 import { JITO_RELAY_LABEL } from "@/lib/solana-jito";
+import { SOL_VAULT_MIN_SWAP_LAMPORTS, solRailVerdict } from "@/lib/solana-policy";
 import {
   CheckCircle2,
   CircleDashed,
@@ -23,23 +28,58 @@ import {
 export default function SolContract() {
   const { state, setMode } = useTerminal();
   const connected = (state?.connectedWallets?.length ?? 0) > 0;
+  const cluster = state?.solNetwork === "testnet" ? "testnet" : "mainnet";
+  const rail = state?.solExecutionRail ?? "jupiter";
+  const programId = state?.solContractProgramId ?? "";
+  const authorized = state?.solContractAuthorized ?? false;
+  const auditApproved = state?.solAuditApproved ?? false;
+
+  const jupiterRail = solRailVerdict({ rail: "jupiter", cluster });
+  const contractRail = solRailVerdict({
+    rail: "solcontract",
+    cluster,
+    programId,
+    authorized,
+    auditApproved,
+  });
+  const activeRail = rail === "jupiter" ? jupiterRail : contractRail;
 
   const requirements = [
     {
-      label: "Solana wallet signer",
-      desc: "Phantom / Solflare / Backpack connected on the Wallets page — it signs the route transactions.",
+      label: "Jupiter rail",
+      desc: `Real Jupiter swaps from the armed wallet — vault minimum ${(
+        SOL_VAULT_MIN_SWAP_LAMPORTS / 1_000_000_000
+      ).toFixed(2)} SOL. No program deployment involved.`,
+      done: jupiterRail.ok,
+      href: "/sol-terminal/strategy",
+    },
+    {
+      label: "solcontract rail",
+      desc:
+        contractRail.blockers.length === 0
+          ? `FlashboltSolana ${programId} is authorized for the vault wallet on ${cluster}.`
+          : contractRail.blockers.join("; ") + ".",
+      done: contractRail.ok,
+      href: "/sol-terminal/strategy",
+    },
+    {
+      label: "FlashboltSolana instruction builder",
+      desc:
+        "Pending — the rail can be configured and authorized, but the engine has no IDL-driven flash_arb builder yet, so it refuses instead of falling through to Jupiter.",
+      done: false,
+      href: "/sol-terminal/strategy",
+    },
+    {
+      label: "Wallet signer",
+      desc: "Vault wallet (in-app, no prompt) or a connected Phantom / Solflare / Backpack as the external wallet.",
       done: connected,
       href: "/sol-terminal/wallets",
     },
     {
-      label: "Flash-loan stack",
-      desc: "Solend 0.3% · MarginFi 0% · Kamino 0.05% — lender programs are live on mainnet, nothing to deploy.",
-      done: true,
-      href: "/sol-terminal/strategy",
-    },
-    {
       label: "Protected relay",
-      desc: JITO_RELAY_LABEL + " — bundles + revert protection, live at mainnet.block-engine.jito.wtf.",
+      desc:
+        JITO_RELAY_LABEL +
+        " — bundles + revert protection, with the tip attached before signing.",
       done: state?.privateSubmit ?? true,
       href: "/sol-terminal/strategy",
     },
@@ -55,7 +95,7 @@ export default function SolContract() {
           Contract
         </h1>
         <p className="mt-1 text-sm font-medium text-primary">
-          On-chain execution status — what live mode really requires on Solana
+          On-chain execution status — Jupiter rail or the FlashboltSolana program
         </p>
       </header>
 
@@ -65,26 +105,30 @@ export default function SolContract() {
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm font-semibold">
             <FileCode2 className="size-4 text-primary" />
-            No contract deployment needed
+            Execution rails
             <Badge
               className={
-                connected
+                activeRail.ok
                   ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
                   : "border-amber-500/30 bg-amber-500/10 text-amber-400"
               }
             >
-              {connected ? "LIVE READY" : "WALLET REQUIRED"}
+              {activeRail.ok ? "ARMED" : "BLOCKED"}
+            </Badge>
+            <Badge variant="outline" className="text-[10px]">
+              {rail === "jupiter" ? "Jupiter" : "solcontract"} · {cluster}
             </Badge>
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-xs text-muted-foreground">
           <p>
-            Unlike EVM chains, Solana needs <strong>no user-deployed arbitrage
-            contract</strong>. The BNB terminal arms a FlashBoltArbitrage
-            contract; the SOL terminal's atomicity comes from the runtime
-            itself — a multi-hop route is one atomic transaction, and bundles
-            (via the Jito block-engine) are all-or-nothing across up to five
-            transactions in one slot.
+            Solana executes in two ways here. The <strong>Jupiter rail</strong>{" "}
+            quotes both legs and the armed wallet signs ordinary swaps — no
+            deployed contract is needed. The <strong>solcontract rail</strong>{" "}
+            calls the FlashboltSolana program, so it stays blocked until the
+            program is deployed, authorized for the vault wallet, and (on
+            mainnet) audited. The scanner refuses on an unarmed rail before any
+            wallet prompt.
           </p>
           <div className="space-y-2">
             {requirements.map((r) => (
@@ -106,7 +150,7 @@ export default function SolContract() {
           </div>
           <div className="flex items-center gap-2 rounded-xl border border-primary/25 bg-primary/5 px-3.5 py-2.5 text-[11px]">
             <ShieldCheck className="size-3.5 shrink-0 text-primary" />
-            Live mode {connected ? "is armed — flip it on the Flasher page." : "needs the wallet signer first — connect one on the Wallets page."}
+            {activeRail.message}
           </div>
           <div className="flex items-center gap-2">
             <button

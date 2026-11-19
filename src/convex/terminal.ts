@@ -538,6 +538,13 @@ export const DEFAULT_TERMINAL_STATE = {
   solMinLiquidityUsd: 5000,
   // Per-cluster RPC override for the SOL flasher ("" = official endpoints).
   solRpcOverrides: {} as Record<string, string>,
+  // SOL execution rail — Jupiter swaps until FlashboltSolana is deployed and
+  // authorized; the contract rail refuses without a program ID + audit.
+  solExecutionRail: "jupiter" as "jupiter" | "solcontract",
+  solContractProgramId: "",
+  solContractAuthorized: false,
+  solAuditApproved: false,
+  solPinnedGenesis: "",
   // multi-chain scanner
   chainKey: "bsc" as TerminalChainKey,
   // per-chain deployments / whitelists / private RPC overrides
@@ -569,6 +576,11 @@ const NEW_FIELD_BACKFILL = {
   solTrailingStopPct: 5,
   solMinLiquidityUsd: 5000,
   solRpcOverrides: {} as Record<string, string>,
+  solExecutionRail: "jupiter" as "jupiter" | "solcontract",
+  solContractProgramId: "",
+  solContractAuthorized: false,
+  solAuditApproved: false,
+  solPinnedGenesis: "",
   network: "mainnet" as TerminalNetwork,
   chainKey: "bsc" as TerminalChainKey,
   deployments: {},
@@ -2583,6 +2595,13 @@ export const setSettings = mutation({
     solTrailingStopPct: v.optional(v.number()),
     solMinLiquidityUsd: v.optional(v.number()),
     solRpcOverrides: v.optional(v.record(v.string(), v.string())),
+    solExecutionRail: v.optional(
+      v.union(v.literal("jupiter"), v.literal("solcontract")),
+    ),
+    solContractProgramId: v.optional(v.string()),
+    solContractAuthorized: v.optional(v.boolean()),
+    solAuditApproved: v.optional(v.boolean()),
+    solPinnedGenesis: v.optional(v.string()),
     // Public addresses of wallets imported through the SOL sniper's /import
     // command. The private material is never transmitted — the client derives
     // the address locally via ed25519 and persists only the public identity.

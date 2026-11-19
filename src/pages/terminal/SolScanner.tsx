@@ -39,6 +39,14 @@ import {
   resolveLiveSigner,
   solRpcCall,
 } from "@/lib/solana-live-execution";
+import {
+  SOL_CLUSTER_GENESIS,
+  SOL_VAULT_MIN_SWAP_LAMPORTS,
+  solRailVerdict,
+  solWalletRole,
+  type SolExecutionRail,
+  type SolWalletRole,
+} from "@/lib/solana-policy";
 import { SOL_MAX_LOAN_CAP, SOL_MIN_LOAN } from "@/lib/flashbolt";
 import type { SolTelecopierRoute } from "@/lib/solana-routes";
 import { cn } from "@/lib/utils";
@@ -119,7 +127,33 @@ export default function SolScanner() {
   // Testnet/Mainnet cluster from the flasher's Strategy setup (default mainnet).
   const solCluster: SolCluster = state?.solNetwork === "testnet" ? "testnet" : "mainnet";
   const solRpcUrl = resolveSolRpcUrl(solCluster, state?.solRpcOverrides);
-  const submission = solSubmissionPath(solCluster);
+  const submission = useMemo(() => solSubmissionPath(solCluster), [solCluster]);
+  // Execution rail: Jupiter swaps or the FlashboltSolana program. The rail
+  // verdict is the exact gate the engine enforces (program ID, authorization,
+  // mainnet audit) — an unarmed rail refuses before any signing.
+  const rail: SolExecutionRail = state?.solExecutionRail ?? "jupiter";
+  const railVerdict = useMemo(
+    () =>
+      solRailVerdict({
+        rail,
+        cluster: solCluster,
+        programId: state?.solContractProgramId ?? "",
+        authorized: state?.solContractAuthorized ?? false,
+        auditApproved: state?.solAuditApproved ?? false,
+      }),
+    [
+      rail,
+      solCluster,
+      state?.solContractProgramId,
+      state?.solContractAuthorized,
+      state?.solAuditApproved,
+    ],
+  );
+  // The genesis hash the RPC must report before signing: the operator's pin,
+  // or the canonical hash for the selected cluster.
+  const expectedGenesis =
+    state?.solPinnedGenesis?.trim() ||
+    SOL_CLUSTER_GENESIS[solCluster === "testnet" ? "devnet" : "mainnet"];
 
   const feed = useSolLiveFeed({
     paused: !botRunning,
@@ -159,9 +193,12 @@ export default function SolScanner() {
   // execution; null = unknown (paper mode / no wallet / RPC hiccup) → rows
   // show the plain loan size.
   const [walletLamports, setWalletLamports] = useState<number | null>(null);
+  // Which wallet signs: the in-app vault or a connected extension (external).
+  const [walletRole, setWalletRole] = useState<SolWalletRole>("none");
   useEffect(() => {
     if (mode !== "live") {
       setWalletLamports(null);
+      setWalletRole("none");
       return;
     }
     let cancelled = false;
@@ -169,15 +206,23 @@ export default function SolScanner() {
       try {
         const signer = await resolveLiveSigner();
         if (!signer?.publicKey) {
-          if (!cancelled) setWalletLamports(null);
+          if (!cancelled) {
+            setWalletLamports(null);
+            setWalletRole("none");
+          }
           return;
         }
-        const bal = await solRpcCall<number>(solRpcUrl, "getBalance", [
-          signer.publicKey.toString(),
-        ]);
+        const address = signer.publicKey.toString();
+        const { vaultSignerAddresses } = await import("@/lib/solana-vault");
+        const role = solWalletRole(address, vaultSignerAddresses());
+        if (!cancelled) setWalletRole(role);
+        const bal = await solRpcCall<number>(solRpcUrl, "getBalance", [address]);
         if (!cancelled) setWalletLamports(typeof bal === "number" ? bal : null);
       } catch {
-        if (!cancelled) setWalletLamports(null);
+        if (!cancelled) {
+          setWalletLamports(null);
+          setWalletRole("none");
+        }
       }
     })();
     return () => {
@@ -188,6 +233,45 @@ export default function SolScanner() {
   const executeRoute = useCallback(
     async (r: SolTelecopierRoute) => {
       if (executing || executedIds.has(r.id)) return;
+      // GUARD: the selected execution rail must be armed, and the contract
+      // rail must never fall through to a Jupiter swap. Refused configs never
+      // reach a wallet prompt (paper mode credits locally).
+      if (mode === "live" && rail === "solcontract") {
+        setExecutedIds((prev) => new Set(prev).add(r.id));
+        await recordRef.current({
+          label: r.legs.join(" → "),
+          profitPct: r.profitPct,
+          amountBnb: 0,
+          status: "failed",
+          lender: r.lender,
+          dexes: r.dexes.join("+"),
+          chain: "solana",
+          nativeSymbol: "SOL",
+          relay: "rail:solcontract",
+        });
+        toast.error("solcontract rail cannot execute yet", {
+          description: railVerdict.ok
+            ? "The rail is authorized, but the engine has no flash_arb instruction builder yet — no contract call is fabricated and no Jupiter swap runs under a contract label. Switch to the Jupiter rail to trade."
+            : railVerdict.message,
+        });
+        return;
+      }
+      if (mode === "live" && !railVerdict.ok) {
+        setExecutedIds((prev) => new Set(prev).add(r.id));
+        await recordRef.current({
+          label: r.legs.join(" → "),
+          profitPct: r.profitPct,
+          amountBnb: 0,
+          status: "failed",
+          lender: r.lender,
+          dexes: r.dexes.join("+"),
+          chain: "solana",
+          nativeSymbol: "SOL",
+          relay: `rail:${rail}`,
+        });
+        toast.error("Execution rail blocked", { description: railVerdict.message });
+        return;
+      }
       // GUARD STACK (mirrors the BNB scanner): daily arb target first.
       const dailyTarget = state?.dailyArbTarget ?? 0;
       if (!canSolArbExecute(dailyTarget)) {
@@ -282,6 +366,12 @@ export default function SolScanner() {
             // actually front (balance − fees/rent, min 0.05 SOL) and lands as
             // a real, smaller trade instead of a doomed Phantom popup.
             fitToWallet: true,
+            // Cluster pin (pinned or canonical genesis) and the operator's
+            // execution-time profit floor on the clip that actually lands.
+            expectedGenesis,
+            minProfitPct: minProfit,
+            minLoanLamports:
+              walletRole === "vault" ? SOL_VAULT_MIN_SWAP_LAMPORTS : undefined,
             onPhase: (phase) => {
               if (phase === "buy") playFlashSubmitted();
               if (phase === "sell") playFlashConfirmed();
@@ -344,8 +434,16 @@ export default function SolScanner() {
                 out.fit.loanLamports / LAMPORTS_SOL
               ).toFixed(4)} SOL to the wallet · `
             : "";
+          const walletNote = out.walletRole === "vault" ? "vault wallet · " : "external wallet · ";
+          const floorNote =
+            out.floorMet === false
+              ? " · exit quote fell below the profit floor after the buy landed"
+              : "";
+          const pnlNote = out.netMeasured === false
+            ? " · closing balance unreadable, PnL not measured"
+            : "";
           toast.success(`Live arb landed +${out.netPct.toFixed(2)}%`, {
-            description: `${fitNote}${out.venues.slice(0, 2).join(" + ") || "Jupiter"} · net ${netSol.toFixed(4)} SOL · sell ${out.sellSig?.slice(0, 10)}…`,
+            description: `${fitNote}${walletNote}${out.venues.slice(0, 2).join(" + ") || "Jupiter"} · net ${netSol.toFixed(4)} SOL · sell ${out.sellSig?.slice(0, 10)}…${floorNote}${pnlNote}`,
           });
           setExecutedIds((prev) => new Set(prev).add(r.id));
           return;
@@ -402,7 +500,25 @@ export default function SolScanner() {
         setExecutedIds((prev) => new Set(prev).add(r.id));
       }
     },
-    [executing, executedIds, minProfit, playExecute, playFlashConfirmed, playFlashFailed, playFlashSubmitted, playAlert]);
+    [
+      executing,
+      executedIds,
+      minProfit,
+      mode,
+      rail,
+      railVerdict,
+      expectedGenesis,
+      walletRole,
+      solRpcUrl,
+      submission,
+      privateSubmit,
+      state?.slippage,
+      playExecute,
+      playFlashConfirmed,
+      playFlashFailed,
+      playFlashSubmitted,
+      playAlert,
+    ]);
 
   // AUTO execution — fires for every fresh profitable route once.
   useEffect(() => {
@@ -517,6 +633,47 @@ export default function SolScanner() {
           )}
         </span>
       </div>
+
+      {/* Settings · contract · strategy — the exact state the engine enforces */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-2xl border border-border/60 bg-card/40 px-4 py-2.5 text-[10px] text-muted-foreground">
+        <span>
+          Rail:{" "}
+          <span className="font-semibold text-foreground">
+            {rail === "jupiter" ? "Vault · Jupiter swaps" : "Vault · solcontract"}
+          </span>
+        </span>
+        <span>
+          Wallet:{" "}
+          <span className="font-semibold text-foreground">
+            {walletRole === "vault" ? "Vault" : walletRole === "external" ? "External" : "none"}
+          </span>
+        </span>
+        <span>
+          Cluster pin:{" "}
+          <span className="font-mono text-foreground">
+            {solCluster === "testnet" ? "devnet" : "mainnet"} · {expectedGenesis.slice(0, 6)}…{expectedGenesis.slice(-4)}
+          </span>
+        </span>
+        <span>
+          Profit floor: <span className="font-semibold text-foreground">{minProfit}%</span> of the executed clip
+        </span>
+        <span>
+          Submission:{" "}
+          <span className="font-semibold text-foreground">
+            {privateSubmit && submission.relay === "jito" ? "Jito protected" : "Public RPC"}
+          </span>
+        </span>
+      </div>
+
+      {!railVerdict.ok && mode === "live" && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <div className="font-semibold">Execution rail is blocked — no route can sign</div>
+            <div className="mt-0.5 text-[11px]">{railVerdict.message}</div>
+          </div>
+        </div>
+      )}
 
       <SolTelecopierBotPanel
         onRoute={handleTelecopierRoute}
@@ -691,8 +848,10 @@ export default function SolScanner() {
 
       <p className="text-[11px] text-muted-foreground">
         <ShieldCheck className="mr-1 inline size-3 text-primary" />
-        Guard stack: profit floor {minProfit}% → lender fee check →
-        {privateSubmit ? " Jito-style protected submission (revert protection) →" : ""} execution.
+        Guard stack: cluster pin (getGenesisHash) → rail gate → profit floor {minProfit}%
+        of the executed clip (checked against the quotes that build the txs) → read-abort on any
+        failed balance read →
+        {privateSubmit ? " Jito protected submission with a real tip →" : ""} execution.
         Paper mode credits the paper account; live mode carries the signed route
         tx through the Jito block-engine outside the public mempool. Nothing is
         simulated — routes exist only when real DexScreener venue prices carry
