@@ -724,3 +724,95 @@ Reviewed: `src/lib/arm-status.ts`, `src/pages/terminal/Overview.tsx`,
    repoint the Freebuff project page or the domain: there is no credential for
    the Freebuff web API, no Vercel token, and `repos/silk202/bnb-bot/deployments`
    is empty.
+
+## Twentieth pass — 2026-11-19 (the idle arm clock, watched in a browser)
+
+Reviewed: `src/hooks/use-now.ts`, `src/lib/arm-status.ts`,
+`src/lib/__tests__/arm-status.test.ts`, `src/pages/terminal/Contract.tsx`,
+`src/pages/terminal/Overview.tsx`, `src/pages/terminal/Bot.tsx`, and the live
+Contract route on both the production Sites origin and the dev-preview origin.
+
+### Method
+
+The previous pass could only say the badges were correct at render. This pass
+watched them age. A temporary page served by the app's own Vite dev server
+rendered the real `useNow` hook (production 30s cadence, real `Date.now()`) and
+the real `armStatus`/`formatArmAge` module — no re-implementation of either — in
+the same badge/age/message markup as the Contract arm block. Two stamps were
+placed seconds below the real thresholds so a short idle wait would cross them;
+a third panel showed the age label rolling over. The tab was opened in the
+Cloud browser and left untouched; it was sampled at load, +35s and +70s. The
+harness was not committed and was deleted with its dev server afterwards, and
+no operator state was read or written.
+
+The first run exposed a harness bug of its own — the boundary panel evaluated
+`armStatus(stamp, stamp)`, i.e. age 0 — so the boundary copy below comes from
+the corrected second run; the three idle samples were unaffected.
+
+### Idle samples (UTC, no interaction)
+
+| Sample | Age label | Stale-edge panel (stamp 45s short of the edge) | 30-day-limit panel (stamp 15s short) |
+| --- | --- | --- | --- |
+| 14:33:40 | `2h 59m ago` | fresh — “Fresh arm: 22 days old, pins accept it for 8 more days.” | **Stale arm** — “Stale arm: 29 days old. Pins accept it for 1 more day, then refuse it until a new address is armed.” |
+| 14:34:15 (+35s) | `3h 0m ago` | still fresh — inside the 45s window | **Arm expired** — “Stale arm: 30 days old, past the 30-day limit — bytecode pins are refused.” |
+| 14:34:50 (+70s) | `3h 0m ago` | **Stale arm** — “Stale arm: 23 days old. Pins accept it for 7 more days, then refuse it until a new address is armed.” | **Arm expired**, unchanged |
+
+What this proves, live: the age label advances without a Convex update or any
+event (`2h 59m` → `3h 0m`), the badge appears on the first tick after a stamp
+crosses `ARM_STALE_MS`, the danger state appears on the first tick after it
+crosses `ARM_MAX_AGE_MS`, and the refresh lands on the true wall time — the
+“1 more day” arm became 30 days old, not 29 days + an interval's worth of
+accumulated drift.
+
+### Boundary copy, computed at the exact instants
+
+- age exactly `ARM_STALE_MS`: `ok` — “Fresh arm: 23 days old, pins accept it
+  for 7 more days.” (the warning starts one millisecond later, matching the
+  guard's `>`).
+- age exactly `ARM_LIMIT_MS`: `warn` — “Stale arm: 30 days old. Pins accept it
+  for **less than a day**, then refuse it until a new address is armed.” This
+  is the window where the guard still accepts (`age > ARM_MAX_AGE_MS` refuses);
+  the copy no longer says “0 more days”.
+- no stamp: `danger` — “No arm timestamp: bytecode pins refuse this deployment
+  until it is saved here again, which records one. Re-saving an existing stamp
+  does not refresh it.”
+
+### Fixed during review (commit `2714255`)
+
+1. **The clock is shared and drift-free.** `src/hooks/use-now.ts` re-reads
+   `Date.now()` on every tick instead of adding to a stored value, and re-reads
+   immediately on `visibilitychange`, so a suspended tab returns to the correct
+   age instead of waiting out a cadence. Contract (badge + three ages), the
+   Overview banner and the Flasher all feed from it; the Flasher keeps its 1s
+   cadence because it also renders second-level activity.
+2. **“0 more days” is gone at the limit instant.** The warn branch now says
+   “less than a day” when `daysLeft === 0`, which is the truthful description of
+   the millisecond-wide window the guard still accepts.
+3. **Thresholds are pinned by tests.** `src/lib/__tests__/arm-status.test.ts`
+   adds 18 pure cases: constants derived from `ARM_MAX_AGE_MS`, both bounds
+   (±1 ms), the singular last day, the limit instant, a 40-day arm, unusable
+   stamps, a future stamp clamped, clock-only progression fresh → warn →
+   expired, `formatArmAge` rollovers and `armStampTitle`. Suite: 638 pass /
+   0 fail (was 620); `tsc -b --noEmit` clean; eslint clean on every touched
+   file; CI `44543294242` verify + deploy-convex success.
+
+### Open findings (updated)
+
+4. **The real Contract page still needs the operator's sign-in to show an
+   arm.** Both `site-a8bf043e…freebuff.page/terminal/contract` and the dev
+   preview redirect to `/auth` in a browser without an operator session, and
+   the arm block only renders when Convex returns an armed deployment for the
+   signed-in user. This pass therefore verified the ticking module and its copy,
+   not the live page with real arm data; no credentials were entered and no
+   account was created. Watching the actual page requires the operator to sign
+   in, after which the same samples can be repeated against real state.
+5. **The live domain still runs the older Vercel build.** `taengine.freebuff.app`
+   serves `assets/index-BsVghlH7.js` with HSTS `63072000` and no CSP, while the
+   Sites production origin serves this tree (`assets/index-CkxVULl6.js`,
+   `no-store`, per-response nonce CSP, injected RPC config). Nothing in this
+   workspace can repoint the Freebuff project page or that domain: no Freebuff
+   web API credential, no Vercel token, and `repos/silk202/bnb-bot/deployments`
+   is empty.
+6. **Netlify header parity is still proven statically.** There is no Netlify
+   site in this workspace to curl, so the guarantee remains that the config
+   matches the reference, not that Netlify applied it.
