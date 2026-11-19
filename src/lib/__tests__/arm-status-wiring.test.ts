@@ -1,14 +1,15 @@
 /**
  * Wiring guard — every page that grades an arm must pass the ticking clock.
  *
- * `armStatus(stamp)` still works without a clock: it defaults to `Date.now()`
- * at render, which is exactly the regression this guards. A surface that drops
- * the second argument compiles, passes typecheck and even shows a plausible
- * badge — it just freezes until some unrelated re-render, which is how the
- * "just now" badge survived an expiring arm before. The pages are React
- * components fed by Convex and auth, so this asserts the source contract
- * instead of mounting them: one `useNow()` clock per page, and that exact
- * identifier as the second argument of every `armStatus` call.
+ * The clock is a required parameter in `arm-status.ts`, so a dropped argument
+ * fails `tsc` — but a page can still pass the wrong clock: `Date.now()` read
+ * at render, a stamp, or a second `useNow()` that nothing keeps fresh. That
+ * compiles, passes typecheck and even shows a plausible badge; it just freezes
+ * until some unrelated re-render, which is how the "just now" badge survived
+ * an expiring arm before. The pages are React components fed by Convex and
+ * auth, so this asserts the source contract instead of mounting them: one
+ * `useNow()` clock per page, and that exact identifier as the second argument
+ * of every `armStatus` and `formatArmAge` call.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";

@@ -19,7 +19,7 @@ export const ARM_STALE_MS = Math.max(0, ARM_MAX_AGE_MS - ARM_WARN_HEADROOM_MS);
 export type ArmTone = "ok" | "warn" | "danger";
 
 /** "3d 4h ago" — and honest about a deployment saved before arm stamps existed. */
-export function formatArmAge(stamp?: number | null, now = Date.now()): string {
+export function formatArmAge(stamp: number | null | undefined, now: number): string {
   if (typeof stamp !== "number" || !Number.isFinite(stamp)) return "not recorded";
   const age = Math.max(0, now - stamp);
   const minutes = Math.floor(age / 60_000);
@@ -44,8 +44,8 @@ export function armStampTitle(stamp?: number | null): string {
  * the window. Nothing here claims a pin is available when it is not.
  */
 export function armStatus(
-  stamp?: number | null,
-  now = Date.now(),
+  stamp: number | null | undefined,
+  now: number,
 ): { tone: ArmTone; message: string } {
   if (typeof stamp !== "number" || !Number.isFinite(stamp)) {
     return {
