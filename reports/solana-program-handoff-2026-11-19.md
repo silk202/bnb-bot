@@ -1,5 +1,16 @@
 # FlashboltSolana program — source, build and devnet deploy handoff (2026-11-19)
 
+> **Update 2026-11-21:** the source now exists. `solana/` holds the Milestone 1
+> configuration/authority program (no Counter, no trading surface) plus the
+> two-step admin handshake, and its LiteSVM suite passes 20/20. The confirmed
+> program address is `82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd` — the
+> public key of the retained deployment keypair — and `declare_id!`,
+> `Anchor.toml`, the keypair and the generated IDL all agree on it. See
+> `reports/flashbolt-program-config-foundation-2026-11-21.md`. The build/deploy
+> sequence below still applies; `scripts/solana-program-preflight.sh` now
+> refuses READY on any address disagreement, on the Anchor template
+> placeholder, and on a missing or mismatched IDL.
+
 This is the concrete path from "no program in the repo" to "the SOL terminal's
 `solcontract` rail is armed on devnet". Nothing here was executed in this
 environment: there is still no Rust/Anchor source, no `.so`, no Solana

@@ -1,0 +1,15 @@
+[package]
+name = "flashbolt-config-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "flashbolt_config_tests"
+path = "src/lib.rs"
+
+[dependencies]
+anchor-lang = "0.31.1"
+flashbolt_solana = { path = "../../programs/flashbolt_solana", features = ["no-entrypoint"] }
+litesvm = "0.7"
+solana-sdk = "2.2"

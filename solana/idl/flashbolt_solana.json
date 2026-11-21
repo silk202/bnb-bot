@@ -1,0 +1,721 @@
+{
+  "address": "82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd",
+  "metadata": {
+    "name": "flashbolt_solana",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "FlashBolt configuration and authority foundation"
+  },
+  "instructions": [
+    {
+      "name": "accept_admin",
+      "docs": [
+        "Complete the handshake. Only the nominated key may call this; it",
+        "becomes the admin and the pending nomination is cleared."
+      ],
+      "discriminator": [
+        112,
+        42,
+        45,
+        90,
+        116,
+        181,
+        13,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  97,
+                  115,
+                  104,
+                  98,
+                  111,
+                  108,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_admin",
+          "docs": [
+            "The nominated key. Must match `config.pending_admin`."
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initialize_config",
+      "docs": [
+        "Create the singleton configuration registry.",
+        "",
+        "The initial administrator signs and pays the rent. `executor` and",
+        "`pause_authority` must be explicit, non-default and different from the",
+        "admin and from each other."
+      ],
+      "discriminator": [
+        208,
+        127,
+        21,
+        1,
+        194,
+        190,
+        196,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  97,
+                  115,
+                  104,
+                  98,
+                  111,
+                  108,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "docs": [
+            "The initial administrator. Must sign; funds the config account."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "executor",
+          "type": "pubkey"
+        },
+        {
+          "name": "pause_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "pause_program",
+      "docs": [
+        "Emergency pause. Callable by the pause authority or the admin."
+      ],
+      "discriminator": [
+        91,
+        86,
+        253,
+        175,
+        66,
+        236,
+        172,
+        124
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  97,
+                  115,
+                  104,
+                  98,
+                  111,
+                  108,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "The pause authority or the admin."
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "propose_admin",
+      "docs": [
+        "Nominate the next admin. The current admin signs; nothing changes until",
+        "the nominee calls `accept_admin`. A later proposal replaces this one."
+      ],
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  97,
+                  115,
+                  104,
+                  98,
+                  111,
+                  108,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "docs": [
+            "The current admin. Checked in the handler so the refusal carries a",
+            "program error instead of a generic constraint failure."
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "unpause_program",
+      "docs": [
+        "Lift the pause. Only the admin may call this."
+      ],
+      "discriminator": [
+        43,
+        162,
+        233,
+        92,
+        254,
+        62,
+        69,
+        58
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  97,
+                  115,
+                  104,
+                  98,
+                  111,
+                  108,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "docs": [
+            "The configured admin."
+          ],
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "update_authorities",
+      "docs": [
+        "Rotate the executor and/or pause authority. Admin signature required;",
+        "at least one authority must be supplied."
+      ],
+      "discriminator": [
+        175,
+        228,
+        137,
+        18,
+        175,
+        70,
+        220,
+        165
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  108,
+                  97,
+                  115,
+                  104,
+                  98,
+                  111,
+                  108,
+                  116,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "docs": [
+            "Must be the configured admin. Checked in the handler so the refusal",
+            "carries a program error instead of a generic constraint failure."
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "executor",
+          "type": {
+            "option": "pubkey"
+          }
+        },
+        {
+          "name": "pause_authority",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AdminTransferProposed",
+      "discriminator": [
+        203,
+        168,
+        175,
+        51,
+        239,
+        104,
+        20,
+        85
+      ]
+    },
+    {
+      "name": "AdminTransferred",
+      "discriminator": [
+        255,
+        147,
+        182,
+        5,
+        199,
+        217,
+        38,
+        179
+      ]
+    },
+    {
+      "name": "AuthoritiesUpdated",
+      "discriminator": [
+        67,
+        41,
+        36,
+        180,
+        223,
+        84,
+        221,
+        76
+      ]
+    },
+    {
+      "name": "ConfigInitialized",
+      "discriminator": [
+        181,
+        49,
+        200,
+        156,
+        19,
+        167,
+        178,
+        91
+      ]
+    },
+    {
+      "name": "ProgramPaused",
+      "discriminator": [
+        247,
+        9,
+        236,
+        38,
+        105,
+        35,
+        112,
+        115
+      ]
+    },
+    {
+      "name": "ProgramUnpaused",
+      "discriminator": [
+        193,
+        183,
+        146,
+        52,
+        180,
+        17,
+        21,
+        26
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "UnauthorizedAdmin",
+      "msg": "Only the configured admin may perform this action."
+    },
+    {
+      "code": 6001,
+      "name": "UnauthorizedPauseAuthority",
+      "msg": "Only the configured pause authority or admin may pause the program."
+    },
+    {
+      "code": 6002,
+      "name": "ProgramPaused",
+      "msg": "The program is paused; execution is blocked."
+    },
+    {
+      "code": 6003,
+      "name": "ProgramNotPaused",
+      "msg": "The program is not paused."
+    },
+    {
+      "code": 6004,
+      "name": "InvalidAuthority",
+      "msg": "An authority address may not be the default address."
+    },
+    {
+      "code": 6005,
+      "name": "AuthoritiesNotIndependent",
+      "msg": "Admin, executor and pause authority must be three distinct keys."
+    },
+    {
+      "code": 6006,
+      "name": "NoAuthorityChange",
+      "msg": "update_authorities needs at least one new authority."
+    },
+    {
+      "code": 6007,
+      "name": "UnsupportedConfigVersion",
+      "msg": "The configuration schema version is not the one this build supports."
+    },
+    {
+      "code": 6008,
+      "name": "NoPendingAdmin",
+      "msg": "No admin transfer is pending."
+    },
+    {
+      "code": 6009,
+      "name": "UnauthorizedPendingAdmin",
+      "msg": "Only the nominated admin may accept the transfer."
+    }
+  ],
+  "types": [
+    {
+      "name": "AdminTransferProposed",
+      "docs": [
+        "Emitted when the admin nominates a successor."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminTransferred",
+      "docs": [
+        "Emitted when the nominee accepts and becomes the admin. The previous admin",
+        "has no authority from this point on."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "previous_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthoritiesUpdated",
+      "docs": [
+        "Emitted whenever the admin rotates an authority."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "executor",
+            "type": "pubkey"
+          },
+          {
+            "name": "pause_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "docs": [
+        "The singleton configuration registry.",
+        "",
+        "Storing these authorities does **not** restrict execution by itself — the",
+        "execution instruction must check [`Config::execution_allowed`] (and later",
+        "the DEX/repayment rules) on chain. No such instruction exists in this",
+        "Milestone 1 build."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "docs": [
+              "Controls configuration and authority management."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "executor",
+            "docs": [
+              "Authorized signer for arbitrage execution. Checked by the future",
+              "execution instruction; nothing enforces it yet."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "pause_authority",
+            "docs": [
+              "May activate the emergency pause. May **not** lift it."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_admin",
+            "docs": [
+              "The key the admin has nominated to take over, or the default address",
+              "while no handshake is in flight. It has no powers until it calls",
+              "`accept_admin`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "docs": [
+              "Blocks execution while true."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA derivation bump."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "version",
+            "docs": [
+              "Configuration schema version."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigInitialized",
+      "docs": [
+        "Emitted once, when the registry is created."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "executor",
+            "type": "pubkey"
+          },
+          {
+            "name": "pause_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProgramPaused",
+      "docs": [
+        "Emitted when execution is paused."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "docs": [
+              "The signer that paused: the pause authority or the admin."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProgramUnpaused",
+      "docs": [
+        "Emitted when the admin lifts the pause."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    }
+  ]
+}

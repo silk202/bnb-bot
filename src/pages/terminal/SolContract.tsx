@@ -65,7 +65,7 @@ export default function SolContract() {
     {
       label: "FlashboltSolana instruction builder",
       desc:
-        "Pending — the rail can be configured and authorized, but the engine has no IDL-driven flash_arb builder yet, so it refuses instead of falling through to Jupiter.",
+        "Configuration + authority foundation exists in solana/ at the confirmed program address 82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd (initialize_config, update_authorities, propose_admin/accept_admin, pause_program, unpause_program), with a generated IDL. The flash_arb execution instruction and its IDL-driven builder are still pending, so the rail refuses instead of falling through to Jupiter.",
       done: false,
       href: "/sol-terminal/strategy",
     },

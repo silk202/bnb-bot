@@ -1,0 +1,24 @@
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+flashbolt_solana = "82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd"
+
+[programs.devnet]
+flashbolt_solana = "82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd"
+
+# Mainnet is deliberately absent: this program is not audited and must not be
+# deployed to mainnet. Add a `[programs.mainnet]` entry only after the audit.
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "cargo test -p flashbolt-config-tests -- --nocapture"
