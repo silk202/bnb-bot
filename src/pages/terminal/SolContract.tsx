@@ -18,6 +18,12 @@ import { useTerminal } from "@/hooks/use-terminal";
 import { JITO_RELAY_LABEL } from "@/lib/solana-jito";
 import { SOL_VAULT_MIN_SWAP_LAMPORTS, solRailVerdict } from "@/lib/solana-policy";
 import {
+  FLASHBOLT_IDL_META,
+  FLASHBOLT_INSTRUCTION_NAMES,
+  FLASHBOLT_PROGRAM_ID,
+  FLASH_ARB_IN_IDL,
+} from "@/lib/solana-execution-plan";
+import {
   CheckCircle2,
   CircleDashed,
   FileCode2,
@@ -64,8 +70,9 @@ export default function SolContract() {
     },
     {
       label: "FlashboltSolana instruction builder",
-      desc:
-        "Configuration + authority foundation exists in solana/ at the confirmed program address 82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd (initialize_config, update_authorities, propose_admin/accept_admin, pause_program, unpause_program), with a generated IDL. The flash_arb execution instruction and its IDL-driven builder are still pending, so the rail refuses instead of falling through to Jupiter.",
+      desc: FLASH_ARB_IN_IDL
+        ? `IDL v${FLASHBOLT_IDL_META.version} at ${FLASHBOLT_PROGRAM_ID} declares flash_arb alongside ${FLASHBOLT_INSTRUCTION_NAMES.length - 1} configuration instructions.`
+        : `IDL v${FLASHBOLT_IDL_META.version} at ${FLASHBOLT_PROGRAM_ID} declares ${FLASHBOLT_INSTRUCTION_NAMES.length} configuration instructions (${FLASHBOLT_INSTRUCTION_NAMES.join(", ")}). flash_arb is not in it yet, so the rail refuses instead of falling through to Jupiter.`,
       done: false,
       href: "/sol-terminal/strategy",
     },

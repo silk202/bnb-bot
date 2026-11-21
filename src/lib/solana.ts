@@ -6,8 +6,10 @@
  *   /latest/dex/search?q=SOL%20USDC: raydium, orca, meteora, pumpswap,
  *   metadao — with version labels ["CLMM"] / ["wp"] / ["DLMM"]),
  * - the canonical WSOL mint,
- * - flash-loan lenders that actually deploy on Solana, priced at their
- *   documented fees (Solend 0.3%, MarginFi 0%, Kamino 0.05%).
+ * - flash-loan lenders, priced at their documented fees. Per the approved
+ *   provider decision (2026-11-21) Jupiter Lend is primary at 0% — verified
+ *   on its mainnet flashloan_admin fee word — with MarginFi and Solend kept as
+ *   fallbacks; Kamino Lend is deferred and not in the rotation.
  *
  * Dynamic-fee venues (CLMM/Whirlpool/DLMM) are priced CONSERVATIVELY at or
  * above their typical tier, so an unknown fee tier can never overstate a
@@ -108,9 +110,16 @@ export const SOL_FLASH_LENDERS: Array<{
   feeLabel: string;
   source: string;
 }> = [
-  { name: "Solend", feePct: 0.3, feeLabel: "0.3%", source: "docs.solend.fi — flash-loan fee" },
+  {
+    name: "Jupiter Lend",
+    feePct: 0,
+    feeLabel: "0%",
+    // Fee read from the live mainnet flashloan_admin account; borrow/payback
+    // are top-level instructions around our CPI. Devnet has no deployment.
+    source: "jupgfSgfuAX… flashloan_admin fee word = 0 — developers.jup.ag/docs/lend/flashloan",
+  },
   { name: "MarginFi", feePct: 0, feeLabel: "0%", source: "docs.marginfi.com — flash loans" },
-  { name: "Kamino", feePct: 0.05, feeLabel: "0.05%", source: "docs.kamino.finance — flash borrow" },
+  { name: "Solend", feePct: 0.3, feeLabel: "0.3%", source: "docs.solend.fi — flash-loan fee" },
 ];
 
 /** Lender info for display, mirroring FLASH_LENDER_INFO on BNB. */

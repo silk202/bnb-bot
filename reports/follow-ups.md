@@ -1094,3 +1094,75 @@ address-unpinned and explicitly provisional.
    sides, so the order was neither asserted nor correct. Fixed: the array is in
    declaration order and the comment now says the comparison is a set. No
    behaviour change.
+
+## Round 16 — 2026-11-21, Jupiter Lend verified, the IDL wired into the app
+
+**What the verification produced.** The mandatory devnet gate was executed
+read-only (see `reports/flashbolt-provider-brief-2026-11-21.md` → Verification
+log). Mainnet is real: flashloan `jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS`,
+liquidity `jupeiUmn8…`, admin `ALXWtv2…` with a **zero fee word**. Devnet is
+empty: flashloan, liquidity and AMM all return `null`. So the gate is **failed,
+not pending**, and that changes the next milestone from "write the adapter" to
+"choose how the lender is exercised at all".
+
+**Decision now needed (recorded, not taken).**
+
+1. **How does the lender get exercised?** Three honest options:
+   (a) ask Jupiter for / stand up a devnet deployment of the Lend stack — most
+   faithful, slowest, and outside this repo; (b) use marginfi's devnet
+   deployment for the devnet path while Jupiter Lend stays mainnet-only behind
+   the audit gate — fastest to a real devnet run, but two lenders to maintain;
+   (c) make the arbitrage rail mainnet-only after the audit — simplest, and it
+   means no devnet rehearsal of `flash_arb` at all. Nothing in the adapter
+   should be written before this is chosen: each option changes what the
+   builder and the tests target.
+
+**Closed by this pass.**
+
+2. **The contract page no longer hand-copies the program.** Round 14 #6 is
+   closed: `src/lib/solana-execution-plan.ts` imports the tracked IDL, so the
+   program address, all six instruction names, their flattened argument types,
+   signers and the ten error codes come from the same file CI diffs. The
+   settings panel lists them and offers "use the IDL address" instead of asking
+   the operator to paste it. `solana-execution-plan.test.ts` fails on drift.
+3. **Jupiter Swap is provably not in the arbitrage blast radius.** The panel
+   states the separation and the code enforces it: switching the active engine
+   writes only `solExecutionRail`; the arbitrage authorization
+   (`solContractAuthorized`) is its own persisted flag, so it can be pre-armed
+   while Jupiter Swap stays active — and turning it off cannot touch swaps.
+4. **The break-even strip stopped lying.** It hardcoded "+ 0.05% Kamino" while
+   the lender registry said otherwise. It now derives the cheapest lender's fee
+   from `SOL_FLASH_LENDERS`, so the number above the scanner is the number the
+   balancer sorts by.
+
+**New follow-ups, in priority order.**
+
+5. **Per-engine execution attribution.** History rows carry no engine tag, so
+   a `solcontract` run and a Jupiter Swap run are indistinguishable after the
+   fact. Add `engine: "jupiter-swap" | "flash-arb"` on the execution row (needs
+   a Convex schema field and a deploy) and split the P&L summaries by it.
+6. **A real enable/disable flag per engine.** Today "off" means "not the active
+   rail". Swap keeps executing when the operator only wanted to stop
+   arbitrage — acceptable for two rails, wrong once the arbitrage rail is
+   live. Add `solArbEnabled` and `solSwapEnabled` and have the scanner gate on
+   both, so disabling one engine never silently moves traffic to the other.
+7. **CI should probe the lender, not remember it.** A read-only
+   `getAccountInfo` check for the Jupiter Lend programs (mainnet present, devnet
+   state reported) turns "the address moved" into a red build instead of a
+   runtime surprise. Same shape as the existing devnet preflight, no key needed.
+8. **Re-read the fee instead of trusting the constant.** The zero fee is a
+   constant in `JUPITER_LEND` with its provenance. Once the adapter exists, read
+   `flashloan_admin` at quote time and refuse (or reprice) when the fee word is
+   no longer 0 — a silent fee change would otherwise corrupt every P&L number.
+9. **Orca Whirlpool devnet pools are the next unknown.** The provider decision
+   puts Orca first, but the venue adapter needs a pool registry per cluster and
+   fixtures for the Whirlpool account layout before it can be priced honestly.
+   Verify devnet pools exist before designing the adapter around them.
+10. **Generate the client from the IDL.** The app reads the IDL; the builder
+    will still be hand-written. A generated TS client (program address,
+    discriminators, account decoders) removes the last place where an
+    instruction name can be typed wrongly.
+11. **Alert on a configured/IDL address mismatch.** The panel shows "differs
+    from IDL" as a badge. That should also surface on the Contract page and in
+    the preflight, because a stale program ID in strategy settings is exactly
+    how a blocked rail gets "fixed" by pointing at the wrong program.

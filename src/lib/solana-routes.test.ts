@@ -65,11 +65,13 @@ describe("solLenderForRun", () => {
     expect(a).not.toBe(b);
   });
 
-  test("balancer rotates in fee order (0% lender first)", () => {
-    expect(solLenderForRun(0, true)).toBe("MarginFi");
-    expect(solLenderForRun(1, true)).toBe("Kamino"); // 0.05% second
-    expect(solLenderForRun(2, true)).toBe("Solend"); // 0.3% third
-    expect(solLenderForRun(3, true)).toBe("MarginFi"); // wraps
+  test("balancer rotates in fee order (0% lenders first)", () => {
+    // Jupiter Lend is the approved primary lender (0%); MarginFi is the other
+    // free lender, Solend the only fee-charging fallback. Kamino is deferred.
+    expect(solLenderForRun(0, true)).toBe("Jupiter Lend");
+    expect(solLenderForRun(1, true)).toBe("MarginFi");
+    expect(solLenderForRun(2, true)).toBe("Solend"); // 0.3% last
+    expect(solLenderForRun(3, true)).toBe("Jupiter Lend"); // wraps
   });
 });
 

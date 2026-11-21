@@ -163,7 +163,7 @@ function SetupChecklist() {
     },
     {
       label: "Arm the flash-loan stack",
-      desc: "Solend / MarginFi / Kamino flash borrows route through the guard stack",
+      desc: "Jupiter Lend (0%) primary, MarginFi and Solend fallbacks — all through the guard stack",
       href: "/sol-terminal/scanner",
       done: true,
     },

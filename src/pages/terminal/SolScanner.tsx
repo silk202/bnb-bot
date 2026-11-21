@@ -30,7 +30,12 @@ import {
   resolveSolRpcUrl,
   type SolCluster,
 } from "@/lib/solana-jito";
-import { SOL_DEXES, solDexByKey, solLenderFeeLabel } from "@/lib/solana";
+import {
+  SOL_DEXES,
+  SOL_FLASH_LENDERS,
+  solDexByKey,
+  solLenderFeeLabel,
+} from "@/lib/solana";
 import {
   LAMPORTS_PER_SOL as LAMPORTS_SOL,
   executeLiveArb,
@@ -591,9 +596,11 @@ export default function SolScanner() {
 
   const breakEvenPct = useMemo(() => {
     // Cheapest possible round trip: the two lowest-fee venues on Solana
-    // (Raydium 0.25% + Meteora 0.2%) + the lowest flash-loan fee.
+    // (Raydium 0.25% + Meteora 0.2%) + the cheapest lender in the rotation
+    // (Jupiter Lend / MarginFi, both 0% — read from the registry, not typed).
     const fees = SOL_DEXES.map((d) => d.fee).sort((a, b) => a - b);
-    return Math.round(((fees[0]! + fees[1]!) * 100 + 0.05) * 100) / 100;
+    const lenderFee = Math.min(...SOL_FLASH_LENDERS.map((l) => l.feePct));
+    return Math.round(((fees[0]! + fees[1]!) * 100 + lenderFee) * 100) / 100;
   }, []);
 
   const loanDisplay = Math.min(SOL_MAX_LOAN_CAP, Math.max(SOL_MIN_LOAN, maxLoan / 2));
@@ -623,7 +630,7 @@ export default function SolScanner() {
           {breakEvenPct.toFixed(2)}%
         </span>
         <span className="text-[10px] text-muted-foreground">
-          cheapest two-venue round trip + Kamino 0.05% flash fee · WSOL → token → WSOL
+          cheapest two-venue round trip + {Math.min(...SOL_FLASH_LENDERS.map((l) => l.feePct)).toFixed(2)}% flash fee · WSOL → token → WSOL
           {privateSubmit && (
             <span className="ml-2 inline-flex items-center gap-1 text-emerald-500">
               <ShieldCheck className="inline size-3" />

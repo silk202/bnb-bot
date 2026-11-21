@@ -31,7 +31,7 @@ import {
   solRailVerdict,
   type SolExecutionRail,
 } from "@/lib/solana-policy";
-import { SOL_DEXES } from "@/lib/solana";
+import { SOL_DEXES, SOL_FLASH_LENDERS } from "@/lib/solana";
 import { SOL_MAX_LOAN_CAP, SOL_MIN_LOAN } from "@/lib/flashbolt";
 import { cn } from "@/lib/utils";
 import {
@@ -128,6 +128,16 @@ export default function SolStrategy() {
     observedGenesis !== null && observedGenesis === expectedGenesis;
   const railVerdict = solRailVerdict({
     rail,
+    cluster: solNetwork,
+    programId,
+    authorized: contractAuthorized,
+    auditApproved,
+  });
+  // A rail that cannot execute must not become the saved active engine: the
+  // contract option stays locked until its verdict passes, so the only rail
+  // that can be selected is one that would actually sign.
+  const contractRailVerdict = solRailVerdict({
+    rail: "solcontract",
     cluster: solNetwork,
     programId,
     authorized: contractAuthorized,
@@ -528,20 +538,32 @@ export default function SolStrategy() {
                   </button>
                   <button
                     type="button"
+                    disabled={!contractRailVerdict.ok}
+                    aria-disabled={!contractRailVerdict.ok}
+                    title={contractRailVerdict.ok ? undefined : contractRailVerdict.message}
                     onClick={() => setRail("solcontract")}
                     className={cn(
                       "rounded-lg border px-3 py-2 text-left transition-colors",
                       rail === "solcontract"
                         ? "border-emerald-500/40 bg-emerald-500/5"
                         : "border-border/60 bg-background/40 hover:border-primary/40",
+                      !contractRailVerdict.ok &&
+                        "cursor-not-allowed opacity-60 hover:border-border/60",
                     )}
                   >
                     <div className="text-xs font-semibold text-foreground">Vault · solcontract</div>
                     <div className="text-[10px] text-muted-foreground">
-                      FlashboltSolana program · needs deployment + authorization
+                      {contractRailVerdict.ok
+                        ? "FlashboltSolana program · armed"
+                        : "Locked — requirements not met"}
                     </div>
                   </button>
                 </div>
+                {!contractRailVerdict.ok && (
+                  <p className="text-[10px] leading-4 text-amber-400">
+                    Contract rail locked — {contractRailVerdict.blockers.join("; ")}.
+                  </p>
+                )}
                 <label className="space-y-1.5">
                   <span className="text-[11px] font-semibold text-muted-foreground">
                     FlashboltSolana program ID (empty = not deployed)
@@ -661,12 +683,21 @@ export default function SolStrategy() {
                 <div>
                   <div className="text-xs font-semibold text-foreground">Lender balancer</div>
                   <p className="text-[10px] text-muted-foreground">
-                    Low-fee lenders first — MarginFi 0% → Kamino 0.05% → Solend 0.3%
+                    Low-fee lenders first — Jupiter Lend 0% → MarginFi 0% → Solend 0.3%
                   </p>
                 </div>
                 <Switch
                   checked={state?.lenderBalancer ?? false}
-                  onCheckedChange={(v) => void setSettings({ lenderBalancer: v })}
+                  onCheckedChange={(v) =>
+                    void setSettings({ lenderBalancer: v }).catch((err) =>
+                      toast.error("Could not save the lender balancer", {
+                        description: userSafeBackendError(
+                          err,
+                          "The settings mutation failed — try again.",
+                        ),
+                      }),
+                    )
+                  }
                 />
               </div>
 
@@ -679,7 +710,16 @@ export default function SolStrategy() {
                 </div>
                 <Switch
                   checked={state?.privateSubmit ?? true}
-                  onCheckedChange={(v) => void setSettings({ privateSubmit: v })}
+                  onCheckedChange={(v) =>
+                    void setSettings({ privateSubmit: v }).catch((err) =>
+                      toast.error("Could not save protected submission", {
+                        description: userSafeBackendError(
+                          err,
+                          "The settings mutation failed — try again.",
+                        ),
+                      }),
+                    )
+                  }
                 />
               </div>
             </CardContent>
@@ -693,15 +733,13 @@ export default function SolStrategy() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-1.5">
-              {[
-                { name: "MarginFi", fee: "0%", note: "flash loans free" },
-                { name: "Kamino", fee: "0.05%", note: "flash borrow fee" },
-                { name: "Solend", fee: "0.3%", note: "flash-loan fee" },
-              ].map((l) => (
-                <div key={l.name} className="flex items-center justify-between rounded-lg border border-border/50 bg-background/40 px-3 py-2">
+              {/* Straight from the registry so the displayed fee is the fee
+                  the balancer sorts by. Sources live on each entry. */}
+              {SOL_FLASH_LENDERS.map((l) => (
+                <div key={l.name} className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-background/40 px-3 py-2">
                   <span className="text-xs font-semibold text-foreground">{l.name}</span>
-                  <span className="font-mono text-xs text-muted-foreground">
-                    {l.fee} · {l.note}
+                  <span className="text-right font-mono text-[10px] text-muted-foreground">
+                    {l.feeLabel} · {l.source}
                   </span>
                 </div>
               ))}

@@ -21,6 +21,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { GitSyncPanel } from "@/components/GitSyncPanel";
+import { SolExecutionPlanPanel } from "@/components/SolExecutionPlanPanel";
 import { NetworkReadinessTable } from "@/components/NetworkReadinessTable";
 import { RpcDiagnosticsPanel } from "@/components/RpcDiagnosticsPanel";
 import { ActivationConsole } from "@/components/ActivationConsole";
@@ -98,6 +99,10 @@ export default function Settings() {
           env read, so it is the real target — and a foreign deployment shows
           as blocked rather than silently receiving metrics. */}
       <BackendTargetCard />
+
+      {/* The two Solana engines — implementation steps, the IDL-derived
+          contract surface, and the lender's verified deployment facts. */}
+      <SolExecutionPlanPanel />
 
       {/* Read-only readiness table — no control here can enable execution. */}
       <NetworkReadinessTable />

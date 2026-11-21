@@ -202,6 +202,50 @@ Gates every choice must pass before code:
 - Any third lender or venue beyond Raydium.
 - When the aggregator phase starts.
 
+## Verification log — 2026-11-21 (the mandatory gate, executed)
+
+Read-only probes against the public clusters. Nothing was deployed, funded or
+signed; these are `getAccountInfo` reads.
+
+| Program | Address | mainnet-beta | devnet |
+| --- | --- | --- | --- |
+| Jupiter Flashloan | `jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS` | present — executable, 1,141,446 lamports, owner `BPFLoaderUpgradeab1e11111111111111111111111` | **null (not deployed)** |
+| Jupiter Lend liquidity | `jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC` | deployed | **null** |
+| Jupiter Lend AMM | `jupZ4m2GqUCJ5iueMfzQf8khFfH31d4XAQt3RzCT9Vd` | deployed | **null** |
+| Jupiter Lend vaults | `jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi` | deployed | not probed |
+| Flashloan admin | `ALXWtv2P4GqH1B7Lq731joag52yRBRqmHV4naiXPTYWL` | 93 bytes; authority `HqPrpa4ESBDnRHRWaiYtjv4xe93wvCS9NNZtDwR89cVa`, liquidity program `jupeiUmn8…`, activation flag 1, **fee word 0** | — |
+
+Reproduce:
+
+```bash
+curl -s -X POST https://api.mainnet-beta.solana.com -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS",{"encoding":"base64"}]}'
+# same call against https://api.devnet.solana.com returns "value": null
+```
+
+Findings:
+
+1. **The devnet gate fails.** Every Jupiter Lend program returns `null` on
+   devnet — the May-2025 deployments the CPI guides named are gone, exactly as
+   the integration repository warns. No devnet-armed flash-arbitrage run can
+   borrow or repay against Jupiter Lend today.
+2. **The mainnet lender is real and free.** The flashloan program is live, its
+   admin account decodes to a governance authority, a liquidity program and a
+   zero fee word, matching the documented "all flashloans are free" and the
+   `FLASHLOAN_FEE_MAX` cap. Fee 0 removes a term from the profit arithmetic; it
+   does not remove the accounting.
+3. **The bracketed shape is unchanged.** Borrow and payback remain top-level
+   instructions around our CPI, so `flash_arb` is still the middle instruction
+   in `[borrow, flash_arb, payback]`, must verify the borrow by balance delta
+   and must leave the principal in the account the payback debits.
+4. **Consequence for the next milestone.** Writing the adapter now means
+   writing it against a lender that cannot be exercised on devnet. The options
+   are recorded in `reports/follow-ups.md` (Round 16); this brief does not
+   choose between them, and the rail stays blocked until one is chosen.
+5. **Recorded in the app.** `src/lib/solana-execution-plan.ts` holds these
+   numbers with their provenance, the Operator Settings panel renders them,
+   and `src/lib/solana-execution-plan.test.ts` fails if they drift.
+
 ## Sources
 
 - Jupiter Lend flash loans (no fee, top-level borrow → logic → payback):
