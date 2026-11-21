@@ -1234,6 +1234,7 @@ dependencies = [
  "anchor-lang",
  "flashbolt_solana",
  "litesvm",
+ "serde_json",
  "solana-sdk",
 ]
 

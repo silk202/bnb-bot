@@ -6,7 +6,7 @@
 
 use anchor_lang::prelude::*;
 
-use crate::constants::CONFIG_VERSION;
+use crate::constants::{CONFIG_RESERVED_BYTES, CONFIG_VERSION};
 
 /// The singleton configuration registry.
 ///
@@ -33,6 +33,14 @@ pub struct Config {
     pub bump: u8,
     /// Configuration schema version.
     pub version: u8,
+    /// Reserved headroom, always zero in version `1`.
+    ///
+    /// The execution milestone's configuration (lender and venue program ids,
+    /// fee/slippage ceilings, a minimum-profit floor) lands here instead of
+    /// forcing an account realloc. It must stay the **last** field: a later
+    /// version reinterprets this tail in place, so appending after it would
+    /// move the boundary for every existing account.
+    pub reserved: [u8; CONFIG_RESERVED_BYTES],
 }
 
 impl Config {

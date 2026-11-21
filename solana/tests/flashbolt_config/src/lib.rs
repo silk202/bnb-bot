@@ -24,7 +24,7 @@ use solana_sdk::{
 };
 
 pub use flashbolt_solana::{
-    constants::{CONFIG_ACCOUNT_SPACE, CONFIG_SEED},
+    constants::{CONFIG_ACCOUNT_SPACE, CONFIG_RESERVED_BYTES, CONFIG_SEED},
     error::FlashboltError,
     id,
     state::Config,

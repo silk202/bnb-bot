@@ -58,12 +58,13 @@ pub(crate) use instructions::pause::{
 #[cfg(feature = "cpi")]
 pub(crate) use instructions::update_authorities::__cpi_client_accounts_update_authorities;
 
-/// Confirmed program address (2026-11-21). It is the public key of the
-/// deployment keypair held in project settings; that keypair is the only one
-/// that may deploy this program to this address.
-/// `scripts/solana-program-preflight.sh` refuses READY unless `declare_id!`,
-/// every `Anchor.toml` entry, the IDL `address` and the program keypair all
-/// agree on this value.
+// Confirmed program address (2026-11-21). It is the public key of the
+// deployment keypair held in project settings; that keypair is the only one
+// that may deploy this program to this address.
+// `scripts/solana-program-preflight.sh` refuses READY unless `declare_id!`,
+// every `Anchor.toml` entry, the IDL `address` and the program keypair all
+// agree on this value. (Plain comments, not `///`: rustdoc generates nothing
+// for a macro invocation, and clippy rejects a doc comment there.)
 declare_id!("82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd");
 
 #[program]

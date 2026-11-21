@@ -653,6 +653,24 @@
               "Configuration schema version."
             ],
             "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Reserved headroom, always zero in version `1`.",
+              "",
+              "The execution milestone's configuration (lender and venue program ids,",
+              "fee/slippage ceilings, a minimum-profit floor) lands here instead of",
+              "forcing an account realloc. It must stay the **last** field: a later",
+              "version reinterprets this tail in place, so appending after it would",
+              "move the boundary for every existing account."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                256
+              ]
+            }
           }
         ]
       }

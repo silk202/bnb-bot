@@ -1022,3 +1022,75 @@ address-unpinned and explicitly provisional.
 - **No test covers `nextArmStamps`'s interaction with the mutation.** The pure
   rules are tested (four new cases); `saveDeployment` and `backfillArmStamps` are
   still typecheck- and review-verified.
+
+---
+
+## Round 14 — 2026-11-21, Solana program foundation
+
+1. **The provider decision now blocks the execution milestone.** One lender, one
+   DEX and one aggregator, devnet-only first, is recorded in
+   `reports/flashbolt-provider-brief-2026-11-21.md`. The brief's hard finding:
+   none of marginfi, Kamino, Jupiter Lend or Solend allows the flash borrow/repay
+   to be called through CPI, so `flash_arb` is a middle instruction between two
+   top-level lender instructions. That fixes what it may assume — it must verify
+   the borrow, measure profit from balances and leave principal plus fee to the
+   repay — and it is why the copy in the terminal still says `flash_arb` is
+   pending rather than sketching a CPI wrapper.
+2. **`Config` now reserves 256 bytes** (`reserved: [u8; 256]`, account 395 bytes)
+   instead of an exact-fit 139. The reserve is the execution milestone's field
+   space (lender and venue program ids, fee/slippage ceilings, minimum profit),
+   so a future field does not need a realloc; it must stay last, and the new IDL
+   test pins the field order and type. Rent on the difference is a few thousand
+   lamports.
+3. **The tracked IDL is now tested.** Six conformance tests re-derive every
+   instruction, account and event discriminator, plus argument names/types, the
+   signer set and the `flashbolt_config` PDA seed, the error codes in declaration
+   order and the `Config` layout. A stale `idl/flashbolt_solana.json` now fails
+   `cargo test` instead of shipping.
+4. **Nothing was deployed.** Devnet arming still needs a funded deployer (~3 SOL
+   with the deploy buffer) and explicit go-ahead; the cluster is still
+   mainnet-configured and the preflight stays BLOCKED on exactly those two gates.
+   Mainnet remains off until the audit.
+5. **Devnet availability is now a selection criterion, not an afterthought.**
+   Jupiter's Router quote service is mainnet-oriented, so the devnet-first cut
+   cannot lean on the aggregator: the first `flash_arb` targets a direct venue
+   CPI and the aggregator arrives after that path is proven.
+6. **The reserve makes the instruction-builder drift more likely, not less.**
+   `SolContract.tsx` still hand-copies instruction names; wiring it to the IDL
+   moved up the list because `Config` now carries a field the page does not know
+   about.
+
+## Round 15 — 2026-11-21, review pass plus CI and the provider decision
+
+1. **The provider decision is recorded, and one of its gates is the real task.**
+   Jupiter Lend (no lender fee), Orca Whirlpool first, Raydium as a second
+   adapter, Kamino Lend deferred, aggregator deferred, devnet only. Jupiter
+   Lend's own repository says its devnet deployments are from May 2025 and do not
+   match the mainnet IDLs, so resolving the real devnet program id, instruction
+   set, account layouts and fees is the first piece of work — not the adapter.
+2. **The lender swap does not change the instruction shape.** Jupiter Lend's
+   borrow/payback is a top-level pair, like Kamino's and marginfi's, so
+   `flash_arb` stays a middle instruction in `[borrow, flash_arb, payback]` and
+   still has to verify the borrow, measure profit from balances and leave the
+   principal in the account the payback debits. Zero lender fee removes a term
+   from the arithmetic; it does not remove the accounting.
+3. **`solana/SECURITY.md` now exists.** Assets, six trust boundaries, fifteen
+   threats each with the mitigation and whether it is implemented or planned,
+   accepted risks, what is out of scope, and the audit focus. It states plainly
+   that nothing is deployed and nothing is audited.
+4. **The program has a CI job of its own.** `solana-program` on `ubuntu-24.04`
+   (Anchor 0.31.1's prebuilt binary needs GLIBC ≥ 2.38), Solana CLI 4.4.1 pinned
+   so `cargo-build-sbf --arch v1` keeps producing an artifact LiteSVM 0.7 can
+   load, SBF build → `anchor idl build` diff → clippy `-D warnings` → both test
+   suites → preflight. It never deploys and has no key material.
+5. **The preflight gained a CI mode rather than a second script.**
+   `FLASHBOLT_PREFLIGHT_CI=1` downgrades exactly two lines — the program keypair
+   and the devnet deployer — to notes, because a runner can never have either.
+   Source, address, IDL and toolchain gates still fail the run. Without this the
+   job would have been red on arrival, and a gate nobody can satisfy gets
+   deleted.
+6. **The review found the IDL test documenting a check it did not perform.** The
+   `EVENTS` array claimed to be in `state.rs` order while the test sorted both
+   sides, so the order was neither asserted nor correct. Fixed: the array is in
+   declaration order and the comment now says the comparison is a set. No
+   behaviour change.

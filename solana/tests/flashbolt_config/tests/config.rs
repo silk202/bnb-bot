@@ -47,10 +47,31 @@ fn initialize_writes_the_configuration_registry() {
     assert_eq!(config.pause_authority, actors.pause_authority.pubkey());
     assert!(!config.paused);
     assert_eq!(config.version, 1);
+    assert_eq!(config.reserved, [0u8; CONFIG_RESERVED_BYTES]);
 
     let (pda, bump) = Pubkey::find_program_address(&[CONFIG_SEED], &id());
     assert_eq!(config.bump, bump);
     assert!(harness.account_exists(&pda));
+}
+
+#[test]
+fn config_reserves_headroom_for_the_execution_milestone() {
+    let (harness, _) = initialized();
+    let config = harness.config();
+
+    // The reserve exists so the execution milestone's configuration (lender and
+    // venue program ids, fee/slippage ceilings, minimum profit) lands in this
+    // account instead of forcing a realloc after the first deploy.
+    assert_eq!(config.reserved.len(), CONFIG_RESERVED_BYTES);
+    assert_eq!(CONFIG_RESERVED_BYTES, 256);
+    assert!(
+        config.reserved.iter().all(|byte| *byte == 0),
+        "version 1 must leave the reservation zeroed"
+    );
+
+    // Size is exact: discriminator + four keys + bool + bump + version +
+    // reserve. `Harness::config` already asserts the on-chain length matches.
+    assert_eq!(CONFIG_ACCOUNT_SPACE, 8 + (32 * 4) + 3 + CONFIG_RESERVED_BYTES);
 }
 
 #[test]

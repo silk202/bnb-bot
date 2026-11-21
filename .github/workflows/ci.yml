@@ -4,7 +4,10 @@
 #      zips/userscript as a downloadable artifact.
 #   2. The Convex backend deploys automatically when CONVEX_DEPLOY_KEY is
 #      configured as a repo secret (Settings → Secrets → Actions).
-#   3. Vercel / Netlify / Cloudflare Pages / Render each auto-build from the
+#   3. The `solana-program` job builds the Anchor program (Solana SBF), proves
+#      the tracked IDL still matches the source, runs clippy and the LiteSVM +
+#      IDL conformance tests. It never deploys and never needs a keypair.
+#   4. Vercel / Netlify / Cloudflare Pages / Render each auto-build from the
 #      same push via their native git integration — their zero-config build
 #      settings live in vercel.json / netlify.toml / wrangler.toml /
 #      render.yaml (all run `bun run build`, which includes the overlay
@@ -66,6 +69,99 @@ jobs:
             public/overlay/*.user.js
           if-no-files-found: error
           retention-days: 30
+
+  # The on-chain program is a separate toolchain (Rust + Solana SBF + Anchor)
+  # and a separate failure domain, so it gets its own job: an app regression
+  # must not hide a program regression, or the other way round.
+  #
+  # Pinned deliberately:
+  #   * Solana CLI 4.4.1 — the version this workspace was verified with.
+  #     `--arch v1` is required because LiteSVM 0.7 rejects the Agave default
+  #     (v3) with `Instruction(InvalidAccountData)`.
+  #   * Anchor 0.31.1 — matches anchor-lang in the program's Cargo.toml. Its
+  #     prebuilt binary needs GLIBC >= 2.38, which is why this job runs on
+  #     ubuntu-24.04 rather than relying on `ubuntu-latest`.
+  #
+  # Nothing here signs or deploys: the program keypair and a funded devnet
+  # deployer do not exist on a runner, which is exactly what the preflight's
+  # CI mode treats as expected rather than as a failure.
+  solana-program:
+    name: Solana program (build, IDL, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo and the SBF build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            solana/target
+          key: solana-${{ runner.os }}-${{ hashFiles('solana/Cargo.lock') }}
+
+      - name: Install Rust stable with clippy
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - name: Install Solana CLI 4.4.1
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v4.4.1/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI 0.31.1
+        run: |
+          cargo install --git https://github.com/solana-foundation/anchor avm --locked --force
+          avm install 0.31.1
+          avm use 0.31.1
+          echo "$HOME/.avm/bin" >> "$GITHUB_PATH"
+
+      - name: Print toolchain versions
+        run: |
+          rustc --version && cargo --version
+          cargo-build-sbf --version
+          solana --version && anchor --version
+
+      # The tests load this artifact and fail (never skip) when it is missing.
+      - name: Build the program (SBF v1)
+        working-directory: solana
+        run: |
+          cargo-build-sbf --arch v1 \
+            --manifest-path programs/flashbolt_solana/Cargo.toml \
+            --sbf-out-dir target/deploy
+
+      # The conformance tests prove the IDL's *content*; this proves the file
+      # was regenerated in the same commit, so it cannot lag the source.
+      - name: Regenerate the IDL and fail on drift
+        working-directory: solana
+        run: |
+          anchor idl build -o /tmp/flashbolt_solana.json
+          diff -u idl/flashbolt_solana.json /tmp/flashbolt_solana.json
+
+      # `-D warnings` is the gate. The two allows are not ours: anchor-lang
+      # 0.31.1's `#[program]` / `#[derive(Accounts)]` expansion emits a call to
+      # the deprecated `AccountInfo::realloc` and `cfg` conditions (`anchor-debug`,
+      # `custom-heap`, `custom-panic`, `solana`) that check-cfg does not know, so
+      # a bare `-D warnings` fails on anchor's generated code, not on this
+      # program. Every other lint, including the `unused doc comment` this gate
+      # found on `declare_id!`, still fails the build.
+      - name: Clippy (program crate, warnings are errors)
+        working-directory: solana
+        run: |
+          cargo clippy -p flashbolt_solana --all-targets --locked -- \
+            -D warnings -A deprecated -A unexpected_cfgs
+
+      - name: Tests (LiteSVM + IDL conformance)
+        working-directory: solana
+        run: cargo test -p flashbolt-config-tests --locked
+
+      # Fail-closed on every source/IDL/toolchain gate. CI mode relaxes only
+      # the two things a runner cannot have — a program keypair and a funded
+      # devnet deployer — never the address, IDL or toolchain checks.
+      - name: Preflight (CI mode, read-only)
+        run: bash scripts/solana-program-preflight.sh
+        env:
+          FLASHBOLT_PREFLIGHT_CI: "1"
 
   deploy-convex:
     needs: verify

@@ -7,7 +7,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{CONFIG_ACCOUNT_SPACE, CONFIG_SEED, CONFIG_VERSION},
+    constants::{
+        CONFIG_ACCOUNT_SPACE, CONFIG_RESERVED_BYTES, CONFIG_SEED, CONFIG_VERSION,
+    },
     error::FlashboltError,
     state::{Config, ConfigInitialized},
 };
@@ -58,6 +60,7 @@ pub fn handle(
     config.paused = false;
     config.bump = ctx.bumps.config;
     config.version = CONFIG_VERSION;
+    config.reserved = [0u8; CONFIG_RESERVED_BYTES];
 
     emit!(ConfigInitialized {
         admin: config.admin,
