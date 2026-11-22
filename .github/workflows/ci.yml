@@ -135,20 +135,30 @@ jobs:
         run: cargo install cargo-build-sbf --locked
 
       - name: Install SBF platform-tools v1.57
-        # The installer resolves the release through the GitHub API, which has
-        # been observed returning an undecodable response; retry rather than
-        # failing a whole job on one bad response. The toolchain is cached
-        # above, so a warm run never asks GitHub at all.
+        # cargo-build-sbf resolves the release through the GitHub API, which
+        # rate-limits runner IPs and failed with "Failed to parse Github
+        # response: error decoding response body" on every retry. The release
+        # asset is public and the version is pinned, so fetch that directly
+        # into the cache layout the wrapper reads. A warm cache (see the cache
+        # step above) skips this entirely.
         run: |
-          CB="$HOME/.cargo/bin/cargo-build-sbf"
-          for attempt in 1 2 3; do
-            if "$CB" --install-only --tools-version v1.57; then
-              exit 0
-            fi
-            echo "platform-tools install failed (attempt $attempt) — retrying"
-            sleep 15
-          done
-          exit 1
+          TOOLS="$HOME/.cache/solana/v1.57/platform-tools"
+          if [ -f "$TOOLS/version.md" ]; then
+            echo "platform-tools v1.57 already cached"
+            exit 0
+          fi
+          curl -fsSL --retry 3 --retry-all-errors \
+            "https://github.com/anza-xyz/platform-tools/releases/download/v1.57/platform-tools-linux-x86_64.tar.bz2" \
+            -o /tmp/platform-tools.tar.bz2
+          rm -rf /tmp/pt && mkdir -p /tmp/pt
+          tar -xjf /tmp/platform-tools.tar.bz2 -C /tmp/pt
+          # The archive root may or may not be wrapped in a directory; find the
+          # one holding version.md and install its contents at the expected path.
+          SRC="$(dirname "$(find /tmp/pt -name version.md -print -quit)")"
+          test -f "$SRC/version.md" || { echo "platform-tools archive has no version.md"; exit 1; }
+          mkdir -p "$TOOLS"
+          cp -a "$SRC/." "$TOOLS/"
+          test -f "$TOOLS/version.md"
 
       - name: Install Anchor CLI 0.31.1
         run: |
