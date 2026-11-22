@@ -31,6 +31,7 @@ import {
   type SolWalletRole,
 } from "./solana-policy";
 import { fetchWithTimeout } from "./fetch-timeout";
+import { solSigningVerdict, type SolRailSettings } from "./sol-rail-gate";
 
 // ---------------------------------------------------------------------------
 // Jupiter v1 API (real endpoints, no keys required for the public tier)
@@ -678,7 +679,24 @@ export async function executeLiveSnipeBuy(opts: {
    * a real, smaller clip. Below the floor the refusal stands.
    */
   fitToWallet?: boolean;
+  /**
+   * The persisted engine settings. Signing is gated on them: this path only
+   * signs Jupiter swaps, so an armed `solcontract` rail refuses here instead
+   * of quietly signing a swap the operator did not select.
+   */
+  railSettings?: SolRailSettings;
 }): Promise<LiveSnipeBuyOutcome> {
+  const signing = solSigningVerdict({
+    rail: opts.railSettings?.rail ?? "jupiter",
+    cluster: opts.railSettings?.cluster ?? "mainnet",
+    programId: opts.railSettings?.programId,
+    authorized: opts.railSettings?.authorized,
+    auditApproved: opts.railSettings?.auditApproved,
+    engine: "jupiter",
+  });
+  if (!signing.ok) {
+    return { ok: false, engine: "rail-gate", error: signing.message, venue: "Jupiter" };
+  }
   const provider = await resolveLiveSigner(opts.provider);
   if (!provider?.publicKey) {
     return { ok: false, engine: "none", error: "no-wallet" };
@@ -796,7 +814,20 @@ export async function executeLiveSnipeSell(opts: {
   jitoEngines?: string[];
   provider?: SolSigningProvider;
   priorityFeeMicroLamports?: number;
+  /** Persisted engine settings — the exit path signs Jupiter swaps only. */
+  railSettings?: SolRailSettings;
 }): Promise<LiveSnipeSellOutcome> {
+  const signing = solSigningVerdict({
+    rail: opts.railSettings?.rail ?? "jupiter",
+    cluster: opts.railSettings?.cluster ?? "mainnet",
+    programId: opts.railSettings?.programId,
+    authorized: opts.railSettings?.authorized,
+    auditApproved: opts.railSettings?.auditApproved,
+    engine: "jupiter",
+  });
+  if (!signing.ok) {
+    return { ok: false, engine: "rail-gate", error: signing.message };
+  }
   const provider = await resolveLiveSigner(opts.provider);
   if (!provider?.publicKey) {
     return { ok: false, engine: "none", error: "no-wallet" };
@@ -962,6 +993,13 @@ export async function executeLiveArb(opts: {
    * vault-signed route and 0 for an external wallet.
    */
   minLoanLamports?: number;
+  /**
+   * Persisted engine settings. Checked BEFORE any quote or signature: the
+   * arbitrage route only exists on the Jupiter rail today, so an operator who
+   * armed `solcontract` must not receive a Jupiter-signed route from an older
+   * client or a stale tab.
+   */
+  railSettings?: SolRailSettings;
   onPhase?: (phase: string) => void;
 }): Promise<LiveArbOutcome> {
   const provider = await resolveLiveSigner(opts.provider);
@@ -996,6 +1034,18 @@ export async function executeLiveArb(opts: {
     error,
     ...extra,
   });
+
+  // SIGNING GATE — before the cluster pin, the baseline read and the first
+  // wallet prompt. An engine that is not the armed rail never reaches a key.
+  const signing = solSigningVerdict({
+    rail: opts.railSettings?.rail ?? "jupiter",
+    cluster: opts.railSettings?.cluster ?? "mainnet",
+    programId: opts.railSettings?.programId,
+    authorized: opts.railSettings?.authorized,
+    auditApproved: opts.railSettings?.auditApproved,
+    engine: "jupiter",
+  });
+  if (!signing.ok) return fail("rail-gate", signing.message);
 
   try {
     // ── CLUSTER PIN ── verify the RPC serves the pinned chain BEFORE any

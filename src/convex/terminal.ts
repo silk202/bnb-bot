@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { httpAction } from "./_generated/server";
 import { classifyExecutionMethod } from "../lib/execution-method";
-import { mergeSolRailSettings, solRailVerdict } from "../lib/sol-rail-gate";
+import { gateSolRailWrite } from "./rail-gate";
 import { type Doc, type Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
 import { getCurrentUser } from "./users";
@@ -2634,38 +2634,17 @@ export const setSettings = mutation({
     // the merged rail is `solcontract`, so an already-armed rail cannot be
     // de-armed by writing a bad program ID, while a Jupiter save is never
     // gated.
-    const railFieldsInPatch =
-      args.solExecutionRail !== undefined ||
-      args.solContractProgramId !== undefined ||
-      args.solContractAuthorized !== undefined ||
-      args.solAuditApproved !== undefined ||
-      args.solNetwork !== undefined;
-    if (railFieldsInPatch) {
-      const merged = mergeSolRailSettings(
-        {
-          rail: state.solExecutionRail ?? "jupiter",
-          cluster: state.solNetwork ?? "mainnet",
-          programId: state.solContractProgramId,
-          authorized: state.solContractAuthorized ?? false,
-          auditApproved: state.solAuditApproved ?? false,
-        },
-        {
-          rail: args.solExecutionRail,
-          cluster: args.solNetwork,
-          programId: args.solContractProgramId,
-          authorized: args.solContractAuthorized,
-          auditApproved: args.solAuditApproved,
-        },
-      );
-      if (merged.rail === "solcontract") {
-        const verdict = solRailVerdict(merged);
-        if (!verdict.ok) {
-          throw new Error(
-            `Contract rail blocked — ${verdict.blockers.join("; ")}. Nothing was saved; the rail is unchanged.`,
-          );
-        }
-      }
-    }
+    // The decision itself lives in ./rail-gate so the mutation and its tests
+    // run the same function. `state` supplies the stored half of the merge;
+    // the patch supplies only what this save actually changes.
+    const railWrite = gateSolRailWrite(state, {
+      solExecutionRail: args.solExecutionRail,
+      solNetwork: args.solNetwork,
+      solContractProgramId: args.solContractProgramId,
+      solContractAuthorized: args.solContractAuthorized,
+      solAuditApproved: args.solAuditApproved,
+    });
+    if (railWrite.error) throw new Error(railWrite.error);
     if (Object.keys(patch).length > 0) {
       await ctx.db.patch(state._id, patch);
     }

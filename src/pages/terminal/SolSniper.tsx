@@ -568,6 +568,15 @@ export default function SolSniper() {
           // shrinks to what the wallet can front and lands as a real, smaller
           // buy instead of a doomed Phantom popup or a raw refusal.
           fitToWallet: true,
+          // Engine gate: this path signs Jupiter swaps, so it refuses when the
+          // operator armed flash arbitrage instead.
+          railSettings: {
+            rail: state?.solExecutionRail ?? "jupiter",
+            cluster: solCluster,
+            programId: state?.solContractProgramId ?? "",
+            authorized: state?.solContractAuthorized ?? false,
+            auditApproved: state?.solAuditApproved ?? false,
+          },
         });
         if (!buy.ok) {
           await recordRef.current({
@@ -642,6 +651,13 @@ export default function SolSniper() {
             solRpcUrl: rpc,
             jitoEngines: jito,
             provider: signer,
+            railSettings: {
+              rail: state?.solExecutionRail ?? "jupiter",
+              cluster: solCluster,
+              programId: state?.solContractProgramId ?? "",
+              authorized: state?.solContractAuthorized ?? false,
+              auditApproved: state?.solAuditApproved ?? false,
+            },
           });
           if (!sell.ok) {
             toast.warning("Position opened — sell did not land", {

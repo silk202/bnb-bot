@@ -1268,3 +1268,74 @@ not pending**, and that changes the next milestone from "write the adapter" to
    still be READ by the engine; the client shows it blocked, but the engine
    path should re-run `solRailVerdict` before it signs (same function, no new
    rule).
+
+## Round 19 — 2026-11-22 · Rust CI toolchain, signing gate, devnet funding card
+
+**1. The Rust job was failing on its toolchain, not on the program.** The job
+installed the `v4.4.1` CLI, whose SBF v1 toolchain bundles Cargo 1.79. Cargo
+1.79 cannot parse an `edition2024` manifest, and the current dependency tree
+contains several (`cpufeatures 0.3.1` via `blake3`/`chacha20`), so the build died
+before compiling a single line with:
+
+```
+error: failed to parse manifest at .../cpufeatures-0.3.1/Cargo.toml
+  feature `edition2024` is required ... Cargo (1.79.0)
+```
+
+The fix is in the workflow, not the lockfile: install the CLI from the `stable`
+channel (whose `cargo-build-sbf` is 4.5.0), pin the SBF compiler separately with
+`--tools-version v1.57` (Rust 1.95, edition2024-capable) and build with the arch
+spelling this toolchain accepts (`v1`; the older build spells it `sbfv1`, which
+is what made the previous "arch name" attempt look fixed while the compiler was
+still 1.79). Nothing in `solana/Cargo.lock` was downgraded.
+
+**2. Engine signing is gated, not just engine activation.** `solSigningVerdict`
+joins `solRailVerdict` in the dependency-free gate module and answers a
+different question: *may this engine sign right now?* Every live path
+(`executeLiveArb`, `executeLiveSnipeBuy`, `executeLiveSnipeSell`) now checks it
+before it resolves a signer, so
+
+- a Jupiter signing path refuses while the operator has armed flash arbitrage,
+  and
+- the flash arbitrage engine refuses on any rail the settings mutation would
+  have refused (unpinned ID, no authorization, mainnet without the audit).
+
+That closes Round 18 follow-up #9 with the same rule set — no second policy
+implementation to drift.
+
+**3. Devnet funding is a card, and it tells the truth.** SOL Strategy (testnet
+only) shows the armed wallet, its live devnet `getBalance`, the official faucet
+link with its documented limit (`up to 2 requests every 8 hours`), the verbatim
+HTTP 410 from `requestAirdrop`, and the `solana airdrop` caveat — the CLI talks
+to the same closed RPC faucet. It states plainly that FlashBolt cannot claim for
+the operator. Round 18 follow-up #8 is done except for a copy-to-clipboard
+button (the address and the exact CLI command are shown instead).
+
+**4. The write gate is tested where it runs.** The decision moved into
+`convex/rail-gate.ts` (`gateSolRailWrite`), which `terminal.setSettings` calls
+and which `src/lib/__tests__/rail-gate-server.test.ts` exercises directly:
+one-save activation, the pin, authorization, the mainnet audit, re-pointing an
+armed rail, clearing/de-authorizing an armed rail, switching an armed rail to
+mainnet, returning to Jupiter, and the guarantee that a slippage/venue save is
+never gated.
+
+**Still blocked (unchanged).**
+
+5. FlashboltSolana is not deployed to devnet: no funded deployer and no
+   go-ahead (the SBF build itself now works in CI and locally).
+6. Mainnet needs the independent audit plus explicit approval.
+7. The borrow/payback adapter still waits on the operator's lender path
+   (Jupiter Lend has no devnet deployment; only Kamino does).
+
+**New follow-ups.**
+
+8. **Align DRILLS.md's CLI-airdrop line with the card.** The drill still lists
+   `solana airdrop 2 … --url devnet` as an option; against the public devnet RPC
+   it fails with the same 410. Either name a faucet-serving RPC or drop the line.
+9. **Fail loudly on toolchain drift.** The workflow prints the versions but does
+   not assert them; add a `cargo-build-sbf --version` check for platform-tools
+   `v1.57` so a silent channel swap fails at the top of the job.
+10. **Copy-to-clipboard on the devnet card** (address and CLI command), with the
+    balance re-read after the operator returns from the faucet page.
+11. **Drop the SBF v1 pin once LiteSVM accepts the Agave default (v3)** — that
+    is the only reason this job pins `--arch v1`.

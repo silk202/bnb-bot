@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import { SolDevnetFundCard } from "@/components/SolDevnetFundCard";
 import { useTerminal } from "@/hooks/use-terminal";
 import { userSafeBackendError } from "@/lib/backend-outage";
 import {
@@ -513,6 +514,9 @@ export default function SolStrategy() {
                   )}
                 </div>
               </div>
+
+              {/* Devnet funding — faucet link + real balance, testnet only */}
+              <SolDevnetFundCard cluster={solNetwork} rpcOverride={solRpcOverride} />
 
               {/* Execution rail — vault Jupiter swaps vs the solcontract program */}
               <div className="space-y-3 rounded-xl border border-border/60 bg-background/40 px-3.5 py-3">

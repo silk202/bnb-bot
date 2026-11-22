@@ -360,6 +360,16 @@ export default function SolScanner() {
             mint: r.tokenAddress,
             loanLamports,
             provider,
+            // The engine/rail the operator persisted. The execution module
+            // refuses to sign when this path is not the armed engine, so the
+            // guard does not depend on this component's state being fresh.
+            railSettings: {
+              rail,
+              cluster: solCluster,
+              programId: state?.solContractProgramId ?? "",
+              authorized: state?.solContractAuthorized ?? false,
+              auditApproved: state?.solAuditApproved ?? false,
+            },
             slippageBps: Math.round((state?.slippage ?? 0.5) * 100),
             solRpcUrl,
             // Jito block-engine when protected submission is ON; otherwise the

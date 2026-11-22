@@ -69,6 +69,17 @@ export const SOL_PROGRAM_ID_PIN =
   "82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd";
 
 /**
+ * The engine a signing path is about to use. `jupiter` is the only engine with
+ * an implemented signer today; `solcontract` is the FlashboltSolana program.
+ */
+export type SolSigningEngine = SolExecutionRail;
+
+export interface SolSigningGateInput extends SolRailInput {
+  /** Which engine is asking to sign — never inferred from the rail alone. */
+  engine: SolSigningEngine;
+}
+
+/**
  * Can the selected rail execute at all? The Jupiter rail needs nothing but a
  * wallet; the contract rail needs a real deployed program, an explicit
  * operator authorization and — on mainnet — the audit sign-off. Until all of
@@ -76,17 +87,72 @@ export const SOL_PROGRAM_ID_PIN =
  */
 export function solRailVerdict(input: SolRailInput): SolRailVerdict {
   if (input.rail === "jupiter") {
+    return jupiterVerdict(input.cluster);
+  }
+
+  return contractVerdict(input);
+}
+
+/**
+ * The SIGNING gate — the last check before a key touches a transaction.
+ *
+ * `solRailVerdict` answers "can this rail execute?"; this answers "may THIS
+ * engine sign right now?". Two independent facts are required:
+ *
+ *   1. the engine asking to sign is the rail the operator activated, and
+ *   2. that rail's own verdict passes (pinned program ID, authorization,
+ *      mainnet audit).
+ *
+ * They are separate on purpose. A Jupiter swap path must not sign while the
+ * operator has armed flash arbitrage, and the contract engine must not sign on
+ * a rail that the settings mutation would have refused. Callers pass the live
+ * settings from the execution surface, so neither the UI nor an older client
+ * can get bytes signed by an engine that is not armed.
+ */
+export function solSigningVerdict(input: SolSigningGateInput): SolRailVerdict {
+  if (input.engine === "jupiter") {
+    if (input.rail !== "jupiter") {
+      const blockers = [
+        `the active rail is ${input.rail}, not jupiter — this path only signs Jupiter swaps`,
+      ];
+      return {
+        ok: false,
+        rail: "jupiter",
+        programId: null,
+        blockers,
+        message: `Jupiter signing blocked — ${blockers.join("; ")}. Nothing was signed or spent.`,
+      };
+    }
+    const armed = jupiterVerdict(input.cluster);
     return {
-      ok: true,
-      rail: "jupiter",
-      programId: null,
-      blockers: [],
-      message: `Jupiter rail armed — real swaps from the ${
-        input.cluster === "mainnet" ? "mainnet" : "devnet"
-      } wallet.`,
+      ...armed,
+      message: `Jupiter signing armed — ${armed.message}`,
     };
   }
 
+  const verdict = contractVerdict(input);
+  if (verdict.ok) {
+    return { ...verdict, message: `Flash arbitrage signing armed — ${verdict.message}` };
+  }
+  return {
+    ...verdict,
+    message: `Flash arbitrage signing blocked — ${verdict.blockers.join("; ")}. Nothing was signed or spent.`,
+  };
+}
+
+function jupiterVerdict(cluster: SolRailInput["cluster"]): SolRailVerdict {
+  return {
+    ok: true,
+    rail: "jupiter",
+    programId: null,
+    blockers: [],
+    message: `Jupiter rail armed — real swaps from the ${
+      cluster === "mainnet" ? "mainnet" : "devnet"
+    } wallet.`,
+  };
+}
+
+function contractVerdict(input: SolRailInput): SolRailVerdict {
   const programId = (input.programId ?? "").trim();
   const blockers: string[] = [];
   if (!programId) {
