@@ -82,9 +82,11 @@ jobs:
   #     ships cargo-build-sbf 4.5.0.
   #   * platform-tools v1.57 (Rust 1.95) — pinned on its own, so the SBF
   #     compiler cannot drift with the channel.
-  #   * `--arch v1` is required because LiteSVM 0.7 rejects the Agave default
-  #     (v3) with `Instruction(InvalidAccountData)`. Note the arch names: this
-  #     cargo-build-sbf spells it `v1`, not `sbfv1`.
+  #   * The SBF v1 arch is required because LiteSVM 0.7 rejects the Agave
+  #     default (v3) with `Instruction(InvalidAccountData)`. Its spelling is
+  #     not stable across cargo-build-sbf builds (`sbfv1` on the runner,
+  #     `v1` on the channel build used locally), so the build step reads the
+  #     accepted name from the binary's own help output.
   #   * Anchor 0.31.1 — matches anchor-lang in the program's Cargo.toml. Its
   #     prebuilt binary needs GLIBC >= 2.38, which is why this job runs on
   #     ubuntu-24.04 rather than relying on `ubuntu-latest`.
@@ -138,7 +140,12 @@ jobs:
       - name: Build the program (SBF v1)
         working-directory: solana
         run: |
-          cargo-build-sbf --arch v1 --tools-version v1.57 \
+          # The arch flag's spelling depends on the cargo-build-sbf build, and
+          # an unknown value fails the step before compiling. Take the name
+          # from the binary's accepted set instead of hard-coding one.
+          if cargo-build-sbf --help | grep -qw sbfv1; then arch=sbfv1; else arch=v1; fi
+          echo "SBF arch: $arch"
+          cargo-build-sbf --arch "$arch" --tools-version v1.57 \
             --manifest-path programs/flashbolt_solana/Cargo.toml \
             --sbf-out-dir target/deploy
 
