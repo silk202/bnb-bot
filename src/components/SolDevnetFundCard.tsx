@@ -13,14 +13,14 @@
  *   3. link the official faucet and quote its exact limit — never a promise
  *      that the app will fund anything for the operator.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CopyButton } from "@/components/CopyButton";
 import { resolveSolRpcUrl, type SolCluster } from "@/lib/solana-jito";
-import { resolveLiveSigner, solRpcCall } from "@/lib/solana-live-execution";
-import { Check, Coins, Copy, ExternalLink, RefreshCw, Wallet } from "lucide-react";
+import { fetchSolBalanceLamports, resolveLiveSigner } from "@/lib/solana-live-execution";
+import { Coins, ExternalLink, RefreshCw, Wallet } from "lucide-react";
 
 /** The official devnet faucet — a web page, not an API. */
 export const SOL_DEVNET_FAUCET_URL = "https://faucet.solana.com";
@@ -45,8 +45,6 @@ export function SolDevnetFundCard({
   const [lamports, setLamports] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState<"address" | "command" | null>(null);
-  const copiedTimer = useRef<number | null>(null);
 
   const read = useCallback(async () => {
     setLoading(true);
@@ -59,8 +57,7 @@ export function SolDevnetFundCard({
         setLamports(null);
         return;
       }
-      const balance = await solRpcCall<number>(rpcUrl, "getBalance", [owner]);
-      setLamports(typeof balance === "number" ? balance : null);
+      setLamports(await fetchSolBalanceLamports(rpcUrl, owner));
     } catch (err) {
       setLamports(null);
       setError(err instanceof Error ? err.message : "RPC read failed");
@@ -89,33 +86,13 @@ export function SolDevnetFundCard({
       if (document.visibilityState === "visible") void read();
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
-    };
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [devnet, read]);
 
   if (!devnet) return null;
 
   const sol = lamports === null ? null : lamports / LAMPORTS;
   const cliCommand = address ? `solana airdrop 2 ${address} --url devnet` : null;
-
-  const copy = async (kind: "address" | "command", text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(kind);
-      if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
-      copiedTimer.current = window.setTimeout(() => setCopied(null), 2000);
-      toast.success(
-        kind === "address" ? "Devnet wallet address copied" : "CLI command copied",
-        { description: text },
-      );
-    } catch {
-      toast.error("Copy failed", {
-        description: "Your browser blocked clipboard access — select the text instead.",
-      });
-    }
-  };
 
   return (
     <Card className="border-border/70 bg-card/40">
@@ -133,23 +110,21 @@ export function SolDevnetFundCard({
           <div className="flex items-start justify-between gap-3">
             <span className="text-muted-foreground">Wallet</span>
             <span className="flex min-w-0 items-start gap-1">
-              <span className="break-all text-right text-foreground/90">
+              <span className="min-w-0 break-all text-right text-foreground/90">
                 {address ?? "no signer armed — import or connect a wallet"}
               </span>
               {address && (
-                <button
-                  type="button"
-                  aria-label="Copy devnet wallet address"
+                <CopyButton
+                  text={address}
+                  variant="ghost"
+                  size="icon-sm"
+                  className="shrink-0"
+                  iconClassName="size-3"
                   title="Copy address"
-                  className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
-                  onClick={() => void copy("address", address)}
-                >
-                  {copied === "address" ? (
-                    <Check className="size-3 text-emerald-400" />
-                  ) : (
-                    <Copy className="size-3" />
-                  )}
-                </button>
+                  ariaLabel="Copy devnet wallet address"
+                  message="Devnet wallet address copied"
+                  description={address}
+                />
               )}
             </span>
           </div>
@@ -221,18 +196,18 @@ export function SolDevnetFundCard({
             )}
           </span>
           {cliCommand && (
-            <Button
-              type="button"
+            <CopyButton
+              text={cliCommand}
               variant="outline"
               size="sm"
+              label="Copy"
               className="h-6 shrink-0 gap-1 px-1.5 text-[10px]"
-              aria-label="Copy the solana airdrop command"
+              iconClassName="size-3"
+              ariaLabel="Copy the solana airdrop command"
               title="Copy command (without the comment)"
-              onClick={() => void copy("command", cliCommand)}
-            >
-              {copied === "command" ? <Check className="size-3" /> : <Copy className="size-3" />}
-              {copied === "command" ? "Copied" : "Copy"}
-            </Button>
+              message="CLI command copied"
+              description={cliCommand}
+            />
           )}
         </div>
       </CardContent>

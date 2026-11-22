@@ -1450,3 +1450,82 @@ operator returns from the faucet page.
    its trailing comment; if the CLI line is dropped (follow-up 6), the copy
    payload has to change with it, or it will keep copying a command that cannot
    work against the default RPC.
+
+## Round 21 — 2026-11-22 · viewing the card found the balance bug, exit gate simplified, copies unified
+
+**1. The devnet card was viewed against a real signer, and it showed `unknown`.**
+A temporary harness (deleted before commit) generated a real ed25519 keypair,
+imported it through the real vault, and rendered the real card on testnet. The
+address appeared with its copy control, the prose correctly switched to "the
+balance above is a live getBalance" — and the balance read `unknown` with no
+error. That is the signature of a shape mismatch, not a slow RPC.
+
+**2. `getBalance` returns `{ context, value }`, and four callers read it as a
+number.** `postRpc` returns the JSON-RPC `result` verbatim, so:
+
+- `preflightSolBuyBalance` compared an object against `typeof === "number"`,
+  fell back to `0`, and every live snipe buy would refuse as unaffordable on a
+  funded wallet;
+- `executeLiveArb`'s baseline assigned the object to `initialSol`, tripped its
+  own `typeof` guard and **aborted every live route** at `preflight-read`
+  ("getBalance returned no numeric balance");
+- the arb closing balance took the same path, so realized PnL was always
+  unmeasured;
+- `SolScanner`'s wallet strip and the devnet card both showed `unknown`.
+
+The fix is one unwrapper, `fetchSolBalanceLamports(rpcUrl, owner)`, used by all
+five sites (including a distinct "balance unreadable" refusal in the preflight,
+so an RPC failure is no longer reported as poverty). After the fix the harness
+read **0.0000 SOL** from `api.devnet.solana.com` for the armed key, and the copy
+button wrote the exact CLI command (toast + `Copied` label) as intended.
+
+**3. The exit gate is gone, because it could only ever pass.** Once an exit
+ignored every non-Jupiter rail, `solSigningVerdict` had one reachable outcome
+there. `executeLiveSnipeSell` now takes no `railSettings` at all, consults no
+gate, and `SOL_POSITION_RAIL` is deleted — the invariant is stated where the
+sell is built, and there is no parameter an older client could send to withhold
+a close. Open paths keep the full gate.
+
+**4. The arb gate now runs before the signer lookup, and is tested there.** The
+old block sat after `resolveLiveSigner`, so its own comment ("before … the first
+wallet prompt") was not true and a wallet-less caller got `no-wallet` instead of
+the refusal. It moved to the top of `executeLiveArb`, and two entry-point tests
+prove it: no settings → `rail-gate` + "nothing was signed", an armed
+`solcontract` rail → "the active rail is solcontract".
+
+**5. One copy control.** `useCopy()` + `CopyButton` (`src/components/CopyButton.tsx`)
+replace eighteen hand-rolled copies in the devnet card, the Contract page (eight
+sites), and both scanner-overlay panels — including their auto-copy, which now
+shares the same denial toast. Success swaps the icon to a check for 2 s; a
+blocked clipboard always says so.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling) — serving, not
+   deploying, is what fails.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### New follow-ups — round 21
+
+1. **Nothing had ever crossed the RPC boundary in a test.** Every live path is
+   unit-tested up to the network and no further, which is exactly how an object
+   read as a number survived. A single devnet smoke test (funded key, real RPC,
+   assert balance > 0 and a quote) would have caught it; a recorded JSON-RPC
+   fixture for `fetchSolBalanceLamports` is the cheap half.
+2. **Trust the PnL numbers only after a funded round trip.** The arb baseline has
+   never actually run with a numeric balance, so `realizedNetLamports` and the
+   reported `netPct` have no live evidence behind them yet.
+3. **Audit the other RPC result shapes.** `getBalance` was wrong in five places;
+   `getTokenAccountsByOwner`, `getGenesisHash` and `getSignatureStatuses` were
+   read correctly, but nothing enforces the shape at the transport.
+4. **Finish the copy unification.** TradeHome, Wallets, SolWallets, Auth and the
+   two passcode dialogs still hand-roll `writeText` + `toast`; SupportChat and
+   History keep per-row state a shared button cannot express without a keyed
+   variant.
+5. **`SOL_POSITION_RAIL`'s rationale now lives only in the sell comment** — if a
+   second exit engine ever appears, that paragraph is the requirement it must
+   meet, not an optional nicety.
+6. Round 19's DRILLS.md line and the `cargo-build-sbf --version` assertion are
+   still open, as is the SBF v1 pin.

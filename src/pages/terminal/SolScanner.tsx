@@ -39,10 +39,10 @@ import {
 import {
   LAMPORTS_PER_SOL as LAMPORTS_SOL,
   executeLiveArb,
+  fetchSolBalanceLamports,
   fitRouteLoanToWallet,
   getInjectedSolProvider,
   resolveLiveSigner,
-  solRpcCall,
 } from "@/lib/solana-live-execution";
 import {
   SOL_CLUSTER_GENESIS,
@@ -221,8 +221,8 @@ export default function SolScanner() {
         const { vaultSignerAddresses } = await import("@/lib/solana-vault");
         const role = solWalletRole(address, vaultSignerAddresses());
         if (!cancelled) setWalletRole(role);
-        const bal = await solRpcCall<number>(solRpcUrl, "getBalance", [address]);
-        if (!cancelled) setWalletLamports(typeof bal === "number" ? bal : null);
+        const bal = await fetchSolBalanceLamports(solRpcUrl, address);
+        if (!cancelled) setWalletLamports(bal);
       } catch {
         if (!cancelled) {
           setWalletLamports(null);

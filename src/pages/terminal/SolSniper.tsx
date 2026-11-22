@@ -657,20 +657,8 @@ export default function SolSniper() {
             solRpcUrl: rpc,
             jitoEngines: jito,
             provider: signer,
-            // The exit keeps the rail it was opened on: the execution module
-            // falls back to the position rail when these are absent and ignores
-            // them when they name anything other than Jupiter.
-            ...(state
-              ? {
-                  railSettings: {
-                    rail: state.solExecutionRail ?? "jupiter",
-                    cluster: solCluster,
-                    programId: state.solContractProgramId ?? "",
-                    authorized: state.solContractAuthorized ?? false,
-                    auditApproved: state.solAuditApproved ?? false,
-                  },
-                }
-              : {}),
+            // No rail settings: an exit sells a position the operator already
+            // holds, so the armed rail must not be able to block the close.
           });
           if (!sell.ok) {
             toast.warning("Position opened — sell did not land", {

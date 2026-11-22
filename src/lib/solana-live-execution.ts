@@ -32,7 +32,6 @@ import {
 } from "./solana-policy";
 import { fetchWithTimeout } from "./fetch-timeout";
 import {
-  SOL_POSITION_RAIL,
   SOL_RAIL_UNVERIFIED_MESSAGE,
   solSigningVerdict,
   type SolRailSettings,
@@ -631,18 +630,54 @@ export function fitRouteLoanToWallet(
  * decides whether that blocks execution); an insufficient balance is NOT a
  * throw — it is an `ok: false` verdict with the exact shortfall.
  */
+/**
+ * Live native balance in lamports.
+ *
+ * `getBalance` answers `{ context, value }`, never a bare number. Reading it as
+ * one is how a funded wallet looks empty: the affordability check saw 0 and
+ * refused every live buy, the arb baseline threw "no numeric balance", and the
+ * devnet card showed "unknown" for an armed wallet. One unwrapper, in the
+ * module every execution path already imports.
+ */
+export async function fetchSolBalanceLamports(
+  rpcUrl: string,
+  owner: string,
+): Promise<number> {
+  const json = await postRpc<{ value?: number }>(rpcUrl, "getBalance", [
+    owner,
+    { commitment: "confirmed" },
+  ]);
+  const value = json?.value;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("getBalance returned no numeric balance");
+  }
+  return value;
+}
+
 export async function preflightSolBuyBalance(
   rpcUrl: string,
   owner: string,
   amountLamports: number,
   reserveLamports = BUY_FEE_RESERVE_LAMPORTS,
 ): Promise<BuyAffordability> {
-  const balance = await postRpc<number>(rpcUrl, "getBalance", [owner]);
-  return computeBuyAffordability(
-    typeof balance === "number" ? balance : 0,
-    amountLamports,
-    reserveLamports,
-  );
+  let balance: number;
+  try {
+    balance = await fetchSolBalanceLamports(rpcUrl, owner);
+  } catch {
+    // An unreadable balance is not "insufficient funds" — say which one it is,
+    // or an operator tops up a wallet that was never the problem.
+    const requiredLamports = amountLamports + reserveLamports;
+    return {
+      ok: false,
+      balanceLamports: 0,
+      amountLamports,
+      reserveLamports,
+      requiredLamports,
+      shortfallLamports: requiredLamports,
+      message: `getBalance could not be read, so the wallet's real balance is unknown — nothing was signed. Check the RPC (${rpcUrl}) and retry.`,
+    };
+  }
+  return computeBuyAffordability(balance, amountLamports, reserveLamports);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -825,30 +860,14 @@ export async function executeLiveSnipeSell(opts: {
   jitoEngines?: string[];
   provider?: SolSigningProvider;
   priorityFeeMicroLamports?: number;
-  /**
-   * Persisted engine settings — the exit path signs Jupiter swaps only. They
-   * are used when they describe the Jupiter rail; any other rail is ignored for
-   * the exit (see `SOL_POSITION_RAIL`), because a rail switch must never make a
-   * live position unclosable.
-   */
-  railSettings?: SolRailSettings;
 }): Promise<LiveSnipeSellOutcome> {
-  // EXIT path — a position opened by this snipe is a Jupiter position, so the
-  // exit keeps that rail whether the caller has no settings (the position
-  // manager's automatic exits) or has since armed a different engine (the
-  // sniper's immediate exit, or a rail switch while a position is open). An
-  // exit must never be blocked by a rail switch, because that would strand
-  // real tokens on chain; see SOL_POSITION_RAIL. The supplied settings still
-  // win when they ARE the Jupiter rail, so the cluster label stays accurate.
-  const railForExit =
-    opts.railSettings?.rail === "jupiter" ? opts.railSettings : SOL_POSITION_RAIL;
-  const signing = solSigningVerdict({
-    ...railForExit,
-    engine: "jupiter",
-  });
-  if (!signing.ok) {
-    return { ok: false, engine: "rail-gate", error: signing.message };
-  }
+  // EXIT path — deliberately takes no rail settings and consults no gate.
+  // This function builds a Jupiter sell and nothing else, so "may this engine
+  // sign?" has one possible answer here; the operator's armed rail must not
+  // decide whether an existing position can be closed. A rail switch cannot
+  // strand tokens on chain, and there is no setting an older client could send
+  // to withhold a close. OPEN paths are the ones that must prove their rail
+  // (see executeLiveSnipeBuy / executeLiveArb).
   const provider = await resolveLiveSigner(opts.provider);
   if (!provider?.publicKey) {
     return { ok: false, engine: "none", error: "no-wallet" };
@@ -1023,6 +1042,28 @@ export async function executeLiveArb(opts: {
   railSettings?: SolRailSettings;
   onPhase?: (phase: string) => void;
 }): Promise<LiveArbOutcome> {
+  // SIGNING GATE — before the signer lookup, the cluster pin, the baseline read
+  // and the first wallet prompt. An engine that is not the armed rail never
+  // reaches a key. OPEN path — same rule as the snipe buy: no settings means no
+  // signing. `walletRole` is honestly unknown here because no wallet was read.
+  const railRefusal = (error: string): LiveArbOutcome => ({
+    ok: false,
+    netLamports: 0,
+    netPct: 0,
+    engine: "rail-gate",
+    venues: [],
+    walletRole: "none",
+    error,
+  });
+  const rail = opts.railSettings;
+  if (!rail) {
+    return railRefusal(
+      `Jupiter route blocked — ${SOL_RAIL_UNVERIFIED_MESSAGE}. Nothing was signed or spent.`,
+    );
+  }
+  const signing = solSigningVerdict({ ...rail, engine: "jupiter" });
+  if (!signing.ok) return railRefusal(signing.message);
+
   const provider = await resolveLiveSigner(opts.provider);
   if (!provider?.publicKey) {
     return {
@@ -1055,19 +1096,6 @@ export async function executeLiveArb(opts: {
     error,
     ...extra,
   });
-
-  // SIGNING GATE — before the cluster pin, the baseline read and the first
-  // wallet prompt. An engine that is not the armed rail never reaches a key.
-  // OPEN path — same rule as the snipe buy: no settings means no signing.
-  const rail = opts.railSettings;
-  if (!rail) {
-    return fail(
-      "rail-gate",
-      `Jupiter route blocked — ${SOL_RAIL_UNVERIFIED_MESSAGE}. Nothing was signed or spent.`,
-    );
-  }
-  const signing = solSigningVerdict({ ...rail, engine: "jupiter" });
-  if (!signing.ok) return fail("rail-gate", signing.message);
 
   try {
     // ── CLUSTER PIN ── verify the RPC serves the pinned chain BEFORE any
@@ -1121,13 +1149,7 @@ export async function executeLiveArb(opts: {
     let initialSol: number;
     let tokenBefore: string;
     try {
-      initialSol = await solRpcCall<number>(solRpcUrl, "getBalance", [
-        pubkey,
-        { commitment: "confirmed" },
-      ]);
-      if (typeof initialSol !== "number" || !Number.isFinite(initialSol)) {
-        throw new Error("getBalance returned no numeric balance");
-      }
+      initialSol = await fetchSolBalanceLamports(solRpcUrl, pubkey);
       tokenBefore = await fetchTokenBalanceRaw(solRpcUrl, pubkey, mint);
     } catch (e) {
       const why = e instanceof Error ? e.message : "RPC read failed";
@@ -1242,12 +1264,7 @@ export async function executeLiveArb(opts: {
     // unmeasured PnL (net 0), never as a fabricated gain; the sell did land.
     let measuredFinalSol: number | null = null;
     try {
-      const value = await solRpcCall<number>(solRpcUrl, "getBalance", [
-        pubkey,
-        { commitment: "confirmed" },
-      ]);
-      measuredFinalSol =
-        typeof value === "number" && Number.isFinite(value) ? value : null;
+      measuredFinalSol = await fetchSolBalanceLamports(solRpcUrl, pubkey);
     } catch {
       measuredFinalSol = null;
     }

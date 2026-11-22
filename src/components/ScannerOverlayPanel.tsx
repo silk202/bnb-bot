@@ -8,7 +8,8 @@ import { buildExtensionBundle, buildOverlayUserscript } from "@/lib/overlay-scri
 import { buildZip } from "@/lib/zip";
 import { CHAIN_INFO, type ChainKey } from "@/lib/chains";
 import { resolveConvexUrl } from "@/lib/convex-url";
-import { Check, Copy, Download, FileCode2, Globe, Puzzle, Target } from "lucide-react";
+import { Download, FileCode2, Globe, Puzzle, Target } from "lucide-react";
+import { CopyButton, useCopy } from "@/components/CopyButton";
 import { toast } from "sonner";
 
 export interface ScannerOverlaySettings {
@@ -57,7 +58,7 @@ function downloadBlob(data: Uint8Array | string, filename: string, mime: string)
 
 export function ScannerOverlayPanel({ settings }: { settings: ScannerOverlaySettings }) {
   const [tab, setTab] = useState<InstallTab>("userscript");
-  const [copied, setCopied] = useState<string | null>(null);
+  const { copy } = useCopy();
   const [utcNow, setUtcNow] = useState(() => new Date());
   const autoCopiedRef = useRef(false);
 
@@ -149,33 +150,18 @@ export function ScannerOverlayPanel({ settings }: { settings: ScannerOverlaySett
   useEffect(() => {
     if (autoCopiedRef.current) return;
     autoCopiedRef.current = true;
-    void navigator.clipboard
-      .writeText(userscript)
-      .then(() => {
-        setCopied("userscript");
-        toast.success("Userscript auto-copied — paste into Tampermonkey");
-      })
-      .catch(() => {
-        /* clipboard denied — user can click Copy */
-      });
-  }, [userscript]);
+    // A denied clipboard surfaces as the shared "blocked" toast; the buttons
+    // below stay available either way.
+    void copy(userscript, {
+      message: "Userscript auto-copied — paste into Tampermonkey",
+    });
+  }, [copy, userscript]);
 
   // UTC world clock — mirrors the overlay's own clock.
   useEffect(() => {
     const id = window.setInterval(() => setUtcNow(new Date()), 1000);
     return () => window.clearInterval(id);
   }, []);
-
-  const copy = async (text: string, which: string, message: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(which);
-      toast.success(message);
-      window.setTimeout(() => setCopied(null), 2000);
-    } catch {
-      toast.error("Clipboard blocked — use the Download buttons instead");
-    }
-  };
 
   const utcLabel = `${utcNow.toISOString().slice(0, 10)} · ${utcNow.toISOString().slice(11, 19)} UTC`;
 
@@ -274,10 +260,13 @@ export function ScannerOverlayPanel({ settings }: { settings: ScannerOverlaySett
               <Badge variant="outline" className="text-[10px]">{(userscript.length / 1024).toFixed(1)} KB</Badge>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" className="gap-2" onClick={() => void copy(userscript, "userscript", "Userscript copied — paste into Tampermonkey")}>
-                {copied === "userscript" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                {copied === "userscript" ? "Copied" : "Copy userscript"}
-              </Button>
+              <CopyButton
+                text={userscript}
+                size="sm"
+                className="gap-2"
+                label="Copy userscript"
+                message="Userscript copied — paste into Tampermonkey"
+              />
               <Button
                 size="sm"
                 variant="outline"
@@ -365,18 +354,30 @@ export function ScannerOverlayPanel({ settings }: { settings: ScannerOverlaySett
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" className="gap-2" onClick={() => void copy(bundle.manifest, "manifest", "Chrome manifest.json copied")}>
-                {copied === "manifest" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                Copy Chrome manifest
-              </Button>
-              <Button size="sm" variant="outline" className="gap-2" onClick={() => void copy(bundle.firefoxManifest, "ffmanifest", "Firefox manifest.json copied")}>
-                {copied === "ffmanifest" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                Copy Firefox manifest
-              </Button>
-              <Button size="sm" variant="outline" className="gap-2" onClick={() => void copy(bundle.overlayJs, "js", "overlay.js copied")}>
-                {copied === "js" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                Copy overlay.js
-              </Button>
+              <CopyButton
+                text={bundle.manifest}
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                label="Copy Chrome manifest"
+                message="Chrome manifest.json copied"
+              />
+              <CopyButton
+                text={bundle.firefoxManifest}
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                label="Copy Firefox manifest"
+                message="Firefox manifest.json copied"
+              />
+              <CopyButton
+                text={bundle.overlayJs}
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                label="Copy overlay.js"
+                message="overlay.js copied"
+              />
             </div>
 
             <p className="text-[11px] text-muted-foreground">

@@ -8,7 +8,6 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  SOL_POSITION_RAIL,
   SOL_PROGRAM_ID_PIN,
   SOL_RAIL_UNVERIFIED_MESSAGE,
   solSigningVerdict,
@@ -54,16 +53,6 @@ describe("solSigningVerdict — Jupiter engine", () => {
 });
 
 describe("the gate's default — no settings is not an armed rail", () => {
-  test("the position rail is Jupiter and cannot arm the contract engine", () => {
-    expect(SOL_POSITION_RAIL.rail).toBe("jupiter");
-    expect(SOL_POSITION_RAIL.authorized).toBe(false);
-    expect(SOL_POSITION_RAIL.auditApproved).toBe(false);
-    expect(SOL_POSITION_RAIL.programId).toBeNull();
-    expect(
-      solSigningVerdict({ engine: "solcontract", ...SOL_POSITION_RAIL }).ok,
-    ).toBe(false);
-  });
-
   test("the unverified-settings refusal says nothing was signed", () => {
     expect(SOL_RAIL_UNVERIFIED_MESSAGE).toContain("nothing was signed");
     expect(SOL_RAIL_UNVERIFIED_MESSAGE).toContain("unknown engine");

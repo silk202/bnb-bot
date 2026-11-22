@@ -5,6 +5,7 @@ import {
   formatArmAge,
 } from "@/lib/arm-status";
 import { TerminalContextStrip } from "@/components/TerminalContextStrip";
+import { CopyButton } from "@/components/CopyButton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -56,7 +57,6 @@ import {
   Bot,
   Check,
   Clock,
-  Copy,
   Droplets,
   ExternalLink,
   Eye,
@@ -199,8 +199,6 @@ export default function Contract() {
   const armState = armStatus(deployment?.armedAt, now);
   const armedAddress =
     deployment?.contractAddress || state?.deployedContractAddress || "";
-  const [copied, setCopied] = useState(false);
-  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const [contractAddress, setContractAddress] = useState(
     () => deployment?.contractAddress || state?.deployedContractAddress || "",
   );
@@ -349,32 +347,6 @@ export default function Contract() {
       source: CONTRACT_SOURCE,
       routerAddress: routerAddress.trim() || net.router,
     });
-  };
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(CONTRACT_SOURCE);
-      setCopied(true);
-      toast.success("Contract source copied", {
-        description: "Paste it into Remix or Hardhat to deploy.",
-      });
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      toast.error("Copy failed", { description: "Your browser blocked clipboard access." });
-    }
-  };
-
-  const copyCommand = async (text: string, key: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedCommand(key);
-      toast.success(`${label} copied`);
-      setTimeout(() => setCopiedCommand(null), 2000);
-    } catch {
-      toast.error("Copy failed", {
-        description: "Your browser blocked clipboard access.",
-      });
-    }
   };
 
   // -----------------------------------------------------------------------
@@ -1219,20 +1191,13 @@ export default function Contract() {
                     <code className="font-mono text-[11px] text-foreground/90">
                       {hotWallet.address.slice(0, 10)}…{hotWallet.address.slice(-6)}
                     </code>
-                    <Button
-                      type="button"
+                    <CopyButton
+                      text={hotWallet.address}
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() =>
-                        void copyCommand(hotWallet.address, "hotAddr", "Hot wallet address")
-                      }
-                    >
-                      {copiedCommand === "hotAddr" ? (
-                        <Check className="size-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="size-3.5" />
-                      )}
-                    </Button>
+                      ariaLabel="Copy hot wallet address"
+                      message="Hot wallet address copied"
+                    />
                   </div>
                 </div>
                 {hotWallet.mnemonic && (
@@ -1393,25 +1358,16 @@ export default function Contract() {
                   )}
                   {compileStage !== null ? "Compiling…" : "Auto compile"}
                 </Button>
-                <Button
-                  type="button"
+                <CopyButton
+                  text={CONTRACT_SOURCE}
                   variant="outline"
                   size="sm"
                   className="gap-2"
-                  onClick={() => void handleCopy()}
-                >
-                  {copied ? (
-                    <>
-                      <Check className="size-4 text-emerald-400" />
-                      Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="size-4" />
-                      Copy source
-                    </>
-                  )}
-                </Button>
+                  label="Copy source"
+                  iconClassName="size-4"
+                  message="Contract source copied"
+                  description="Paste it into Remix or Hardhat to deploy."
+                />
               </div>
             </div>
           </CardHeader>
@@ -1458,24 +1414,13 @@ export default function Contract() {
                         <code className="min-w-0 flex-1 truncate rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 font-mono text-[11px] text-foreground/90">
                           keccak256: {compileResult.bytecodeHash}
                         </code>
-                        <Button
-                          type="button"
+                        <CopyButton
+                          text={compileResult.bytecodeHash as string}
                           variant="ghost"
                           size="icon-sm"
-                          onClick={() =>
-                            void copyCommand(
-                              compileResult.bytecodeHash as string,
-                              "bytecodeHash",
-                              "Bytecode hash",
-                            )
-                          }
-                        >
-                          {copiedCommand === "bytecodeHash" ? (
-                            <Check className="size-3.5 text-emerald-400" />
-                          ) : (
-                            <Copy className="size-3.5" />
-                          )}
-                        </Button>
+                          ariaLabel="Copy bytecode hash"
+                          message="Bytecode hash copied"
+                        />
                       </div>
                     )}
                     {compileResult.constructorArgs && (
@@ -1484,24 +1429,13 @@ export default function Contract() {
                           ctor args ({routerAddress.trim() || net.router}):{" "}
                           {compileResult.constructorArgs}
                         </code>
-                        <Button
-                          type="button"
+                        <CopyButton
+                          text={compileResult.constructorArgs as string}
                           variant="ghost"
                           size="icon-sm"
-                          onClick={() =>
-                            void copyCommand(
-                              compileResult.constructorArgs as string,
-                              "ctorArgs",
-                              "Constructor args",
-                            )
-                          }
-                        >
-                          {copiedCommand === "ctorArgs" ? (
-                            <Check className="size-3.5 text-emerald-400" />
-                          ) : (
-                            <Copy className="size-3.5" />
-                          )}
-                        </Button>
+                          ariaLabel="Copy constructor args"
+                          message="Constructor args copied"
+                        />
                       </div>
                     )}
                     {/* Deploy signer mode — injected wallet (popup) or session hot wallet (local signing, private relay) */}
@@ -1595,24 +1529,13 @@ export default function Contract() {
                           <code className="min-w-0 flex-1 truncate rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 font-mono text-[11px] text-foreground/90">
                             {deployed.contractAddress}
                           </code>
-                          <Button
-                            type="button"
+                          <CopyButton
+                            text={deployed.contractAddress}
                             variant="ghost"
                             size="icon-sm"
-                            onClick={() =>
-                              void copyCommand(
-                                deployed.contractAddress,
-                                "deployedAddr",
-                                "Contract address",
-                              )
-                            }
-                          >
-                            {copiedCommand === "deployedAddr" ? (
-                              <Check className="size-3.5 text-emerald-400" />
-                            ) : (
-                              <Copy className="size-3.5" />
-                            )}
-                          </Button>
+                            ariaLabel="Copy contract address"
+                            message="Contract address copied"
+                          />
                           <a
                             href={`${net.explorerUrl}/address/${deployed.contractAddress}`}
                             target="_blank"
@@ -1701,26 +1624,14 @@ export default function Contract() {
                             </Button>
                           )}
                           {compileResult?.flattenedSource && (
-                            <Button
-                              type="button"
+                            <CopyButton
+                              text={compileResult.flattenedSource as string}
                               variant="ghost"
                               size="sm"
                               className="gap-2"
-                              onClick={() =>
-                                void copyCommand(
-                                  compileResult.flattenedSource as string,
-                                  "flattened",
-                                  "Flattened source",
-                                )
-                              }
-                            >
-                              {copiedCommand === "flattened" ? (
-                                <Check className="size-3.5 text-emerald-400" />
-                              ) : (
-                                <Copy className="size-3.5" />
-                              )}
-                              Copy flattened source
-                            </Button>
+                              label="Copy flattened source"
+                              message="Flattened source copied"
+                            />
                           )}
                         </div>
                         {verifyResult?.needsKey && (
@@ -1820,27 +1731,14 @@ export default function Contract() {
                 <code className="min-w-0 flex-1 truncate rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 font-mono text-[11px] text-foreground/90">
                   {net.router}
                 </code>
-                <Button
-                  type="button"
+                <CopyButton
+                  text={net.router}
                   variant="outline"
                   size="sm"
                   className="gap-1.5"
-                  onClick={() =>
-                    void copyCommand(net.router, "router", "Router address")
-                  }
-                >
-                  {copiedCommand === "router" ? (
-                    <>
-                      <Check className="size-3.5 text-emerald-400" />
-                      Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="size-3.5" />
-                      Copy
-                    </>
-                  )}
-                </Button>
+                  label="Copy"
+                  message="Router address copied"
+                />
               </div>
               <div className="mt-3 text-[11px] font-semibold text-foreground/85">
                 Hardhat quick start
@@ -1867,20 +1765,13 @@ export default function Contract() {
                     <code className="min-w-0 flex-1 truncate rounded-lg border border-border/60 bg-background/60 px-2.5 py-1.5 font-mono text-[11px] text-foreground/85">
                       {step.cmd}
                     </code>
-                    <Button
-                      type="button"
+                    <CopyButton
+                      text={step.cmd}
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() =>
-                        void copyCommand(step.cmd, step.key, `${step.label} command`)
-                      }
-                    >
-                      {copiedCommand === step.key ? (
-                        <Check className="size-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="size-3.5" />
-                      )}
-                    </Button>
+                      ariaLabel={`Copy ${step.label} command`}
+                      message={`${step.label} command copied`}
+                    />
                   </div>
                 ))}
               </div>

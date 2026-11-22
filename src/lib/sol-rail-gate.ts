@@ -69,27 +69,6 @@ export const SOL_PROGRAM_ID_PIN =
   "82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd";
 
 /**
- * The rail a live POSITION is closed on, when the closing path has no rail
- * settings of its own (the position manager's exits, and any older caller).
- *
- * A position that was opened by the Jupiter snipe is a Jupiter position: its
- * exit must be able to land even while the operator has since armed flash
- * arbitrage. Refusing an exit on a rail switch would strand real tokens on
- * chain, so an exit path that has no settings of its own uses this rail AND
- * ignores a supplied rail that is not Jupiter (the sniper's immediate exit
- * passes whatever rail is armed). OPEN paths do not get this default — they
- * must supply the persisted settings or refuse (see
- * SOL_RAIL_UNVERIFIED_MESSAGE).
- */
-export const SOL_POSITION_RAIL: SolRailSettings = Object.freeze({
-  rail: "jupiter",
-  cluster: "mainnet",
-  programId: null,
-  authorized: false,
-  auditApproved: false,
-});
-
-/**
  * The refusal used by a signing path that could not read the persisted rail.
  *
  * "No settings" is not "Jupiter is armed": a caller that cannot prove which
