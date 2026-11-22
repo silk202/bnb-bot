@@ -6,7 +6,7 @@
  * call (or an older client) would take, not just what the UI allows.
  */
 import { describe, expect, test } from "bun:test";
-import { gateSolRailWrite } from "../../convex/rail-gate";
+import { gateSolRailWrite } from "../../convex/rail_gate";
 import { SOL_PROGRAM_ID_PIN } from "../sol-rail-gate";
 
 const PIN = SOL_PROGRAM_ID_PIN;

@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { httpAction } from "./_generated/server";
 import { classifyExecutionMethod } from "../lib/execution-method";
-import { gateSolRailWrite } from "./rail-gate";
+import { gateSolRailWrite } from "./rail_gate";
 import { type Doc, type Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
 import { getCurrentUser } from "./users";
@@ -2634,7 +2634,7 @@ export const setSettings = mutation({
     // the merged rail is `solcontract`, so an already-armed rail cannot be
     // de-armed by writing a bad program ID, while a Jupiter save is never
     // gated.
-    // The decision itself lives in ./rail-gate so the mutation and its tests
+    // The decision itself lives in ./rail_gate so the mutation and its tests
     // run the same function. `state` supplies the stored half of the merge;
     // the patch supplies only what this save actually changes.
     const railWrite = gateSolRailWrite(state, {
