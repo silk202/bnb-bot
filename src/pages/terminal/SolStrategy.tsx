@@ -192,9 +192,18 @@ export default function SolStrategy() {
           ...(state?.solRpcOverrides ?? {}),
           [solNetwork]: solRpcOverride.trim(),
         },
-        // Execution rail + contract authorization + cluster pin.
-        solExecutionRail: rail,
-        solContractProgramId: programId.trim(),
+        // Execution rail — sent only when it actually changes. The server
+        // validates any activation of the contract rail; re-sending an
+        // unchanged (now blocked) legacy value would fail saves that have
+        // nothing to do with the rail.
+        ...(rail !== (state?.solExecutionRail ?? "jupiter")
+          ? { solExecutionRail: rail }
+          : {}),
+        // Program ID — same rule as the rail: send it only when it changed,
+        // so an unrelated save cannot trip the server's pin check.
+        ...(programId.trim() !== (state?.solContractProgramId ?? "").trim()
+          ? { solContractProgramId: programId.trim() }
+          : {}),
         solContractAuthorized: contractAuthorized,
         solAuditApproved: auditApproved,
         solPinnedGenesis: pinnedGenesis.trim(),

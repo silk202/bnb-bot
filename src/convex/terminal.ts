@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { httpAction } from "./_generated/server";
 import { classifyExecutionMethod } from "../lib/execution-method";
+import { mergeSolRailSettings, solRailVerdict } from "../lib/sol-rail-gate";
 import { type Doc, type Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
 import { getCurrentUser } from "./users";
@@ -2623,6 +2624,47 @@ export const setSettings = mutation({
     // Hard strategy bounds: maxLoan clamped to the 5/10 BNB cap server-side.
     if (typeof patch.maxLoan === "number") {
       patch.maxLoan = Math.min(BNB_MAX_LOAN_CAP, Math.max(0.1, patch.maxLoan));
+    }
+    // ── Execution-rail gate, enforced where the rail is written ──
+    // The UI disables a rail it cannot execute, but a UI is not an authority:
+    // an older client or a direct mutation call could still persist a rail the
+    // engine will never sign on. Validate the MERGED state (stored row + this
+    // patch), so activating the rail and arming it in one save behaves exactly
+    // like doing it in two. It runs whenever a rail field is in the patch AND
+    // the merged rail is `solcontract`, so an already-armed rail cannot be
+    // de-armed by writing a bad program ID, while a Jupiter save is never
+    // gated.
+    const railFieldsInPatch =
+      args.solExecutionRail !== undefined ||
+      args.solContractProgramId !== undefined ||
+      args.solContractAuthorized !== undefined ||
+      args.solAuditApproved !== undefined ||
+      args.solNetwork !== undefined;
+    if (railFieldsInPatch) {
+      const merged = mergeSolRailSettings(
+        {
+          rail: state.solExecutionRail ?? "jupiter",
+          cluster: state.solNetwork ?? "mainnet",
+          programId: state.solContractProgramId,
+          authorized: state.solContractAuthorized ?? false,
+          auditApproved: state.solAuditApproved ?? false,
+        },
+        {
+          rail: args.solExecutionRail,
+          cluster: args.solNetwork,
+          programId: args.solContractProgramId,
+          authorized: args.solContractAuthorized,
+          auditApproved: args.solAuditApproved,
+        },
+      );
+      if (merged.rail === "solcontract") {
+        const verdict = solRailVerdict(merged);
+        if (!verdict.ok) {
+          throw new Error(
+            `Contract rail blocked — ${verdict.blockers.join("; ")}. Nothing was saved; the rail is unchanged.`,
+          );
+        }
+      }
     }
     if (Object.keys(patch).length > 0) {
       await ctx.db.patch(state._id, patch);

@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   SOL_CLUSTER_GENESIS,
+  SOL_PROGRAM_ID_PIN,
   SOL_VAULT_MIN_SWAP_LAMPORTS,
   clusterPinVerdict,
   profitFloorVerdict,
@@ -16,7 +17,8 @@ import {
 } from "./solana-policy";
 
 const SOL = 1_000_000_000;
-const PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+/** The pinned FlashboltSolana address — any other ID is refused by the gate. */
+const PROGRAM = SOL_PROGRAM_ID_PIN;
 
 describe("cluster pinning", () => {
   test("maps the canonical genesis hashes to their clusters", () => {

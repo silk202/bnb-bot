@@ -246,6 +246,32 @@ Findings:
    numbers with their provenance, the Operator Settings panel renders them,
    and `src/lib/solana-execution-plan.test.ts` fails if they drift.
 
+## Lender path comparison — 2026-11-21
+
+The gate above answers "is Jupiter Lend on devnet?". Choosing what to do about
+it needs the same question asked of every lender in the decision table, so the
+same read-only probe was run against each program account (`getAccountInfo`;
+`"value": null` means no program account exists). Fees and borrow shapes are
+the **recorded** values from the decision and the vendors' documentation — they
+were not re-derived here, and the table says so rather than implying a
+verification that did not happen.
+
+| Lender | Program account | Mainnet | Devnet | Recorded fee | Recorded borrow shape |
+| --- | --- | --- | --- | --- | --- |
+| **Jupiter Lend** (primary) | `jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS` | executable, upgradeable loader | **absent** | 0% (admin fee word, verified) | top-level borrow/payback around our CPI |
+| marginfi v2 | `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA` | executable | **absent** | 0% | documented flash-loan pair |
+| Solend | `So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo` | executable | **absent** | 0.3% | CPI flash loan |
+| Kamino Lend (deferred) | `KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD` | executable | **executable** | 0.05% | CPI flash borrow, per-reserve fee |
+
+**What the comparison changes.** The approved lender and both fallbacks are
+mainnet-only; the only lender in the table with a devnet deployment is the one
+the decision defers. A devnet rehearsal therefore cannot be satisfied by
+swapping in marginfi or Solend, and taking Kamino would mean accepting a 0.05%
+fee — repayment arithmetic is no longer principal-only — plus a second adapter
+interface. The three options recorded in `reports/follow-ups.md` (Round 16)
+stay open; this table removes the assumption that an approved alternative is
+cheaper to exercise.
+
 ## Sources
 
 - Jupiter Lend flash loans (no fee, top-level borrow → logic → payback):

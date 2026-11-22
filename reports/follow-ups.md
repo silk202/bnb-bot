@@ -1166,3 +1166,105 @@ not pending**, and that changes the next milestone from "write the adapter" to
     from IDL" as a badge. That should also surface on the Contract page and in
     the preflight, because a stale program ID in strategy settings is exactly
     how a blocked rail gets "fixed" by pointing at the wrong program.
+
+## Round 17 — 2026-11-21, the rail gate shared with the server, lender paths compared
+
+**Done by this pass.**
+
+1. **One gate, two runtimes.** `src/lib/sol-rail-gate.ts` now holds
+   `solRailVerdict`, the types and the patch merge, with no imports at all;
+   `solana-policy.ts` re-exports it so every existing consumer is unchanged.
+   A copy for the server would have drifted from the UI on the first change,
+   and importing the policy module would drag web3.js into the Convex runtime.
+2. **The rail is validated where it is written.** `terminal.setSettings`
+   refuses to persist `solExecutionRail: "solcontract"` when the merged state
+   (stored row + patch) fails the gate, and returns the exact blocker list.
+   Jupiter is untouched: the check runs only when the patch activates the
+   contract rail.
+3. **Unchanged rails are no longer re-sent.** SOL Strategy omits
+   `solExecutionRail` when the selection equals the stored value, so a legacy
+   blocked rail cannot fail saves that have nothing to do with it.
+4. **Lender paths compared on the same probe.** marginfi and Solend are also
+   absent on devnet; Kamino Lend is the only lender in the decision table with
+   a devnet program. Recorded in the provider brief — the decision still
+   belongs to the operator.
+
+**Needs a deploy.**
+
+5. The mutation gate is committed but inert until the Convex functions are
+   deployed. This workspace has `CONVEX_DEPLOY_KEY_1` / `_2`, not the expected
+   `CONVEX_DEPLOY_KEY`, and the target deployment is not unambiguous — so
+   nothing was deployed and the old mutation is still live.
+
+**New follow-ups, in priority order.**
+
+6. **Convex function tests for the gate.** The gate is unit-tested through its
+   pure module, but nothing exercises the mutation handler itself; the repo
+   has no `convex-test` harness. Add one, with a case for "activate rail and
+   arm it in the same patch".
+7. **Server-side program-ID allowlist.** The gate accepts any base58 address,
+   including one that is not in the IDL. Once the program is deployed, pin the
+   accepted address server-side so a wrong-but-valid ID cannot arm the rail.
+8. **Rail transitions belong in the audit trail.** Arming or switching a rail
+   is an execution-control change; it currently leaves no server record beyond
+   the settings row. Append an audit entry with actor, from/to rails and the
+   verdict, the way arm stamps are recorded.
+9. **Lender registry should carry deployment state per cluster.** The
+   comparison is a report right now. A per-lender `devnet: boolean` with the
+   probe date would let the UI say why the arbitrage rail is blocked instead of
+   leaving it to the brief, and a CI probe (Round 16 #7) could keep it true.
+10. **Decide the devnet rehearsal path.** The comparison narrows it to three
+    honest options: reverse the Kamino deferral for devnet only, clone Jupiter
+    Lend's mainnet accounts into a local validator, or rehearse only on mainnet
+    after the audit. Each picks a different target for the adapter and its
+    tests, so the choice still precedes the code.
+
+## Round 18 — 2026-11-22 · gate activation, program-ID pin, faucet reality
+
+**Shipped in this round.**
+
+1. **The server gate no longer depends on activation.** Round 17 gated only
+   `args.solExecutionRail === "solcontract"`, so an already-armed rail could be
+   re-pointed at a bad program ID by any other save. It now runs whenever a
+   rail field is in the patch and the MERGED rail is `solcontract`; the merge
+   also passes the real patch instead of forcing `rail: "solcontract"` into it
+   (a latent bug that only behaved because activation was the sole entry).
+2. **Program ID pinned (Round 17 #7 done).** `SOL_PROGRAM_ID_PIN` lives in the
+   dependency-free gate module. The gate refuses any other base58 address —
+   the browser and the Convex mutation share the one pin — and a drift test
+   holds `declare_id!`, both `Anchor.toml` entries, the tracked IDL and
+   `solana-program-preflight.sh` to it.
+3. **Devnet funding corrected to what the faucet actually does.** Verified
+   live on 2026-11-22: `requestAirdrop` on `api.devnet.solana.com` answers
+   HTTP 410 ("The RPC faucet is closed on this cluster"), and
+   `https://faucet.solana.com/api/request-airdrop` returns an HTML page — there
+   is no public programmatic endpoint. The drill's fabricated JSON call was
+   removed; it now reports the RPC refusal verbatim, probes the pre-funded
+   balance, and names the official faucet (2 requests / 8 h anonymous, GitHub
+   sign-in raises it), the CLI airdrop and the local validator. DRILLS.md and
+   the release-gate remediation say the same.
+4. **Full-suite test isolation fixed.** `utc-clock` reassigned
+   `globalThis.localStorage`, which is readonly once another test installs DOM
+   globals, so `bun test` was red with a TypeError instead of an assertion.
+   The test now exercises the real fallback without touching the global.
+
+**Still blocked (unchanged).**
+
+5. Convex functions are still not deployed — `CONVEX_DEPLOY_KEY` is absent and
+   the two suffixed variables are short `dev:` / `prod:` labels, not deploy
+   keys (a real key carries a `|`-separated JWT). The gate stays inert until a
+   real key is added.
+6. FlashboltSolana is not deployed to devnet (no SBF toolchain, no funded
+   deployer, no go-ahead), and mainnet still needs the audit.
+7. The lender path still needs the operator's decision (Round 17 #10).
+
+**New follow-ups.**
+
+8. **Faucet integration needs a human once.** Because the web faucet is
+   browser-only, a per-wallet "Fund devnet" affordance should copy the address
+   and open the faucet, then verify the balance on-chain — never claim the drip
+   happened from the app side.
+9. **Gate the other way too.** A `solcontract` row that predates the pin can
+   still be READ by the engine; the client shows it blocked, but the engine
+   path should re-run `solRailVerdict` before it signs (same function, no new
+   rule).

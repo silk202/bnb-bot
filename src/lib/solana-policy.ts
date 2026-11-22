@@ -22,9 +22,6 @@
 
 import { LAMPORTS_PER_SOL } from "./solana-jito";
 
-/** The two rails the SOL terminal can execute on. */
-export type SolExecutionRail = "jupiter" | "solcontract";
-
 /** Which wallet signs: the in-app vault, a connected extension, or neither. */
 export type SolWalletRole = "vault" | "external" | "none";
 
@@ -214,75 +211,21 @@ export function profitFloorVerdict(
   };
 }
 
-export interface SolRailInput {
-  rail: SolExecutionRail;
-  cluster: "mainnet" | "testnet";
-  programId?: string | null;
-  /** Operator authorization binding this rail to the vault wallet. */
-  authorized?: boolean;
-  /** Independent audit sign-off (required before any mainnet contract use). */
-  auditApproved?: boolean;
-}
-
-export interface SolRailVerdict {
-  ok: boolean;
-  rail: SolExecutionRail;
-  /** The validated program ID, or null when the rail is not armed. */
-  programId: string | null;
-  /** Every unmet requirement, in operator language. */
-  blockers: string[];
-  message: string;
-}
-
-/** Base58 Solana address shape (program IDs are 32–44 chars). */
-const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-
 /**
- * Can the selected rail execute at all? The Jupiter rail needs nothing but a
- * wallet; the contract rail needs a real deployed program, an explicit
- * operator authorization and — on mainnet — the audit sign-off. Until all of
- * that exists it refuses honestly instead of inventing a contract call.
+ * The rail gate itself lives in `./sol-rail-gate`, a dependency-free module:
+ * the Convex mutation that persists `solExecutionRail` runs the same function
+ * before it writes, so the UI and the server cannot disagree about whether a
+ * rail is executable. Re-exported here because every policy consumer already
+ * imports from this file.
  */
-export function solRailVerdict(input: SolRailInput): SolRailVerdict {
-  if (input.rail === "jupiter") {
-    return {
-      ok: true,
-      rail: "jupiter",
-      programId: null,
-      blockers: [],
-      message: `Jupiter rail armed — real swaps from the ${
-        input.cluster === "mainnet" ? "mainnet" : "devnet"
-      } wallet.`,
-    };
-  }
-
-  const programId = (input.programId ?? "").trim();
-  const blockers: string[] = [];
-  if (!programId) {
-    blockers.push(
-      "no FlashboltSolana program ID — the program has not been built or deployed",
-    );
-  } else if (!BASE58_ADDRESS.test(programId)) {
-    blockers.push(`program ID ${programId} is not a base58 Solana address`);
-  }
-  if (!input.authorized) {
-    blockers.push(
-      "contract rail is not authorized for the vault wallet — enable authorization after the deployment is verified",
-    );
-  }
-  if (input.cluster === "mainnet" && !input.auditApproved) {
-    blockers.push(
-      "mainnet contract execution requires the independent audit sign-off — mainnet stays off until then",
-    );
-  }
-  return {
-    ok: blockers.length === 0,
-    rail: "solcontract",
-    programId: blockers.length === 0 || programId ? programId || null : null,
-    blockers,
-    message:
-      blockers.length === 0
-        ? `solcontract rail armed on ${input.cluster}: ${programId} is authorized for the vault wallet.`
-        : `solcontract rail blocked — ${blockers.join("; ")}.`,
-  };
-}
+export {
+  SOL_PROGRAM_ID_PIN,
+  mergeSolRailSettings,
+  solRailVerdict,
+} from "./sol-rail-gate";
+export type {
+  SolExecutionRail,
+  SolRailInput,
+  SolRailSettings,
+  SolRailVerdict,
+} from "./sol-rail-gate";
