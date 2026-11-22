@@ -126,7 +126,7 @@ jobs:
       - name: Build the program (SBF v1)
         working-directory: solana
         run: |
-          cargo-build-sbf --arch v1 \
+          cargo-build-sbf --arch sbfv1 \
             --manifest-path programs/flashbolt_solana/Cargo.toml \
             --sbf-out-dir target/deploy
 
