@@ -128,7 +128,8 @@ jobs:
         run: cargo install cargo-build-sbf --locked
 
       - name: Install SBF platform-tools v1.57
-        run: "$HOME/.cargo/bin/cargo-build-sbf" --install-only --tools-version v1.57
+        run: |
+          "$HOME/.cargo/bin/cargo-build-sbf" --install-only --tools-version v1.57
 
       - name: Install Anchor CLI 0.31.1
         run: |
