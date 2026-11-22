@@ -124,6 +124,12 @@ jobs:
       # install the current wrapper; that wrapper is built against Rust 1.95
       # and matches platform-tools v1.57, which is installed next and pinned
       # for the build.
+      - name: Prefer the crates.io cargo-build-sbf over the CLI's copy
+        # The crate's build script refuses to install while the CLI's copy
+        # shadows it on PATH; GITHUB_PATH entries are prepended, so this makes
+        # ~/.cargo/bin win for every later step.
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Install cargo-build-sbf (matches platform-tools v1.57)
         run: cargo install cargo-build-sbf --locked
 
