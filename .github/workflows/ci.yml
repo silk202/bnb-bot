@@ -2,8 +2,9 @@
 #   1. This workflow verifies the whole app (typecheck, tests, production
 #      build — which rebuilds the overlay artifacts) and uploads the overlay
 #      zips/userscript as a downloadable artifact.
-#   2. The Convex backend deploys automatically when CONVEX_DEPLOY_KEY is
-#      configured as a repo secret (Settings → Secrets → Actions).
+#   2. The Convex backend deploys automatically from the CONVEX_DEPLOY_KEY
+#      environment secret (Settings → Environments → CONVEX_DEPLOY_KEY), which
+#      the `deploy-convex` job declares as its environment.
 #   3. The `solana-program` job builds the Anchor program (Solana SBF), proves
 #      the tracked IDL still matches the source, runs clippy and the LiteSVM +
 #      IDL conformance tests. It never deploys and never needs a keypair.
@@ -232,6 +233,12 @@ jobs:
     needs: verify
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # The deploy key lives in the `CONVEX_DEPLOY_KEY` ENVIRONMENT (Settings →
+    # Environments). A job only sees an environment's secrets when it declares
+    # that environment, so without this line `secrets.CONVEX_DEPLOY_KEY`
+    # resolves to an empty string and the deploy below is skipped while the job
+    # still reports success.
+    environment: CONVEX_DEPLOY_KEY
     steps:
       - uses: actions/checkout@v4
 
