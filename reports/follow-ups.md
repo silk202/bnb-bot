@@ -1339,3 +1339,114 @@ never gated.
     balance re-read after the operator returns from the faucet page.
 11. **Drop the SBF v1 pin once LiteSVM accepts the Agave default (v3)** — that
     is the only reason this job pins `--arch v1`.
+
+## Round 20 — 2026-11-22 · fail-closed default, the serving ceiling, exit fallback, copy buttons
+
+**1. The reported `gate:operatorLogin` Server Error was the deployment being
+disabled, not the action.** `convex logs --prod` streamed while the action was
+called returns exactly one line:
+
+```
+[CONVEX A(gate:operatorLogin)] You have exceeded the free plan limits, so your
+deployments have been disabled. Please upgrade to a Pro plan or reach out to us
+at support@convex.dev for help.
+```
+
+`convex deployment usage-limits list --prod` reports "No usage limits
+configured", so nothing self-imposed is being hit. `scripts/operator-login.mjs`
+reproduced it end to end with the real stored credentials — decryption succeeds,
+the action is registered, and the HTTP response is
+`{"status":"error","errorMessage":"[Request ID: …] Server Error"}` because Convex
+hides the plan message from clients. No code change can restore serving.
+
+**2. CI was green but not deploying because the key was an environment secret.**
+The deploy key was added as a GitHub *environment* named `CONVEX_DEPLOY_KEY`; a
+job only receives environment secrets when it declares `environment:`. The
+`deploy-convex` job now declares it, and run `45044058396` at `fb20551` shows
+`✔ Deployed Convex functions to https://flexible-frog-776.convex.cloud` — a real
+deploy from a plain push, with all three jobs green.
+
+**3. The gate's default now fails closed on OPEN paths and stays open on exits.**
+`SOL_POSITION_RAIL` (Jupiter, unpinned, unauthorized) is the exit rail;
+`SOL_RAIL_UNVERIFIED_MESSAGE` is the refusal an open path gets when the
+persisted settings did not arrive. `executeLiveSnipeBuy` and `executeLiveArb`
+refuse with `engine: "rail-gate"` before a signer, quote or simulation is
+touched; `executeLiveSnipeSell` uses the position rail when no settings arrive
+and ignores supplied settings that name another rail, so a real position can
+always be closed. Review fixes in the same pass: the doubled
+"Jupiter rail armed / Jupiter signing armed" prefix (`clusterLabel`), the
+`programId || null` simplification, and the three callers now spread
+`railSettings` only when it exists instead of sending `undefined`.
+
+**4. The exit fallback is tested at the entry point, not just at the gate.** The
+new cases call `executeLiveSnipeSell` with a provider that exists but holds no
+key (`publicKey: null`, and a `signTransaction` that throws), so a passing test
+proves the gate let the exit through and nothing reached the wallet: no settings,
+an armed `solcontract` rail (the rail-switch case that would otherwise strand
+tokens), and explicit Jupiter settings all return `engine: "none"` /
+`error: "no-wallet"` rather than `engine: "rail-gate"`.
+
+That second case failed on the first run, and it found a real bug: the sniper's
+immediate exit passes the armed rail (`state.solExecutionRail`), so an operator
+who armed flash arbitrage while holding a Jupiter position had every exit
+refused with "the active rail is solcontract". The fix is in
+`executeLiveSnipeSell`: supplied settings are used only when they name Jupiter,
+otherwise the position rail applies. `engine: "jupiter"` is structurally true
+for this path — it builds a Jupiter sell — so the rail check adds nothing there
+and could only withhold a close.
+
+**5. The devnet funding card can copy.** The armed address has a copy control,
+and the exact `solana airdrop 2 <address> --url devnet` command has its own copy
+button that copies the command without the trailing comment. Copy failures are
+reported ("browser blocked clipboard access") instead of silently doing nothing,
+and the balance re-reads when the tab becomes visible again — the moment the
+operator returns from the faucet page.
+
+### Still blocked (unchanged)
+
+1. **Convex serving** is refused for every query, mutation and action until the
+   team owner upgrades the plan or reaches support@convex.dev. `taengine.freebuff.app`
+   therefore stays on its standby screen even though deploys now succeed.
+2. **FlashboltSolana is not deployed to devnet**: no funded deployer (~3 SOL) and
+   no go-ahead. The SBF build works in CI and locally.
+3. **Mainnet** still needs the independent audit plus explicit approval. The
+   protected deployment `shiny-bulldog-311` was never touched.
+4. **`bun run verify`** still needs a fresh 2/2 drill; the devnet faucet needs one
+   human claim (the RPC faucet answers HTTP 410).
+
+### New follow-ups — round 20
+
+1. **Probe serving after every deploy, not just the upload.** The CI job now
+   proves the push reaches Convex; it cannot prove Convex answers. One
+   post-deploy request to a safe, non-spending query that fails the job on
+   `Server Error` would have caught this outage in the same run instead of from
+   an operator's browser. This is the highest-value gap the last two days found.
+2. **Keep the login probe out of that CI check.** `gate:operatorLogin` spends one
+   of the deployment's five login slots and needs the operator's real
+   credentials, so the serving probe must be anonymous (or a read-only action);
+   run `scripts/operator-login.mjs` by hand once the plan is restored.
+3. **Test the arb path's no-settings refusal too.** `executeLiveArb` refuses
+   without rail settings, but only the buy path has an entry-point test; the same
+   null-key provider pattern would cover it in three lines.
+4. **Prove the exit fallback on a real position.** The tests stop at the signer
+   boundary by design. The next evidence is a devnet buy on Jupiter, a rail
+   switch to `solcontract`, and a close that still lands — it needs a funded
+   devnet wallet first.
+5. **Extract one `CopyButton`.** There are now ten hand-rolled copy handlers
+   (Wallets, SolWallets, Contract, Scanner overlays, SupportChat, this card) with
+   three different failure behaviours. One component with a copied state, a
+   timeout and a toast would make the next one a one-liner.
+6. **Retire the stale airdrop line in DRILLS.md** (round 19, #8) — it still offers
+   `solana airdrop … --url devnet` against the public RPC that answers 410.
+7. **Assert the SBF toolchain versions** (round 19, #9). The workflow prints
+   `cargo-build-sbf --version` but never checks it, so a silent channel swap
+   would surface as a confusing compile error again.
+8. **Give `backend-outage.ts` something to detect.** Convex returns only
+   "Server Error" to clients when a deployment is disabled, so the in-app outage
+   copy cannot fire. Until the serving probe exists, treat an operator-login
+   failure with HTTP 200 + `status: "error"` as an outage signal and say
+   "deployment unavailable" rather than "wrong credentials".
+9. **Decide the faucet line's fate.** The copy button copies the command without
+   its trailing comment; if the CLI line is dropped (follow-up 6), the copy
+   payload has to change with it, or it will keep copying a command that cannot
+   work against the default RPC.

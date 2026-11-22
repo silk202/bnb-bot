@@ -826,19 +826,24 @@ export async function executeLiveSnipeSell(opts: {
   provider?: SolSigningProvider;
   priorityFeeMicroLamports?: number;
   /**
-   * Persisted engine settings — the exit path signs Jupiter swaps only. When
-   * they are absent the exit still runs on the position's own rail
-   * (`SOL_POSITION_RAIL`): a live position must always remain closable.
+   * Persisted engine settings — the exit path signs Jupiter swaps only. They
+   * are used when they describe the Jupiter rail; any other rail is ignored for
+   * the exit (see `SOL_POSITION_RAIL`), because a rail switch must never make a
+   * live position unclosable.
    */
   railSettings?: SolRailSettings;
 }): Promise<LiveSnipeSellOutcome> {
   // EXIT path — a position opened by this snipe is a Jupiter position, so the
-  // exit keeps that rail when the caller has no settings of its own (the
-  // position manager's automatic exits). An exit must never be blocked by a
-  // rail switch, because that would strand real tokens on chain; see
-  // SOL_POSITION_RAIL.
+  // exit keeps that rail whether the caller has no settings (the position
+  // manager's automatic exits) or has since armed a different engine (the
+  // sniper's immediate exit, or a rail switch while a position is open). An
+  // exit must never be blocked by a rail switch, because that would strand
+  // real tokens on chain; see SOL_POSITION_RAIL. The supplied settings still
+  // win when they ARE the Jupiter rail, so the cluster label stays accurate.
+  const railForExit =
+    opts.railSettings?.rail === "jupiter" ? opts.railSettings : SOL_POSITION_RAIL;
   const signing = solSigningVerdict({
-    ...(opts.railSettings ?? SOL_POSITION_RAIL),
+    ...railForExit,
     engine: "jupiter",
   });
   if (!signing.ok) {

@@ -657,8 +657,9 @@ export default function SolSniper() {
             solRpcUrl: rpc,
             jitoEngines: jito,
             provider: signer,
-            // The exit keeps the rail it was opened on; the execution module
-            // supplies that rail when this one has no settings to pass.
+            // The exit keeps the rail it was opened on: the execution module
+            // falls back to the position rail when these are absent and ignores
+            // them when they name anything other than Jupiter.
             ...(state
               ? {
                   railSettings: {
