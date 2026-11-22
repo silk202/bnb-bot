@@ -569,14 +569,20 @@ export default function SolSniper() {
           // buy instead of a doomed Phantom popup or a raw refusal.
           fitToWallet: true,
           // Engine gate: this path signs Jupiter swaps, so it refuses when the
-          // operator armed flash arbitrage instead.
-          railSettings: {
-            rail: state?.solExecutionRail ?? "jupiter",
-            cluster: solCluster,
-            programId: state?.solContractProgramId ?? "",
-            authorized: state?.solContractAuthorized ?? false,
-            auditApproved: state?.solAuditApproved ?? false,
-          },
+          // operator armed flash arbitrage instead. Until the settings row has
+          // arrived there is no rail to check against, so it is omitted and the
+          // buy is refused honestly — no Jupiter default is fabricated.
+          ...(state
+            ? {
+                railSettings: {
+                  rail: state.solExecutionRail ?? "jupiter",
+                  cluster: solCluster,
+                  programId: state.solContractProgramId ?? "",
+                  authorized: state.solContractAuthorized ?? false,
+                  auditApproved: state.solAuditApproved ?? false,
+                },
+              }
+            : {}),
         });
         if (!buy.ok) {
           await recordRef.current({
@@ -651,13 +657,19 @@ export default function SolSniper() {
             solRpcUrl: rpc,
             jitoEngines: jito,
             provider: signer,
-            railSettings: {
-              rail: state?.solExecutionRail ?? "jupiter",
-              cluster: solCluster,
-              programId: state?.solContractProgramId ?? "",
-              authorized: state?.solContractAuthorized ?? false,
-              auditApproved: state?.solAuditApproved ?? false,
-            },
+            // The exit keeps the rail it was opened on; the execution module
+            // supplies that rail when this one has no settings to pass.
+            ...(state
+              ? {
+                  railSettings: {
+                    rail: state.solExecutionRail ?? "jupiter",
+                    cluster: solCluster,
+                    programId: state.solContractProgramId ?? "",
+                    authorized: state.solContractAuthorized ?? false,
+                    auditApproved: state.solAuditApproved ?? false,
+                  },
+                }
+              : {}),
           });
           if (!sell.ok) {
             toast.warning("Position opened — sell did not land", {

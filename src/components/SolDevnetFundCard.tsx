@@ -146,17 +146,26 @@ export function SolDevnetFundCard({
           <span className="font-mono">{SOL_RPC_FAUCET_CLOSED}</span>. A bare{" "}
           <span className="font-mono">solana airdrop</span> uses that same RPC and
           fails the same way, so the faucet page (or a local validator) is the
-          only working path. Nothing here is simulated: the balance above is a
-          live <span className="font-mono">getBalance</span> on{" "}
+          only working path. Nothing here is simulated:{" "}
+          {address
+            ? "the balance above is a live "
+            : "once a wallet is armed, the balance above is a live "}
+          <span className="font-mono">getBalance</span> on{" "}
           <span className="font-mono">{rpcUrl}</span>.
         </p>
 
         <div className="flex items-start gap-2 rounded-lg border border-border/50 bg-background/40 px-3 py-2">
           <Wallet className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 break-all font-mono text-[10px] text-muted-foreground">
-            {address
-              ? `solana airdrop 2 ${address} --url devnet   # only if your RPC still serves the faucet`
-              : "arm a wallet to see the exact CLI command for its address"}
+          <span className="min-w-0 break-words font-mono text-[10px] text-muted-foreground">
+            {address ? (
+              <>
+                {"solana airdrop 2 "}
+                <span className="break-all">{address}</span>
+                {" --url devnet   # only if your RPC still serves the faucet"}
+              </>
+            ) : (
+              "arm a wallet to see the exact CLI command for its address"
+            )}
           </span>
         </div>
       </CardContent>

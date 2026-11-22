@@ -69,6 +69,34 @@ export const SOL_PROGRAM_ID_PIN =
   "82BPo27Cg6em3CqhZxsxX4F8ER6d5auu2vqWYeTXRSVd";
 
 /**
+ * The rail a live POSITION is closed on, when the closing path has no rail
+ * settings of its own (the position manager's exits, and any older caller).
+ *
+ * A position that was opened by the Jupiter snipe is a Jupiter position: its
+ * exit must be able to land even while the operator has since armed flash
+ * arbitrage. Refusing an exit on a rail switch would strand real tokens on
+ * chain, so the exit path keeps a fixed Jupiter rail instead of inheriting the
+ * last-saved one. OPEN paths do not get this default — they must supply the
+ * persisted settings or refuse (see SOL_RAIL_UNVERIFIED_MESSAGE).
+ */
+export const SOL_POSITION_RAIL: SolRailSettings = Object.freeze({
+  rail: "jupiter",
+  cluster: "mainnet",
+  programId: null,
+  authorized: false,
+  auditApproved: false,
+});
+
+/**
+ * The refusal used by a signing path that could not read the persisted rail.
+ *
+ * "No settings" is not "Jupiter is armed": a caller that cannot prove which
+ * engine the operator selected must not sign at all. Fail closed, and say why.
+ */
+export const SOL_RAIL_UNVERIFIED_MESSAGE =
+  "the operator's persisted rail settings were not available, so nothing was signed — the gate never signs on an unknown engine. Reload the terminal and try again";
+
+/**
  * The engine a signing path is about to use. `jupiter` is the only engine with
  * an implemented signer today; `solcontract` is the FlashboltSolana program.
  */
@@ -126,7 +154,9 @@ export function solSigningVerdict(input: SolSigningGateInput): SolRailVerdict {
     const armed = jupiterVerdict(input.cluster);
     return {
       ...armed,
-      message: `Jupiter signing armed — ${armed.message}`,
+      message: `Jupiter signing armed — real swaps from the ${clusterLabel(
+        input.cluster,
+      )} wallet.`,
     };
   }
 
@@ -140,15 +170,17 @@ export function solSigningVerdict(input: SolSigningGateInput): SolRailVerdict {
   };
 }
 
+function clusterLabel(cluster: SolRailInput["cluster"]): string {
+  return cluster === "mainnet" ? "mainnet" : "devnet";
+}
+
 function jupiterVerdict(cluster: SolRailInput["cluster"]): SolRailVerdict {
   return {
     ok: true,
     rail: "jupiter",
     programId: null,
     blockers: [],
-    message: `Jupiter rail armed — real swaps from the ${
-      cluster === "mainnet" ? "mainnet" : "devnet"
-    } wallet.`,
+    message: `Jupiter rail armed — real swaps from the ${clusterLabel(cluster)} wallet.`,
   };
 }
 
@@ -179,7 +211,7 @@ function contractVerdict(input: SolRailInput): SolRailVerdict {
   return {
     ok: blockers.length === 0,
     rail: "solcontract",
-    programId: blockers.length === 0 || programId ? programId || null : null,
+    programId: programId || null,
     blockers,
     message:
       blockers.length === 0

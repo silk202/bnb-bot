@@ -31,7 +31,12 @@ import {
   type SolWalletRole,
 } from "./solana-policy";
 import { fetchWithTimeout } from "./fetch-timeout";
-import { solSigningVerdict, type SolRailSettings } from "./sol-rail-gate";
+import {
+  SOL_POSITION_RAIL,
+  SOL_RAIL_UNVERIFIED_MESSAGE,
+  solSigningVerdict,
+  type SolRailSettings,
+} from "./sol-rail-gate";
 
 // ---------------------------------------------------------------------------
 // Jupiter v1 API (real endpoints, no keys required for the public tier)
@@ -682,18 +687,24 @@ export async function executeLiveSnipeBuy(opts: {
   /**
    * The persisted engine settings. Signing is gated on them: this path only
    * signs Jupiter swaps, so an armed `solcontract` rail refuses here instead
-   * of quietly signing a swap the operator did not select.
+   * of quietly signing a swap the operator did not select. Absent settings
+   * refuse too — "not loaded" is never read as "Jupiter is armed".
    */
   railSettings?: SolRailSettings;
 }): Promise<LiveSnipeBuyOutcome> {
-  const signing = solSigningVerdict({
-    rail: opts.railSettings?.rail ?? "jupiter",
-    cluster: opts.railSettings?.cluster ?? "mainnet",
-    programId: opts.railSettings?.programId,
-    authorized: opts.railSettings?.authorized,
-    auditApproved: opts.railSettings?.auditApproved,
-    engine: "jupiter",
-  });
+  // OPEN path — it must be told which rail the operator armed. There is no
+  // "assume Jupiter" fallback here: a missing settings object used to sign a
+  // real swap on an engine the operator may not have selected.
+  const rail = opts.railSettings;
+  if (!rail) {
+    return {
+      ok: false,
+      engine: "rail-gate",
+      error: `Jupiter buy blocked — ${SOL_RAIL_UNVERIFIED_MESSAGE}. Nothing was signed or spent.`,
+      venue: "Jupiter",
+    };
+  }
+  const signing = solSigningVerdict({ ...rail, engine: "jupiter" });
   if (!signing.ok) {
     return { ok: false, engine: "rail-gate", error: signing.message, venue: "Jupiter" };
   }
@@ -814,15 +825,20 @@ export async function executeLiveSnipeSell(opts: {
   jitoEngines?: string[];
   provider?: SolSigningProvider;
   priorityFeeMicroLamports?: number;
-  /** Persisted engine settings — the exit path signs Jupiter swaps only. */
+  /**
+   * Persisted engine settings — the exit path signs Jupiter swaps only. When
+   * they are absent the exit still runs on the position's own rail
+   * (`SOL_POSITION_RAIL`): a live position must always remain closable.
+   */
   railSettings?: SolRailSettings;
 }): Promise<LiveSnipeSellOutcome> {
+  // EXIT path — a position opened by this snipe is a Jupiter position, so the
+  // exit keeps that rail when the caller has no settings of its own (the
+  // position manager's automatic exits). An exit must never be blocked by a
+  // rail switch, because that would strand real tokens on chain; see
+  // SOL_POSITION_RAIL.
   const signing = solSigningVerdict({
-    rail: opts.railSettings?.rail ?? "jupiter",
-    cluster: opts.railSettings?.cluster ?? "mainnet",
-    programId: opts.railSettings?.programId,
-    authorized: opts.railSettings?.authorized,
-    auditApproved: opts.railSettings?.auditApproved,
+    ...(opts.railSettings ?? SOL_POSITION_RAIL),
     engine: "jupiter",
   });
   if (!signing.ok) {
@@ -997,7 +1013,7 @@ export async function executeLiveArb(opts: {
    * Persisted engine settings. Checked BEFORE any quote or signature: the
    * arbitrage route only exists on the Jupiter rail today, so an operator who
    * armed `solcontract` must not receive a Jupiter-signed route from an older
-   * client or a stale tab.
+   * client or a stale tab. Absent settings refuse as well — no fallback rail.
    */
   railSettings?: SolRailSettings;
   onPhase?: (phase: string) => void;
@@ -1037,14 +1053,15 @@ export async function executeLiveArb(opts: {
 
   // SIGNING GATE — before the cluster pin, the baseline read and the first
   // wallet prompt. An engine that is not the armed rail never reaches a key.
-  const signing = solSigningVerdict({
-    rail: opts.railSettings?.rail ?? "jupiter",
-    cluster: opts.railSettings?.cluster ?? "mainnet",
-    programId: opts.railSettings?.programId,
-    authorized: opts.railSettings?.authorized,
-    auditApproved: opts.railSettings?.auditApproved,
-    engine: "jupiter",
-  });
+  // OPEN path — same rule as the snipe buy: no settings means no signing.
+  const rail = opts.railSettings;
+  if (!rail) {
+    return fail(
+      "rail-gate",
+      `Jupiter route blocked — ${SOL_RAIL_UNVERIFIED_MESSAGE}. Nothing was signed or spent.`,
+    );
+  }
+  const signing = solSigningVerdict({ ...rail, engine: "jupiter" });
   if (!signing.ok) return fail("rail-gate", signing.message);
 
   try {
