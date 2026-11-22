@@ -118,10 +118,17 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
-      # The SBF compiler is installed explicitly: leaving it to the CLI's
-      # default is what pulled Cargo 1.79 and broke the build.
+      # The wrapper bundled with the CLI only carries the SBF v1 sysroot for
+      # its own platform-tools default (Cargo 1.79), which cannot parse the
+      # edition2024 manifests in today's dependency tree. Its warning says to
+      # install the current wrapper; that wrapper is built against Rust 1.95
+      # and matches platform-tools v1.57, which is installed next and pinned
+      # for the build.
+      - name: Install cargo-build-sbf (matches platform-tools v1.57)
+        run: cargo install cargo-build-sbf --locked
+
       - name: Install SBF platform-tools v1.57
-        run: cargo-build-sbf --install-only --tools-version v1.57
+        run: "$HOME/.cargo/bin/cargo-build-sbf" --install-only --tools-version v1.57
 
       - name: Install Anchor CLI 0.31.1
         run: |
@@ -133,7 +140,8 @@ jobs:
       - name: Print toolchain versions
         run: |
           rustc --version && cargo --version
-          cargo-build-sbf --version
+          "$HOME/.cargo/bin/cargo-build-sbf" --version
+          which cargo-build-sbf && cargo-build-sbf --version | head -1
           solana --version && anchor --version
 
       # The tests load this artifact and fail (never skip) when it is missing.
@@ -143,9 +151,10 @@ jobs:
           # The arch flag's spelling depends on the cargo-build-sbf build, and
           # an unknown value fails the step before compiling. Take the name
           # from the binary's accepted set instead of hard-coding one.
-          if cargo-build-sbf --help | grep -qw sbfv1; then arch=sbfv1; else arch=v1; fi
+          CB="$HOME/.cargo/bin/cargo-build-sbf"
+          if "$CB" --help | grep -qw sbfv1; then arch=sbfv1; else arch=v1; fi
           echo "SBF arch: $arch"
-          cargo-build-sbf --arch "$arch" --tools-version v1.57 \
+          "$CB" --arch "$arch" --tools-version v1.57 \
             --manifest-path programs/flashbolt_solana/Cargo.toml \
             --sbf-out-dir target/deploy
 
