@@ -36,6 +36,7 @@ import type * as operatorDefaults from "../operatorDefaults.js";
 import type * as operatorEmails from "../operatorEmails.js";
 import type * as payouts from "../payouts.js";
 import type * as pinGuard from "../pinGuard.js";
+import type * as rail_gate from "../rail_gate.js";
 import type * as rateLimit from "../rateLimit.js";
 import type * as retention from "../retention.js";
 import type * as signals from "../signals.js";
@@ -89,6 +90,7 @@ declare const fullApi: ApiFromModules<{
   operatorEmails: typeof operatorEmails;
   payouts: typeof payouts;
   pinGuard: typeof pinGuard;
+  rail_gate: typeof rail_gate;
   rateLimit: typeof rateLimit;
   retention: typeof retention;
   signals: typeof signals;
