@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   UTC_OFFSETS,
+  UTC_OFFSET_STORAGE_KEY,
   offsetLabel,
   readStoredOffset,
   utcShifted,
@@ -56,10 +57,13 @@ describe("utc-clock", () => {
   });
 
   test("readStoredOffset falls back to 0 with no stored value", () => {
-    const before = globalThis.localStorage;
-    // @ts-expect-error localStorage is undefined in the test runtime
-    globalThis.localStorage = undefined;
+    // `localStorage` is absent in the Bun runtime, so this exercises the
+    // no-storage branch. Never reassign the global: when the whole suite runs
+    // in one process another test installs DOM globals, which makes
+    // `localStorage` readonly and turns that assignment into a TypeError.
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(UTC_OFFSET_STORAGE_KEY);
+    }
     expect(readStoredOffset()).toBe(0);
-    globalThis.localStorage = before;
   });
 });
