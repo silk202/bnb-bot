@@ -108,8 +108,12 @@ async function main(): Promise<number> {
   console.log(`[devnet-drill] drill address (deterministic, devnet-only): ${ownerPk.toBase58()}`);
 
   let funded = false;
+  let refuseReason = "";
   results.push(await stage(3, "devnet funding (real SOL)", async () => {
-    // Path A — the cluster's built-in airdrop.
+    // Path A — the cluster's built-in airdrop. The public devnet RPC has
+    // answered HTTP 410 ("The RPC faucet is closed on this cluster") since
+    // November 2026, so the refusal is reported verbatim instead of assumed
+    // away.
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const sig = await solRpcCall<string>(RPC, "requestAirdrop", [ownerPk.toBase58(), 500_000_000]);
@@ -118,34 +122,16 @@ async function main(): Promise<number> {
           funded = true;
           return "0.5 SOL airdropped + confirmed";
         }
-      } catch {
-        // fall through to path B
+      } catch (e) {
+        refuseReason = e instanceof Error ? e.message : String(e);
       }
       await new Promise((r) => setTimeout(r, 3_000));
     }
-    // Path B — the public faucet.solana.com API (real HTTP funding service).
-    try {
-      const { fetchWithTimeout } = await import("../src/lib/fetch-timeout");
-      const res = await fetchWithTimeout("https://faucet.solana.com/api/request-airdrop", 20_000, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wallet: ownerPk.toBase58(), amount: 500_000_000 }),
-      });
-      const json = (await res.json()) as { error?: unknown };
-      if (!json.error) {
-        // The faucet returns the tx for its own send — poll our balance.
-        for (let i = 0; i < 20; i++) {
-          await new Promise((r) => setTimeout(r, 3_000));
-          const bal = await solRpcCall<{ value: number }>(RPC, "getBalance", [ownerPk.toBase58()]);
-          if (bal.value > 0) {
-            funded = true;
-            return `${(bal.value / 1_000_000_000).toFixed(3)} SOL via faucet.solana.com`;
-          }
-        }
-      }
-    } catch {
-      // honest failure below
-    }
+    // Path B — an address a human already funded from the official faucet.
+    // https://faucet.solana.com is a browser app (2 requests / 8 h while
+    // anonymous; signing in with GitHub raises the limit) and exposes no
+    // public programmatic airdrop endpoint, so the drill probes for the grant
+    // instead of pretending to call an API that does not exist.
     const bal = await solRpcCall<{ value: number }>(RPC, "getBalance", [ownerPk.toBase58()]);
     if (bal.value >= 50_000_000) {
       // Hijack guard: the account must be SYSTEM-owned to sign or pay fees.
@@ -164,7 +150,11 @@ async function main(): Promise<number> {
       funded = true;
       return `pre-funded: ${(bal.value / 1_000_000_000).toFixed(3)} SOL`;
     }
-    throw new Error("both funding paths refused (daily faucet limit)");
+    throw new Error(
+      `no devnet SOL — RPC airdrop: ${refuseReason || "unavailable"}; ` +
+        "fund the printed address at https://faucet.solana.com (2 requests / 8 h) " +
+        "or run `solana airdrop 2 <address> --url devnet`",
+    );
   }));
 
   if (!funded) {

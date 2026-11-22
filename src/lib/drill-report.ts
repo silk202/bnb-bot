@@ -90,7 +90,10 @@ export function evaluateDrillReport(
     const evm = EVM_ADDR_RE.exec(trimmed)?.[1];
     const sol = SOL_ADDR_RE.exec(trimmed)?.[1];
     if (evm) remediation.push(`fund ${evm} (BSC testnet) — https://testnet.bnbchain.org/en/testnet-faucet`);
-    if (sol) remediation.push(`fund ${sol} (Solana devnet) — https://faucet.solana.com`);
+    if (sol)
+      remediation.push(
+        `fund ${sol} (Solana devnet) — https://faucet.solana.com (2 requests / 8 h) or solana airdrop 2 ${sol} --url devnet`,
+      );
     remediation.push(
       remediation.length > 1
         ? "then re-run: bun run drill:report"

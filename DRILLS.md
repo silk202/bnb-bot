@@ -28,7 +28,7 @@ never touched.
 |---|---|---|
 | 1 | Vault seal → lock → unlock (real AES-256-GCM) | EVM vault seal → lock → unlock + `getVaultHotWallet` seam check |
 | 2 | In-memory ed25519 signing (sub-ms) | In-memory viem secp256k1 signing, signature recovered to the vault address |
-| 3 | Real devnet funding (airdrop → faucet API → pre-funded probe) | Real testnet funding (pre-funded probe → faucet POSTs), with hijack guard |
+| 3 | Real devnet funding (RPC airdrop → pre-funded probe; official faucet 2 req / 8 h) | Real testnet funding (pre-funded probe → faucet POSTs), with hijack guard |
 | 4 | Real `sendTransaction` → on-chain confirmation (memo self-send) | Production `transferNative` → `eth_getTransactionReceipt` |
 | 5 | Live `getTokenAccountsByOwner` query shape (the sell leg's shape) | Live PancakeSwap swap through production `buyToken` with on-chain `balanceOf` proof |
 
@@ -93,10 +93,10 @@ Recovery, in order:
 
 ## Funding — manual, one-time
 
-The drills try every keyless path themselves first (built-in airdrop, faucet
-HTTP APIs, pre-funded probe). Faucets that only serve browsers (CAPTCHA-gated)
-have to be hit once by a human — then every later re-run uses the persisted
-balance automatically. Suggested drips: **0.1 tBNB** and **0.05 devnet SOL**.
+The drills try every keyless path themselves first (RPC airdrop, pre-funded
+probe). Faucets that only serve browsers have to be hit once by a human — then
+every later re-run uses the persisted balance automatically. Suggested drips:
+**0.1 tBNB** and **0.05 devnet SOL**.
 
 **BNB FlashBolt** (0.1+ testBNB):
 
@@ -113,6 +113,20 @@ Alternative: <https://www.chainstack.com/faucets/bsc-chain-testnet/> (also CAPTC
 2. Paste `CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K`
 3. Pick 0.05 SOL and confirm
 4. Verify on the explorer: <https://explorer.solana.com/address/CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K?cluster=devnet>
+
+**Limits (verified 2026-11-22):** the faucet allows **2 requests every 8
+hours** while anonymous; signing in with GitHub raises the limit, and GitHub
+accounts are validated. The public RPC faucet is **closed** — `requestAirdrop`
+against `api.devnet.solana.com` answers HTTP 410 ("The RPC faucet is closed on
+this cluster"), which is why the drill reports that refusal verbatim instead of
+retrying a path that no longer exists. The CLI alternative is rate-limited too:
+
+```bash
+solana airdrop 2 CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K --url devnet
+```
+
+For unlimited SOL with no rate limit, run a local validator
+(`solana-test-validator`) and airdrop against `--url localhost`.
 
 Once either address is funded, the corresponding drill skips the faucet
 attempts (pre-funded path) and proceeds through broadcast/swap.
