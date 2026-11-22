@@ -164,6 +164,13 @@ jobs:
           "$CB" --arch "$arch" --tools-version v1.57 \
             --manifest-path programs/flashbolt_solana/Cargo.toml \
             --sbf-out-dir target/deploy
+          # cargo-build-sbf writes a throwaway keypair when none exists. The
+          # retained deployment keypair is deliberately not in the repo, so the
+          # generated one can only be random — and comparing it with the pinned
+          # program ID would (rightly) block the preflight. Remove it so CI runs
+          # in its intended "no keypair" state instead of shipping a key that
+          # would deploy this program somewhere else.
+          rm -f target/deploy/flashbolt_solana-keypair.json
 
       # The conformance tests prove the IDL's *content*; this proves the file
       # was regenerated in the same commit, so it cannot lag the source.
