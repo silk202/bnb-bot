@@ -75,9 +75,16 @@ jobs:
   # must not hide a program regression, or the other way round.
   #
   # Pinned deliberately:
-  #   * Solana CLI 4.4.1 — the version this workspace was verified with.
-  #     `--arch v1` is required because LiteSVM 0.7 rejects the Agave default
-  #     (v3) with `Instruction(InvalidAccountData)`.
+  #   * Solana CLI from the `stable` channel — the `v4.4.1` tag currently
+  #     installs an SBF v1 toolchain whose bundled Cargo is 1.79, which cannot
+  #     parse the `edition2024` manifests in the current dependency tree
+  #     (`failed to parse manifest ... cpufeatures-0.3.1`). The channel build
+  #     ships cargo-build-sbf 4.5.0.
+  #   * platform-tools v1.57 (Rust 1.95) — pinned on its own, so the SBF
+  #     compiler cannot drift with the channel.
+  #   * `--arch v1` is required because LiteSVM 0.7 rejects the Agave default
+  #     (v3) with `Instruction(InvalidAccountData)`. Note the arch names: this
+  #     cargo-build-sbf spells it `v1`, not `sbfv1`.
   #   * Anchor 0.31.1 — matches anchor-lang in the program's Cargo.toml. Its
   #     prebuilt binary needs GLIBC >= 2.38, which is why this job runs on
   #     ubuntu-24.04 rather than relying on `ubuntu-latest`.
@@ -104,10 +111,15 @@ jobs:
       - name: Install Rust stable with clippy
         run: rustup toolchain install stable --profile minimal --component clippy
 
-      - name: Install Solana CLI 4.4.1
+      - name: Install Solana CLI (stable channel)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v4.4.1/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      # The SBF compiler is installed explicitly: leaving it to the CLI's
+      # default is what pulled Cargo 1.79 and broke the build.
+      - name: Install SBF platform-tools v1.57
+        run: cargo-build-sbf --install-only --tools-version v1.57
 
       - name: Install Anchor CLI 0.31.1
         run: |
@@ -126,7 +138,7 @@ jobs:
       - name: Build the program (SBF v1)
         working-directory: solana
         run: |
-          cargo-build-sbf --arch sbfv1 \
+          cargo-build-sbf --arch v1 --tools-version v1.57 \
             --manifest-path programs/flashbolt_solana/Cargo.toml \
             --sbf-out-dir target/deploy
 
