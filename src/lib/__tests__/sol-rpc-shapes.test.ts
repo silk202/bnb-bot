@@ -32,6 +32,8 @@ let server: ReturnType<typeof Bun.serve>;
 let rpcUrl = "";
 /** Every request the modules actually sent — params are part of the contract. */
 const requests: RpcRequest[] = [];
+/** When each request arrived, for pinning the poll schedule. */
+const sentAt: number[] = [];
 let answer: (method: string, params: unknown[]) => unknown = () => null;
 
 beforeAll(() => {
@@ -40,6 +42,7 @@ beforeAll(() => {
     async fetch(req) {
       const body = (await req.json()) as RpcRequest;
       requests.push(body);
+      sentAt.push(Date.now());
       return Response.json({
         jsonrpc: "2.0",
         id: 1,
@@ -156,5 +159,36 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
       confirmed: false,
       err: "confirmation timeout",
     });
+  });
+
+  test("poll gaps grow, so five seconds of waiting costs three requests, not four", async () => {
+    answer = () => ({ context: { slot: 9 }, value: [null] });
+    requests.length = 0;
+    sentAt.length = 0;
+
+    const startedAt = Date.now();
+    const out = await waitForSigConfirm(SIG, rpcUrl, 5_000);
+    const elapsed = Date.now() - startedAt;
+
+    expect(out).toEqual({ confirmed: false, err: "confirmation timeout" });
+    // 0 s, 1.5 s, 4.5 s. A flat 1.5 s loop would have sent a fourth at 4.5 s+.
+    expect(sentAt).toHaveLength(3);
+    const gaps = sentAt.slice(1).map((t, i) => t - sentAt[i]);
+    expect(gaps[0]).toBeGreaterThanOrEqual(1_300);
+    expect(gaps[1]).toBeGreaterThanOrEqual(2_700);
+    // The last sleep is clamped to the deadline, so the call does not overshoot.
+    expect(elapsed).toBeLessThan(6_000);
+  });
+
+  test("a short timeout never sleeps past its own deadline", async () => {
+    answer = () => ({ context: { slot: 9 }, value: [null] });
+    requests.length = 0;
+
+    const startedAt = Date.now();
+    await waitForSigConfirm(SIG, rpcUrl, 50);
+
+    expect(requests).toHaveLength(1);
+    // The old flat 1.5 s sleep made a 20 ms wait last 1.5 s.
+    expect(Date.now() - startedAt).toBeLessThan(700);
   });
 });

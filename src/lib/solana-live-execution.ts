@@ -388,13 +388,27 @@ async function postRpc<T>(rpcUrl: string, method: string, params: unknown[]): Pr
   return json.result as T;
 }
 
-/** Poll getSignatureStatuses until the tx lands (or times out) — real confirmation. */
+/** First poll gap; each miss doubles it until the ceiling below. */
+export const SIG_POLL_START_MS = 1_500;
+/** Ceiling for the poll gap — a burst must not turn into a request storm. */
+export const SIG_POLL_MAX_MS = 12_000;
+
+/**
+ * Poll getSignatureStatuses until the tx lands (or times out) — real confirmation.
+ *
+ * The first probe is immediate, then the gap grows 1.5 s → 3 s → 6 s → 12 s
+ * (ceiling). A flat 1.5 s loop spent 40 requests a minute per unlanded tx; a
+ * burst of exits paid that on every signature. The schedule is deterministic
+ * (no jitter) so the wire test can pin it, and the final sleep is clamped to
+ * what is left of the timeout so a short wait never overshoots its deadline.
+ */
 export async function waitForSigConfirm(
   sig: string,
   rpcUrl: string,
   timeoutMs = 60_000,
 ): Promise<{ confirmed: boolean; err: string | null }> {
   const start = Date.now();
+  let gap = SIG_POLL_START_MS;
   while (Date.now() - start < timeoutMs) {
     try {
       // `getSignatureStatuses` answers an RpcResponse — `{ context, value }` —
@@ -417,9 +431,11 @@ export async function waitForSigConfirm(
         }
       }
     } catch {
-      // RPC hiccup — keep polling until the timeout.
+      // RPC hiccup — keep polling until the timeout, at the same growing gap.
     }
-    await new Promise((r) => setTimeout(r, 1_500));
+    const remaining = timeoutMs - (Date.now() - start);
+    await new Promise((r) => setTimeout(r, Math.max(0, Math.min(gap, remaining))));
+    gap = Math.min(gap * 2, SIG_POLL_MAX_MS);
   }
   return { confirmed: false, err: "confirmation timeout" };
 }

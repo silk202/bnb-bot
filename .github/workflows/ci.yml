@@ -87,7 +87,10 @@ jobs:
   #     default (v3) with `Instruction(InvalidAccountData)`. Its spelling is
   #     not stable across cargo-build-sbf builds (`sbfv1` on the runner,
   #     `v1` on the channel build used locally), so the build step reads the
-  #     accepted name from the binary's own help output.
+  #     accepted name from the binary's own help output. Dropping this pin is
+  #     a dependency migration, not a flag flip: SBPFv3 needs litesvm >= 0.18
+  #     (solana-* 4.x, MSRV 1.97.1), while the harness is anchor-lang 0.31.1 /
+  #     solana-sdk 2.2 / litesvm 0.7. Tracked as its own round.
   #   * Anchor 0.31.1 — matches anchor-lang in the program's Cargo.toml. Its
   #     prebuilt binary needs GLIBC >= 2.38, which is why this job runs on
   #     ubuntu-24.04 rather than relying on `ubuntu-latest`.
@@ -168,12 +171,26 @@ jobs:
           avm use 0.31.1
           echo "$HOME/.avm/bin" >> "$GITHUB_PATH"
 
-      - name: Print toolchain versions
+      # A channel swap once put the SBF compiler on a platform-tools whose
+      # Cargo 1.79 cannot parse the edition2024 manifests in today's dependency
+      # tree. Printing the versions made that a 20-minute failure inside the
+      # build; the pinned versions are asserted here instead, at the top.
+      - name: Assert the pinned toolchain
         run: |
           rustc --version && cargo --version
-          "$HOME/.cargo/bin/cargo-build-sbf" --version
+          OUT="$("$HOME/.cargo/bin/cargo-build-sbf" --version)"
+          echo "$OUT"
           which cargo-build-sbf && cargo-build-sbf --version | head -1
           solana --version && anchor --version
+
+          if [ "$(command -v cargo-build-sbf)" != "$HOME/.cargo/bin/cargo-build-sbf" ]; then
+            echo "::error::cargo-build-sbf on PATH is not the crates.io build in ~/.cargo/bin"
+            exit 1
+          fi
+          if ! printf '%s\n' "$OUT" | grep -qF "platform-tools v1.57"; then
+            echo "::error::cargo-build-sbf is not on platform-tools v1.57, the SBF compiler this job pins"
+            exit 1
+          fi
 
       # The tests load this artifact and fail (never skip) when it is missing.
       - name: Build the program (SBF v1)

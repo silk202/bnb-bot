@@ -119,14 +119,11 @@ hours** while anonymous; signing in with GitHub raises the limit, and GitHub
 accounts are validated. The public RPC faucet is **closed** — `requestAirdrop`
 against `api.devnet.solana.com` answers HTTP 410 ("The RPC faucet is closed on
 this cluster"), which is why the drill reports that refusal verbatim instead of
-retrying a path that no longer exists. The CLI alternative is rate-limited too:
-
-```bash
-solana airdrop 2 CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K --url devnet
-```
-
-For unlimited SOL with no rate limit, run a local validator
-(`solana-test-validator`) and airdrop against `--url localhost`.
+retrying a path that no longer exists. The CLI is **not** an alternative: `solana airdrop 2 … --url devnet` sends
+`requestAirdrop` to that same closed faucet, so it fails with the same HTTP 410
+and is not offered here as a path that works. For unlimited SOL with no rate
+limit, run a local validator (`solana-test-validator`) and airdrop against
+`--url localhost` — that is the only keyless path these drills trust.
 
 Once either address is funded, the corresponding drill skips the faucet
 attempts (pre-funded path) and proceeds through broadcast/swap.

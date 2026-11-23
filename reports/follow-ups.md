@@ -1650,3 +1650,108 @@ reported as "confirmation timeout" after the full 60 s wait**. Fixed to read
    like `/solana-mainnet` is over-redacted. Safe direction, imprecise.
 4. Round 19's DRILLS.md airdrop line, the `cargo-build-sbf --version`
    assertion and the SBF v1 pin remain open.
+
+## Round 24 — 2026-11-23 · the confirmation poll backs off, round 19 is closed
+
+**1. The confirmation fix, restated.** Round 23 changed
+`waitForSigConfirm` to read `getSignatureStatuses`' RpcResponse envelope
+(`{ context, value }`) instead of a bare array. Before that, `statuses[0]` was
+`undefined` on every reply — a landed transaction was reported as
+**"confirmation timeout" after the full 60 s wait**, on every send path:
+`executeLiveArb`, `executeLiveSnipeBuy` and `executeLiveSnipeSell`. A reverted
+transaction now says what the node said (`{"InstructionError":[0,{"Custom":6001}]}`)
+instead of `[object Object]`. That fix is pinned at the wire in
+`sol-rpc-shapes.test.ts`; it still has **no funded-transaction evidence** — a
+test server proves the parse, the first real devnet send proves the behaviour
+(follow-up 1 below).
+
+**2. The poll backs off instead of hammering.** The loop used a flat 1.5 s gap
+for the whole 60 s, i.e. 40 requests per minute for every signature that had not
+landed — a burst of exits paid that per transaction. It now probes immediately
+and then waits `1.5 s → 3 s → 6 s → 12 s` (ceiling, exported as
+`SIG_POLL_START_MS` / `SIG_POLL_MAX_MS`). A confirmation that lands in the first
+slot is still seen in ~1 s: the first probe is not delayed. The schedule is
+deterministic (no jitter) so it is pinnable, and the **final sleep is clamped to
+the remaining timeout** — the old loop overshot a 20 ms wait by 1.5 s, which
+also meant a sell whose signature was never seen could block 1.5 s past its own
+deadline.
+
+Two tests in `src/lib/__tests__/sol-rpc-shapes.test.ts` pin it against the real
+`Bun.serve` JSON-RPC endpoint (no fetch stub): a 5 s wait sends exactly **three**
+requests at gaps ≥ 1.3 s and ≥ 2.7 s and returns within 6 s (a flat loop sends
+four), and a 50 ms wait sends one request and returns in under 700 ms.
+
+**3. Round 19's DRILLS.md airdrop line is closed.** The drill still offered
+`solana airdrop 2 … --url devnet` as an alternative; the CLI sends
+`requestAirdrop` to the same public RPC faucet that answers HTTP 410, so the
+line documented a path that cannot work. It now says the CLI is not an
+alternative and names `solana-test-validator --url localhost` as the only
+keyless path.
+
+**4. Round 19's toolchain assertion is closed.** The program job printed the
+versions and then built; a channel swap could therefore move the SBF compiler
+and only fail 20 minutes later inside the build on an `edition2024` manifest.
+The step is now `Assert the pinned toolchain`: it fails unless the
+`cargo-build-sbf` on `PATH` is the crates.io build in `~/.cargo/bin` and its
+version output names `platform-tools v1.57`. The workflow comment also records
+why `--arch v1` is not a temporary typo.
+
+**5. The SBF v1 pin stays — decided, not deferred.** Dropping it is a
+dependency migration, not a flag change: SBPFv3 support starts at litesvm 0.18
+(solana-* 4.x, MSRV 1.97.1), while the test harness is `anchor-lang 0.31.1` /
+`solana-sdk 2.2` / `litesvm 0.7`. Moving LiteSVM means moving Anchor and the
+program's SDK cohort, which touches the program and its IDL — a separate round
+with its own evidence, and no bearing on the devnet or mainnet gate. The pin is
+now documented in the workflow as exactly that.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 760 pass / 0 fail across 65 files (758 → 760: the two poll
+  schedule tests).
+- `eslint` on `src/lib/solana-live-execution.ts` and
+  `src/lib/__tests__/sol-rpc-shapes.test.ts`: 0 problems.
+- The workflow change was not executed: this sandbox has no GitHub runner, no
+  Rust toolchain and no Solana CLI, so the assertion is syntax/YAML-checked only
+  and its first real run is the next `solana-program` CI job.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling): serving, not
+   deploying, is what fails.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 24, brainstormed (none started)
+
+1. **Prove the confirmation fix on a funded devnet tx** (rounds 23–24, #1). One
+   real send through `executeLiveSnipeBuy`'s path, asserting `confirmed: true`
+   in ~1 s, closes the last gap between the wire pin and behaviour. Needs the
+   human faucet claim the verify gate already waits on.
+2. **Stop waiting once the blockhash expires.** Pass `lastValidBlockHeight`
+   into `waitForSigConfirm`; when `getBlockHeight` passes it, a dropped tx is
+   unrecoverable and the sell path should release the position immediately
+   instead of holding it for 60 s. The backoff makes the wait cheap, not
+   correct — this is the correctness half.
+3. **`postRpc` ignores `res.ok`.** A 502/proxy HTML page becomes a JSON parse
+   error with the body lost; the redaction helper exists, so surfacing
+   `method + status + first line` (redacted) would make outages diagnosable.
+   (Readiness report P2, still open.)
+4. **Rebroadcast the same signed bytes after N misses.** `sendTransaction` runs
+   with `maxRetries: 0`, so a dropped send currently costs a brand-new tx. The
+   signed bytes are idempotent to resend; keeping the handle and re-sending
+   after ~3 misses would rescue a tx the blockhash still allows.
+5. **`redactRpcUrl`'s length heuristic over-redacts** `/solana-mainnet` (≥12
+   chars). A key-shape test (base58-ish, length ≥32) would keep routes readable
+   and keys masked; pin both directions in `redact.test.ts`.
+6. **`solRpcCall` still returns `result` unvalidated.** The wire tests pin the
+   three callers that exist; the next one can cast anything. A
+   `readNumber`/`readArray` pair at the transport would make a missing `.value`
+   a type error rather than a runtime `NaN`.
+7. **`aria-label` stays "Copy" after the label says "Copied"** (round 22, #6).
+   Screen readers hear the action, not the result.
+8. **`BackendPausedBoundary` wraps public routes** (`/download`, `/auth`), so a
+   paused backend hides the download page too (round 22, #5).
+9. **The verify gate needs one human faucet claim** to produce a fresh 2/2
+   drill inside 24 h; nothing in code can substitute for it.
