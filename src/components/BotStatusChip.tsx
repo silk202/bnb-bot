@@ -37,7 +37,13 @@ export function BotStatusChip() {
         linkedChats?: number;
         digestEnabled?: boolean;
         channelPurge?: boolean;
-        purgeLast?: { at: number; deleted: number; failed: number; skipped: string | null } | null;
+        purgeLast?: {
+          at: number;
+          deleted: number;
+          failed: number;
+          retrying?: number;
+          skipped: string | null;
+        } | null;
         engineRunning?: boolean | null;
         solEngineRunning?: boolean | null;
         botUsername?: string | null;

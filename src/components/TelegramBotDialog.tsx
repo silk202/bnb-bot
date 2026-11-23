@@ -55,7 +55,13 @@ type BotStatus = {
   autoPurge?: boolean;
   channelPurge?: boolean;
   /** Last purge sweep's tally — null until the cron has reported one. */
-  purgeLast?: { at: number; deleted: number; failed: number; skipped: string | null } | null;
+  purgeLast?: {
+    at: number;
+    deleted: number;
+    failed: number;
+    retrying?: number;
+    skipped: string | null;
+  } | null;
   webhookOk?: boolean | null;
   webhookCheckedAt?: number | null;
   botUsername: string | null;

@@ -2455,3 +2455,116 @@ Follow-up #2 below adds a distinct kind once codegen can run.
     #6).
 16. **Track multiple channel ids** (round 26 #12).
 17. **Show the local sweep in Settings** (round 28 #15).
+
+## Round 31 — the fault alert is throttled, and the retry backlog is visible (2026-11-23)
+
+Two round-30 follow-ups, both about telling the operator the truth without
+becoming noise: a persisting purge fault no longer pings every chat six times
+an hour, and a sweep now reports how many of its refusals are coming back.
+
+### 1. A persisting fault alerts hourly, not every 10 minutes
+
+Round 30 alerted on two consecutive failing sweeps and then repeated on every
+sweep while the fault lasted — by design (it is an active fault), but an
+hour-long outage pushed six identical messages into every linked chat.
+
+- `telegramBotConfig.purgeAlertedAt` stores when an alert last went out. The
+  sweep reads it with the config and passes it to `shouldAlertPurgeFailures`,
+  which still requires two failing sweeps in a row and additionally requires
+  `now - purgeAlertedAt >= PURGE_ALERT_REPEAT_MS` (1 hour). The first alert of a
+  fault is therefore immediate (on the second failing sweep); repeats are
+  hourly.
+- `markPurgeAlert` stamps the time BEFORE the sends. If the alert path crashes
+  halfway, the chats already spared a repeat are not re-spammed ten minutes
+  later; the cost is at most one delayed repeat, never a storm.
+- `stampPurgeRun` clears `purgeAlertedAt` when `failed === 0`. A clean sweep
+  ends the fault, so the NEXT fault alerts on its own second failing sweep
+  instead of waiting out an hour left over from the previous one. A skipped
+  sweep (stand-down) also stamps zero failures and clears it — nothing is
+  failing while the sweep is off.
+- The window is `PURGE_ALERT_REPEAT_MS = 60 min`, matched to the bell's
+  one-per-hour dedupe in `recordBotHealthAlert`, so the two channels stay in
+  step.
+
+No codegen was needed for either addition: `_generated/dataModel.d.ts` derives
+`Doc<>` from `schema.ts` itself (`DataModelFromSchemaDefinition<typeof
+schema>`), and `_generated/api.d.ts` derives the function API from the module
+files (`ApiFromModules`), so typechecking sees `purgeLastRetrying`,
+`purgeAlertedAt` and the new internal `markPurgeAlert` as soon as they are
+declared. That is why the round-30 note about codegen blocking a new
+notification KIND still stands — a value in a union is generated, a new field
+or function is inferred.
+
+### 2. `retrying` is stored, displayed, and in the alert
+
+Round 30 returned `retrying` from the sweep and from `/purge`, but `/alerts`,
+the header chip and the bot panel only saw the stored tally, which had
+`deleted`/`failed` and no retry count. A fault now reads honestly whether it is
+draining or stuck.
+
+- `purgeLastRetrying` is stamped with the rest of the tally and read back by
+  `purgeTelemetryFrom`, so `PurgeTelemetry.retrying` reaches every consumer of
+  `purgeLast` (`/alerts`, the chip tooltip, the dialog) through the one shared
+  `purgeTelemetryLine`.
+- The line shows it only when there is a backlog: `2m ago · 0 deleted · 3
+  failed · 2 retrying`. A failure Telegram will never accept again is settled,
+  not a retry, so it is never counted there — that is the difference between
+  "the bot lost its rights" (draining) and "those messages are gone" (final).
+- `purgeFailureSummary` carries the same segment and states the consequence for
+  the actual number: "2 refused messages are still tracked and will be retried
+  on the next sweep", instead of the generic sentence. Both the Telegram alert
+  and the bell entry get it from the same builder.
+- Absent (an older stamp) reads as 0, so a deployment that upgrades with a
+  stored round-30 tally does not claim a retry backlog it never measured.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 831 pass / 0 fail across 69 files (828 → +3: hourly throttle,
+  retry segment in the telemetry line, retrying count in the shared summary).
+- `eslint` on the six touched files: 18 problems, all on code this round did
+  not touch (unused imports and `\_` escapes in the bot modules, the dialog's
+  purity/`setState`-in-effect findings) — the same baseline as round 30.
+- NOT executed: the Convex deploy (still disabled by the free-plan ceiling), so
+  the new fields, the throttle and its clearing path are code-only; no live
+  Telegram alert cadence was observed, and the chip copy was not viewed in a
+  browser.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 31, brainstormed (none started)
+
+1. **Prove the hourly cadence on a live deployment** (round 30 #1 extends to
+   the throttle): break delete rights, watch the second sweep alert and the
+   next five stay silent, restore rights, watch the retry drain and
+   `purgeAlertedAt` clear.
+2. **Add a `bot_health` notification kind** (round 30 #2) — still needs
+   `convex codegen`; the bell's hourly dedupe already matches this throttle.
+3. **Stop re-alerting forever on an unfixable fault.** Hourly is better than
+   every sweep, but nothing eventually says "this has failed since 09:10 and I
+   have stopped repeating". A long-fault cap (e.g. stop after 6 alerts, or
+   escalate once) needs the streak length the tally does not store.
+4. **Bound retry attempts per row** (round 30 #4) — a `chat not found` row is
+   retried until the 48 h retention backstop; `retrying` now makes the stuck
+   state visible, an `attempts` counter would settle it sooner.
+5. **Keep a short sweep history** (round 30 #5).
+6. **Show `retrying` in the chip's label**, not only its tooltip, when a
+   backlog persists — needs a threshold so the chip does not flicker on one
+   transient 5xx.
+7. **Contract test for the backend keep-list** (round 28 #5).
+8. **Expired `operatorDeviceTrust` sweep** (round 28 #6; needs an index).
+9. **Prove the cached height path on a funded send** (round 27 #1).
+10. **`heightReadsFailed` count** (round 25 #7).
+11. **Redact URLs inside RPC error bodies** (round 25 #3).
+12. **Add a `(chatId, sentAt)` composite index** (round 25 #5).
+13. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+14. **Operator-selectable digest cadence** (round 27 #11).
+15. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6).
+16. **Track multiple channel ids** (round 26 #12).
+17. **Show the local sweep in Settings** (round 28 #15).

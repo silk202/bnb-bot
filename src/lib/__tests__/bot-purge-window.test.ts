@@ -18,6 +18,7 @@ import {
   BOT_MESSAGE_TTL_MS,
   CHANNEL_MESSAGE_TTL_MS,
   classifyPurgeFailure,
+  PURGE_ALERT_REPEAT_MS,
   purgeCutoff,
   purgeFailureAlert,
   purgeFailureSummary,
@@ -135,6 +136,21 @@ describe("purgeTelemetryLine — the sweep reports honestly", () => {
     ).toBe("1m ago · 0 deleted");
   });
 
+  test("the retry backlog is visible, and a settled-only failure is not mislabelled", () => {
+    expect(
+      purgeTelemetryLine(
+        { at: NOW - 60_000, deleted: 0, failed: 3, retrying: 2, skipped: null },
+        NOW,
+      ),
+    ).toBe("1m ago · 0 deleted · 3 failed · 2 retrying");
+    expect(
+      purgeTelemetryLine(
+        { at: NOW - 60_000, deleted: 0, failed: 3, retrying: 0, skipped: null },
+        NOW,
+      ),
+    ).toBe("1m ago · 0 deleted · 3 failed");
+  });
+
   test("a sweep that stood down says why", () => {
     expect(
       purgeTelemetryLine({ at: NOW - 60_000, deleted: 0, failed: 0, skipped: "auto-purge off" }, NOW),
@@ -210,6 +226,24 @@ describe("purge failure alert — two sweeps in a row, real numbers", () => {
     expect(shouldAlertPurgeFailures({ at: NOW, deleted: 0, failed: 0, skipped: "auto-purge off" }, 3)).toBe(
       false,
     );
+  });
+
+  test("a persisting fault re-alerts hourly, not every sweep", () => {
+    const previous = { at: NOW - 600_000, deleted: 0, failed: 2, skipped: null };
+    expect(shouldAlertPurgeFailures(previous, 3, NOW - 60 * 60 * 1000, NOW)).toBe(true);
+    expect(shouldAlertPurgeFailures(previous, 3, NOW - 10 * 60 * 1000, NOW)).toBe(false);
+    expect(shouldAlertPurgeFailures(previous, 3, NOW - PURGE_ALERT_REPEAT_MS + 1, NOW)).toBe(
+      false,
+    );
+    // No stamp at all (first fault, or a clean sweep cleared it) alerts at once.
+    expect(shouldAlertPurgeFailures(previous, 3, null, NOW)).toBe(true);
+  });
+
+  test("the latest tally shows how many refusals are retrying", () => {
+    const current = { at: NOW - 60_000, deleted: 0, failed: 3, retrying: 2, skipped: null };
+    const summary = purgeFailureSummary(undefined, current, NOW);
+    expect(summary).toContain("0 deleted · 3 failed · 2 retrying");
+    expect(summary).toContain("2 refused messages are still tracked");
   });
 
   test("the alert carries both tallies and the honest consequence", () => {

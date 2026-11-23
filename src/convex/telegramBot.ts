@@ -159,6 +159,7 @@ function purgeTelemetryFrom(row: Doc<"telegramBotConfig"> | null): PurgeTelemetr
     at: row.purgeLastAt,
     deleted: row.purgeLastDeleted ?? 0,
     failed: row.purgeLastFailed ?? 0,
+    retrying: row.purgeLastRetrying ?? 0,
     skipped: row.purgeLastSkipped ?? null,
   };
 }
@@ -297,6 +298,7 @@ export const getConfig = internalQuery({
       autoPurge: row.autoPurge !== false,
       channelPurge: row.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row),
+      purgeAlertedAt: row.purgeAlertedAt,
       updatedAt: row.updatedAt,
     };
   },
@@ -1599,14 +1601,20 @@ export const stampPurgeRun = internalMutation({
     at: v.number(),
     deleted: v.number(),
     failed: v.number(),
+    retrying: v.number(),
     skipped: v.optional(v.string()),
   },
-  handler: async (ctx, { at, deleted, failed, skipped }) => {
+  handler: async (ctx, { at, deleted, failed, retrying, skipped }) => {
     const patch = {
       purgeLastAt: at,
       purgeLastDeleted: deleted,
       purgeLastFailed: failed,
+      purgeLastRetrying: retrying,
       purgeLastSkipped: skipped,
+      // A clean sweep ends the fault, so the alert throttle starts fresh: the
+      // NEXT fault must alert on its second failing sweep, not wait out an
+      // hour left over from the previous one. `undefined` deletes the field.
+      ...(failed === 0 ? { purgeAlertedAt: undefined } : {}),
     };
     const row = await ctx.db
       .query("telegramBotConfig")
@@ -1630,10 +1638,29 @@ export const stampPurgeRun = internalMutation({
 });
 
 /**
+ * Record that a fault alert went out, so the next sweeps can be throttled.
+ * Written BEFORE the sends on purpose: if the alert path crashes halfway, the
+ * chats that were spared a repeat should not be re-spammed ten minutes later.
+ * A clean sweep clears the stamp via `stampPurgeRun`.
+ */
+export const markPurgeAlert = internalMutation({
+  args: { at: v.number() },
+  handler: async (ctx, { at }) => {
+    const row = await ctx.db
+      .query("telegramBotConfig")
+      .withIndex("by_key", (q) => q.eq("key", CONFIG_KEY))
+      .first();
+    if (row) await ctx.db.patch(row._id, { purgeAlertedAt: at });
+    return { ok: true };
+  },
+});
+
+/**
  * Ping every linked chat when two sweeps in a row could not delete. Best-effort
  * by construction: an undeliverable alert must never turn a sweep into a
- * failure. The alert repeats while the fault persists (the sweep's own
- * 10-minute cadence, same as the digest) and stops on the first clean sweep.
+ * failure. A fault that persists re-alerts at most once per
+ * `PURGE_ALERT_REPEAT_MS` (hourly, not every 10-minute sweep) and stops on the
+ * first clean sweep.
  */
 async function alertPurgeFailures(
   ctx: ActionCtx,
@@ -1700,13 +1727,19 @@ export const purgeBotMessages = internalAction({
       return { ok: true, deleted: 0, failed: 0, retrying: 0, alerted: 0, skipped: "not configured" };
     }
 
-    const stamp = async (deleted: number, failed: number, skipped?: string): Promise<number> => {
+    const stamp = async (
+      deleted: number,
+      failed: number,
+      retrying: number,
+      skipped?: string,
+    ): Promise<number> => {
       const at = Date.now();
       try {
         await ctx.runMutation(internal.telegramBot.stampPurgeRun, {
           at,
           deleted,
           failed,
+          retrying,
           ...(skipped ? { skipped } : {}),
         });
       } catch {
@@ -1719,7 +1752,7 @@ export const purgeBotMessages = internalAction({
     const token = cfg.autoPurge ? await resolveBotToken(ctx) : null;
     const skipped = purgeSkipNote({ autoPurge: cfg.autoPurge, tokenConfigured: token !== null });
     if (skipped) {
-      await stamp(0, 0, skipped);
+      await stamp(0, 0, 0, skipped);
       return {
         ok: skipped !== "bot token not configured",
         deleted: 0,
@@ -1753,12 +1786,20 @@ export const purgeBotMessages = internalAction({
     const deleted = bot.deleted + channel.deleted;
     const failed = bot.failed + channel.failed;
     const retrying = bot.retrying + channel.retrying;
-    const at = await stamp(deleted, failed);
+    const at = await stamp(deleted, failed, retrying);
 
     // `cfg.purgeLast` was read before this sweep ran, so it IS the previous
-    // tally — a two-in-a-row fault needs no extra stored state.
+    // tally — a two-in-a-row fault needs no extra stored state. The throttle
+    // needs one number that a tally cannot carry (when we last alerted), which
+    // `markPurgeAlert` stores; `undefined` means no alert is outstanding.
     let alerted = 0;
-    if (shouldAlertPurgeFailures(cfg.purgeLast, failed)) {
+    if (shouldAlertPurgeFailures(cfg.purgeLast, failed, cfg.purgeAlertedAt ?? null, at)) {
+      try {
+        await ctx.runMutation(internal.telegramBot.markPurgeAlert, { at });
+      } catch {
+        // A failed stamp must not silence the alert: worst case it repeats on
+        // the next sweep, which is better than never telling the operator.
+      }
       alerted = await alertPurgeFailures(
         ctx,
         token,

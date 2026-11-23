@@ -42,6 +42,15 @@ export interface PurgeTelemetry {
    * tracked, so the next sweep retries it.
    */
   failed: number;
+  /**
+   * The part of `failed` whose row SURVIVED the sweep: a transient refusal
+   * (rights, kicked bot, 429, 5xx, network) keeps the message tracked, so the
+   * next sweep attempts it again. `failed - retrying` were settled for good
+   * (already gone, past Telegram's 48 h limit). Optional because a tally
+   * stamped before round 31 has no such field — absent reads as 0, never as
+   * "everything is retrying".
+   */
+  retrying?: number;
   /** Why the sweep did nothing, when it did nothing on purpose. */
   skipped: string | null;
 }
@@ -76,6 +85,12 @@ export interface BotConfig {
    * stamps it, and `/alerts` plus the app panel only display it.
    */
   purgeLast?: PurgeTelemetry;
+  /**
+   * When a sweep-fault alert was last SENT, or absent when none is outstanding.
+   * The sweep reads it to throttle repeats to `PURGE_ALERT_REPEAT_MS`, and a
+   * clean sweep clears it. Never displayed.
+   */
+  purgeAlertedAt?: number;
   updatedAt: number;
 }
 
@@ -162,6 +177,10 @@ export function purgeTelemetryLine(
   }
   const when = fmtAgo(telemetry.at, now);
   const failed = telemetry.failed > 0 ? ` · ${telemetry.failed} failed` : "";
+  // Only the part of `failed` that is coming back is called out: a refusal
+  // Telegram will never accept again is settled, not a retry backlog.
+  const retrying =
+    (telemetry.retrying ?? 0) > 0 ? ` · ${telemetry.retrying} retrying` : "";
   // A skipped note is a stand-down, not a replacement for a tally: if a sweep
   // did delete anything, the counts stay in front and the note is appended. A
   // partial sweep must never render as though nothing ran (round 28's
@@ -170,9 +189,9 @@ export function purgeTelemetryLine(
     if (telemetry.deleted === 0 && telemetry.failed === 0) {
       return `${when} — skipped (${telemetry.skipped})`;
     }
-    return `${when} · ${telemetry.deleted} deleted${failed} · ${telemetry.skipped}`;
+    return `${when} · ${telemetry.deleted} deleted${failed}${retrying} · ${telemetry.skipped}`;
   }
-  return `${when} · ${telemetry.deleted} deleted${failed}`;
+  return `${when} · ${telemetry.deleted} deleted${failed}${retrying}`;
 }
 
 /**
@@ -196,17 +215,42 @@ export function purgeSkipNote(input: {
 }
 
 /**
+ * How often a PERSISTING sweep fault may re-alert Telegram. The sweep runs
+ * every 10 minutes, and an hour-long outage would otherwise push six identical
+ * alerts per hour into every linked chat. Matched to the bell's dedupe window
+ * in `notifications.recordBotHealthAlert`, so the two channels stay in step.
+ */
+export const PURGE_ALERT_REPEAT_MS = 60 * 60 * 1000;
+
+/**
  * Two sweeps in a row that could not delete anything Telegram should have
  * accepted are a fault, not a blip: the bot was removed from the chat/channel
  * or lost its delete/admin rights. One failing sweep can be a transient 5xx;
  * the SECOND means the next one will fail the same way.
+ *
+ * `lastAlertedAt` throttles a fault that DOES persist: the first alert still
+ * goes out on the second failing sweep, then the next one only after
+ * `PURGE_ALERT_REPEAT_MS`. Without it a broken bot pings every chat six times
+ * an hour. A clean sweep clears the stamp, so a new fault is never silenced by
+ * an hour-old alert from the previous one.
  */
 export function shouldAlertPurgeFailures(
   previous: PurgeTelemetry | null | undefined,
   failed: number,
+  lastAlertedAt: number | null = null,
+  now?: number,
 ): boolean {
   if (!(failed > 0)) return false;
-  return (previous?.failed ?? 0) > 0;
+  if (!((previous?.failed ?? 0) > 0)) return false;
+  if (
+    lastAlertedAt !== null &&
+    Number.isFinite(lastAlertedAt) &&
+    now !== undefined &&
+    Number.isFinite(now)
+  ) {
+    return now - lastAlertedAt >= PURGE_ALERT_REPEAT_MS;
+  }
+  return true;
 }
 
 /**
@@ -244,14 +288,19 @@ export function purgeFailureSummary(
   current: PurgeTelemetry,
   now: number,
 ): string {
-  const line = (label: string, t: PurgeTelemetry) =>
-    `${label}: ${fmtAgo(t.at, now)} · ${t.deleted} deleted · ${t.failed} failed`;
+  const retrying = current.retrying ?? 0;
+  const line = (label: string, t: PurgeTelemetry) => {
+    const held = (t.retrying ?? 0) > 0 ? ` · ${t.retrying} retrying` : "";
+    return `${label}: ${fmtAgo(t.at, now)} · ${t.deleted} deleted · ${t.failed} failed${held}`;
+  };
   return [
     "Two sweeps in a row could not delete messages from Telegram.",
     ...(previous ? [`• ${line("Previous", previous)}`] : []),
     `• ${line("Latest", current)}`,
     "Usual cause: the bot was removed from the chat/channel, or lost its delete/admin rights.",
-    "Refused messages stay tracked, so the next sweep retries them once the rights are back; only messages Telegram will never accept a delete for are dropped.",
+    retrying > 0
+      ? `${retrying} refused message${retrying === 1 ? " is" : "s are"} still tracked and will be retried on the next sweep; only messages Telegram will never accept a delete for are dropped.`
+      : "Refused messages stay tracked, so the next sweep retries them once the rights are back; only messages Telegram will never accept a delete for are dropped.",
   ].join("\n");
 }
 

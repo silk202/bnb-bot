@@ -830,7 +830,14 @@ const schema = defineSchema(
       purgeLastAt: v.optional(v.number()),
       purgeLastDeleted: v.optional(v.number()),
       purgeLastFailed: v.optional(v.number()),
+      // The part of purgeLastFailed whose row survived and will be retried on
+      // the next sweep (a transient refusal: rights, kicked bot, 429, 5xx,
+      // network). Absent on a tally stamped before round 31 = 0.
+      purgeLastRetrying: v.optional(v.number()),
       purgeLastSkipped: v.optional(v.string()),
+      // When a sweep-fault alert was last sent, so a persisting fault repeats
+      // hourly instead of every sweep. Cleared by the first clean sweep.
+      purgeAlertedAt: v.optional(v.number()),
       updatedAt: v.number(),
     }).index("by_key", ["key"]),
 
