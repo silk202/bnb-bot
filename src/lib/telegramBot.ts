@@ -45,12 +45,19 @@ export interface PurgeTelemetry {
   /**
    * The part of `failed` whose row SURVIVED the sweep: a transient refusal
    * (rights, kicked bot, 429, 5xx, network) keeps the message tracked, so the
-   * next sweep attempts it again. `failed - retrying` were settled for good
-   * (already gone, past Telegram's 48 h limit). Optional because a tally
-   * stamped before round 31 has no such field — absent reads as 0, never as
-   * "everything is retrying".
+   * next sweep attempts it again. `failed - retrying - abandoned` were settled
+   * for good (already gone, past Telegram's 48 h limit). Optional because a
+   * tally stamped before round 31 has no such field — absent reads as 0, never
+   * as "everything is retrying".
    */
   retrying?: number;
+  /**
+   * Rows dropped this sweep because they used up `PURGE_RETRY_CAP` transient
+   * attempts. They are no longer retried, so they stay in the chat — the honest
+   * alternative to either retrying a dead row for 48 h or silently forgetting
+   * it. Absent on a tally stamped before round 34 = 0.
+   */
+  abandoned?: number;
   /** Why the sweep did nothing, when it did nothing on purpose. */
   skipped: string | null;
 }
@@ -124,6 +131,33 @@ export const BOT_MESSAGE_TTL_MS = 10 * 60 * 1000;
  */
 export const CHANNEL_MESSAGE_TTL_MS = 15 * 60 * 1000;
 
+/**
+ * How many automatic retries one tracked message gets before the sweep gives
+ * up on it.
+ *
+ * A transient refusal (lost delete rights, a kicked bot, a 429, a 5xx, a
+ * network error) keeps the row so the next sweep can try again. That is right
+ * for an outage that heals and wrong for one that never will: `chat not found`
+ * on a deleted group stays "transient" by classification, so without a budget
+ * the row is attempted every 10 minutes until the 48 h retention backstop —
+ * 288 identical failures for a message no delete will ever reach.
+ *
+ * 36 attempts is six hours of 10-minute sweeps: long enough for rights, rate
+ * limits and maintenance to come back, short enough that a dead row stops
+ * costing calls and stops inflating the retry backlog. The row is then dropped
+ * and counted `abandoned` — the operator sees that the message will stay, which
+ * is the truth, instead of a `retrying` count that never drains.
+ *
+ * `/purge` attempts do NOT count: an explicit operator retry spends the
+ * operator's action, not the row's automatic budget.
+ */
+export const PURGE_RETRY_CAP = 36;
+
+/** Would the next attempt exhaust the row's retry budget? */
+export function purgeRetryExhausted(attempts: number | null | undefined): boolean {
+  return (attempts ?? 0) >= PURGE_RETRY_CAP;
+}
+
 /** Which surface a tracked message came from. */
 export type BotMessageSource = "bot" | "channel";
 
@@ -133,6 +167,8 @@ export interface TrackedMessageLite {
   messageId: number;
   source: BotMessageSource;
   sentAt: number;
+  /** Transient refusals already counted against this row's retry budget. */
+  attempts?: number;
 }
 
 /** Cutoff for a sweep at `now`: rows at or before it are due for deletion. */
@@ -189,6 +225,12 @@ export function purgeTelemetryLine(
   // Telegram will never accept again is settled, not a retry backlog.
   const retrying =
     (telemetry.retrying ?? 0) > 0 ? ` · ${telemetry.retrying} retrying` : "";
+  // Rows that used up their retry budget are neither deleted nor coming back.
+  // Naming the cap keeps "abandoned" from reading as a random loss.
+  const abandoned =
+    (telemetry.abandoned ?? 0) > 0
+      ? ` · ${telemetry.abandoned} abandoned (retry cap)`
+      : "";
   // A skipped note is a stand-down, not a replacement for a tally: if a sweep
   // did delete anything, the counts stay in front and the note is appended. A
   // partial sweep must never render as though nothing ran (round 28's
@@ -197,9 +239,9 @@ export function purgeTelemetryLine(
     if (telemetry.deleted === 0 && telemetry.failed === 0) {
       return `${when} — skipped (${telemetry.skipped})`;
     }
-    return `${when} · ${telemetry.deleted} deleted${failed}${retrying} · ${telemetry.skipped}`;
+    return `${when} · ${telemetry.deleted} deleted${failed}${retrying}${abandoned} · ${telemetry.skipped}`;
   }
-  return `${when} · ${telemetry.deleted} deleted${failed}${retrying}`;
+  return `${when} · ${telemetry.deleted} deleted${failed}${retrying}${abandoned}`;
 }
 
 /**
@@ -390,6 +432,7 @@ export function purgeFailureSummary(
   alert?: PurgeAlertInfo,
 ): string {
   const retrying = current.retrying ?? 0;
+  const abandoned = current.abandoned ?? 0;
   const line = (label: string, t: PurgeTelemetry) => {
     const held = (t.retrying ?? 0) > 0 ? ` · ${t.retrying} retrying` : "";
     return `${label}: ${fmtAgo(t.at, now)} · ${t.deleted} deleted · ${t.failed} failed${held}`;
@@ -411,6 +454,11 @@ export function purgeFailureSummary(
     retrying > 0
       ? `${retrying} refused message${retrying === 1 ? " is" : "s are"} still tracked and will be retried on the next sweep; only messages Telegram will never accept a delete for are dropped.`
       : "Refused messages stay tracked, so the next sweep retries them once the rights are back; only messages Telegram will never accept a delete for are dropped.",
+    ...(abandoned > 0
+      ? [
+          `${abandoned} message${abandoned === 1 ? "" : "s"} used up the ${PURGE_RETRY_CAP}-attempt retry cap and ${abandoned === 1 ? "is" : "are"} no longer tracked — the sweep will not try again, so ${abandoned === 1 ? "it stays" : "they stay"} in the chat.`,
+        ]
+      : []),
     ...(last
       ? [
           `This is the last automatic alert for this fault. Sweeps keep retrying, and /alerts keeps showing the tally until one succeeds.`,

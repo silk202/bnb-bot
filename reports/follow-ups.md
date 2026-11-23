@@ -2793,3 +2793,99 @@ schema push. No codegen, no hand-edited `_generated`.
     #6).
 16. **Track multiple channel ids** (round 26 #12).
 17. **Show the local sweep in Settings** (round 28 #15).
+
+## Round 34 — a retry budget per row, and abandoned rows are named (2026-11-23)
+
+Round 33's follow-up. A transient refusal kept its row so the next sweep could
+try again — right for an outage that heals, wrong for one that never will. A
+`chat not found` row on a deleted group was attempted every ten minutes until
+the 48 h retention backstop: 288 identical failures for a message no delete
+would ever reach, inflating `retrying` the whole time.
+
+### 1. `PURGE_RETRY_CAP` bounds automatic retries
+
+- `telegramBotMessages.attempts` counts transient refusals per row. Absent
+  reads 0, so rows already in the table when the field landed simply start
+  their budget from zero.
+- Each sweep increments it through a new `bumpTrackedAttempts` (batched, one
+  mutation per pass, like the drops). When the NEXT attempt would reach
+  `PURGE_RETRY_CAP = 36`, the row is dropped instead of counted `retrying`.
+- 36 attempts is six hours of ten-minute sweeps: long enough for lost delete
+  rights, a kicked bot, rate limiting or maintenance to come back; short enough
+  that a dead row stops costing Bot API calls and stops inflating the backlog.
+- The honest consequence is stated, not hidden: those messages were never
+  deleted and the sweep will not try again, so they stay in the chat. That is
+  the trade the budget makes — bounded work in exchange for keeping Telegram's
+  own 48 h window as the only other backstop.
+- `/purge` passes `countAttempts: false`. An explicit operator retry spends the
+  operator's action, not the row's automatic budget; otherwise a few impatient
+  taps during a blip could abandon a message a healed sweep would have deleted.
+- A failed bump is a non-event: the row simply gets its next attempt with the
+  same count, which is safe (a longer budget, never a skipped delete).
+
+### 2. `abandoned` is in the tally, not folded into `failed`
+
+Rows dropped at the cap are neither deleted nor coming back, so leaving them
+inside `failed - retrying` would have implied "permanent refusal, already gone"
+— a different thing. `purgeLastAbandoned` is stamped with the rest of the tally
+and reaches `/alerts`, the chip and the dialog through the shared line:
+
+`2m ago · 0 deleted · 4 failed · 1 retrying · 3 abandoned (retry cap)`
+
+The fault body says the consequence in words ("used up the 36-attempt retry cap
+and are no longer tracked — the sweep will not try again, so they stay in the
+chat"), so the number is never just a word the operator has to decode. Absent
+on an older stamp reads 0.
+
+### Checks
+
+- `bun run typecheck`: exit 0, including `msg.attempts` read from
+  `listStaleMessages` and the new mutation.
+- `bun test`: 841 pass / 0 fail across 69 files (838 → +3: the budget boundary,
+  the abandoned segment in the tally line, and the consequence sentence).
+- `eslint` on the four touched files: 14 problems, all pre-existing (12 unused
+  imports, 2 `\_` escapes), none on changed lines.
+- NOT executed: the Convex deploy (free-plan ceiling), so the counter has never
+  been incremented against a real table, no row has actually been abandoned,
+  and the 36-attempt arithmetic is unit-tested rather than observed.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 34, brainstormed (none started)
+
+1. **Prove the budget on a live deployment**: revoke delete rights for longer
+   than six hours of sweeps, watch `retrying` climb and stop, `abandoned`
+   appear, and the rows leave the table — then restore rights on a fresh row
+   and watch it delete normally.
+2. **Reclassify the genuinely hopeless descriptions.** `chat not found` and
+   `bot was kicked` heal in some cases and never in others; spending the whole
+   budget on a deleted group is the last waste left. A separate
+   "hopeless" verdict (short budget or immediate abandon) would spend attempts
+   only where healing is plausible.
+3. **Make abandonment recoverable by hand.** Once a row is dropped, `/purge`
+   cannot see it. An "abandoned" list (chat, message id, first failure) would
+   let the operator delete what remains after fixing rights, instead of the
+   current all-or-nothing.
+4. **Keep a short sweep history** (round 30 #5) — last-only cannot show "the
+   sweep stopped running six hours ago".
+5. **Escalate once instead of only stopping** (round 32 #6) — the cap and its
+   note end the noise, but an unfixed fault is still unfixed.
+6. **Make the bell's dedupe explicit** (round 32 #7).
+7. **Show `retrying` in the chip's label** (round 31 #6).
+8. **Contract test for the backend keep-list** (round 28 #5).
+9. **Expired `operatorDeviceTrust` sweep** (round 28 #6; needs an index).
+10. **Prove the cached height path on a funded send** (round 27 #1).
+11. **`heightReadsFailed` count** (round 25 #7).
+12. **Redact URLs inside RPC error bodies** (round 25 #3).
+13. **Add a `(chatId, sentAt)` composite index** (round 25 #5).
+14. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+15. **Operator-selectable digest cadence** (round 27 #11).
+16. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6).
+17. **Track multiple channel ids** (round 26 #12).
+18. **Show the local sweep in Settings** (round 28 #15).

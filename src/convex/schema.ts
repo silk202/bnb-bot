@@ -838,6 +838,10 @@ const schema = defineSchema(
       // the next sweep (a transient refusal: rights, kicked bot, 429, 5xx,
       // network). Absent on a tally stamped before round 31 = 0.
       purgeLastRetrying: v.optional(v.number()),
+      // Rows dropped this sweep because they used up PURGE_RETRY_CAP transient
+      // attempts. They are not deleted and never will be, so the tally names
+      // them instead of letting `failed - retrying` imply a permanent refusal.
+      purgeLastAbandoned: v.optional(v.number()),
       purgeLastSkipped: v.optional(v.string()),
       // When a sweep-fault alert was last sent, so a persisting fault repeats
       // hourly instead of every sweep. Cleared by the first clean sweep.
@@ -861,6 +865,9 @@ const schema = defineSchema(
       messageId: v.number(),
       source: v.union(v.literal("bot"), v.literal("channel")),
       sentAt: v.number(),
+      // Transient refusals counted against PURGE_RETRY_CAP. Absent = 0, so the
+      // rows already tracked when the budget landed simply start at zero.
+      attempts: v.optional(v.number()),
     })
       .index("by_sent", ["sentAt"])
       .index("by_chat", ["chatId"]),

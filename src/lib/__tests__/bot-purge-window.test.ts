@@ -20,9 +20,11 @@ import {
   classifyPurgeFailure,
   PURGE_ALERT_CAP,
   PURGE_ALERT_REPEAT_MS,
+  PURGE_RETRY_CAP,
   purgeAlertPauseNote,
   purgeAlertPlan,
   purgeCutoff,
+  purgeRetryExhausted,
   purgeFailureAlert,
   purgeFailureSummary,
   purgeSkipNote,
@@ -360,6 +362,40 @@ describe("purge failure wording — a repeat never claims 'two sweeps in a row'"
         since: NOW - 70 * 60 * 1000,
       }),
     ).toContain("**Message sweep still failing**");
+  });
+});
+
+describe("purge retry budget — a dead row stops costing calls", () => {
+  test("a row retries until the cap, never past it", () => {
+    expect(purgeRetryExhausted(undefined)).toBe(false);
+    expect(purgeRetryExhausted(0)).toBe(false);
+    expect(purgeRetryExhausted(PURGE_RETRY_CAP - 1)).toBe(false);
+    expect(purgeRetryExhausted(PURGE_RETRY_CAP)).toBe(true);
+    expect(purgeRetryExhausted(PURGE_RETRY_CAP + 10)).toBe(true);
+  });
+
+  test("the tally names abandoned rows instead of hiding them in `failed`", () => {
+    const line = purgeTelemetryLine(
+      { at: NOW - 60_000, deleted: 0, failed: 4, retrying: 1, abandoned: 3, skipped: null },
+      NOW,
+    );
+    expect(line).toContain("4 failed");
+    expect(line).toContain("1 retrying");
+    expect(line).toContain(`3 abandoned (retry cap)`);
+  });
+
+  test("the fault body states the consequence of abandonment", () => {
+    const current = {
+      at: NOW - 60_000,
+      deleted: 0,
+      failed: 4,
+      retrying: 1,
+      abandoned: 3,
+      skipped: null,
+    };
+    expect(purgeFailureSummary(undefined, current, NOW)).toContain(
+      `3 messages used up the ${PURGE_RETRY_CAP}-attempt retry cap`,
+    );
   });
 });
 
