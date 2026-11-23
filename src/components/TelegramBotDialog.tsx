@@ -50,6 +50,8 @@ type BotStatus = {
   alertFanout: boolean;
   soundAlerts: boolean;
   autoPairOnStart?: boolean;
+  /** Auto-purge: tracked bot/channel messages older than 10 min are deleted. */
+  autoPurge?: boolean;
   webhookOk?: boolean | null;
   webhookCheckedAt?: number | null;
   botUsername: string | null;
@@ -100,6 +102,7 @@ export function TelegramBotDialog({
   const unlink = useMutation(api.telegramBot.unlinkChat);
   const testAlert = useMutation(api.telegramBot.sendSimTradeAlert);
   const setAutoPair = useMutation(api.telegramBot.setAutoPair);
+  const setAutoPurge = useMutation(api.telegramBot.setAutoPurge);
   const saveBotToken = useAction(api.telegramBot.setBotToken);
   const removeBotToken = useMutation(api.telegramBot.clearBotToken);
   const [tokenInput, setTokenInput] = useState("");
@@ -755,6 +758,36 @@ export function TelegramBotDialog({
                   .catch((err) => toast.error(err instanceof Error ? err.message : "Could not update"));
               }}
               aria-label="Toggle /start auto-pair"
+            />
+          </div>
+        )}
+
+        {/* Auto-purge policy — the bot's own 10-minute message sweep. */}
+        {recognized && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-card/50 p-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">Auto-purge messages</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                ON: every message the bot posts (boards, digests, trade alerts) and every
+                channel post is deleted after 10 minutes, so a linked chat shows the last
+                ten minutes instead of an unbounded scrollback. The sweep runs every 10
+                minutes; /purge in the chat clears it immediately. OFF keeps everything.
+              </div>
+            </div>
+            <Switch
+              checked={status?.autoPurge !== false}
+              onCheckedChange={(checked) => {
+                setAutoPurge({ enabled: checked, deviceToken: getDeviceToken() ?? undefined })
+                  .then(() =>
+                    toast.success(
+                      checked
+                        ? "Auto-purge on — messages are deleted after 10 minutes"
+                        : "Auto-purge off — new messages will stay",
+                    )
+                  )
+                  .catch((err) => toast.error(err instanceof Error ? err.message : "Could not update"));
+              }}
+              aria-label="Toggle auto-purge of bot messages"
             />
           </div>
         )}

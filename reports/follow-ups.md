@@ -1755,3 +1755,113 @@ now documented in the workflow as exactly that.
    paused backend hides the download page too (round 22, #5).
 9. **The verify gate needs one human faucet claim** to produce a fresh 2/2
    drill inside 24 h; nothing in code can substitute for it.
+
+## Round 25 — 2026-11-23 · RPC failures surface, expired txs fail, the bot purges on ten minutes
+
+**1. Transport failures are named, not swallowed.** `postRpc` read `res.json()`
+unconditionally, so a 502 proxy HTML page, a 429 with a JSON error body and a
+genuinely non-JSON 200 all collapsed into the same opaque parse error — with the
+body (the useful part) thrown away. It now reads the body once and reports the
+four cases as themselves: non-2xx (`getBalance failed at <endpoint> — HTTP 502:
+<h1>502 Bad Gateway</h1>`), a non-JSON 200, the node's JSON-RPC error (with its
+code), and a reply whose body has no `result` field (previously `undefined` was
+cast to `T`). Every message carries the method and the REDACTED endpoint, so an
+outage is diagnosable without leaking a provider key.
+
+**2. A dead blockhash fails at the expiry instead of after 60 s.** Jupiter's
+swap build returns `lastValidBlockHeight`; all three send paths
+(`executeLiveSwap`, `executeLiveSnipeBuy`, `executeLiveSnipeSell`) now pass it
+into `waitForSigConfirm`, which reads `getBlockHeight` FIRST each pass and
+returns `{ confirmed: false, expired: true }` the moment the network moves past
+it. Before this, a dropped exit held its position for the full timeout waiting
+for a transaction that could never land. Expiry is checked before the status
+call, so a dead tx costs one cheap height probe even when
+`getSignatureStatuses` is the call that is failing. Omitting the option keeps the
+old behavior exactly (no extra requests), which is why the existing schedule
+tests still pin three requests for a 5 s wait.
+
+**3. URL redaction is shape-based, not length-based.** The old helper masked
+every path segment of 12+ characters, so a real route like `/solana-mainnet` was
+over-redacted while a short provider key would have survived. `looksLikeRpcKey`
+now masks by SHAPE — hex ≥16, UUID, mixed-case alphanumeric blob ≥16, unbroken
+≥24, or a segment that names itself a key/secret/token/auth/signature — and
+leaves human routes readable. Query values are masked but their NAMES survive
+(`?api-key=***` tells the operator which endpoint shape failed), and the fragment
+is never printed.
+
+**4. The bot now deletes its own messages every ten minutes.** Every message the
+bot posts (boards, digests, trade alerts) and every post to the configured
+channel is recorded with Telegram's real `message_id` in the new
+`telegramBotMessages` table. The `*/10` cron `telegram-bot-purge` deletes them
+once they are older than `BOT_MESSAGE_TTL_MS` (10 min) in bounded batches, and
+removes each row as it goes so a retried sweep can never double-delete. A chat
+that gets a board every few minutes now shows the last ten minutes instead of an
+unbounded scrollback. It is a no-op with auto-purge off (default ON), and the
+switch exists in BOTH places the operator works: the bot's `/alerts` board
+(`set:purge_on` / `set:purge_off`) and the app's Telegram Bot panel.
+
+**5. Every menu command answers when clicked.** Command resolution moved into
+`resolveCallbackData` in the presentation layer, and the dispatcher's switch is
+now EXHAUSTIVE over `BotCommand` (`const unhandled: never = cmd` in the final
+branch) — a new command kind with no case is a typecheck failure, not a silent
+fallback. A new parity test walks every keyboard every builder can emit (38
+boards) and asserts each `callback_data` resolves to a kind in
+`HANDLED_COMMAND_KINDS` and stays within Telegram's 64-byte limit; it also parses
+every `/command` the help board advertises and fails on an unknown one. Added
+`/purge` (clear this chat now) and the missing `/engines`, `/bnb_on`,
+`/bnb_off`, `/bnb_paper`, `/bnb_live`, `/sol_on`, `/sol_off`, `/digest`,
+`/sound`, `/silence`, `/unpair` entries to Telegram's own `setMyCommands` menu so
+the native menu matches the board.
+
+### Checks
+
+- `bun run typecheck`: exit 0 (including the new `never` exhaustiveness check).
+- `bun test`: 778 pass / 0 fail across 66 files (760 → 778: +11 transport/expiry,
+  +5 redaction, +8 menu parity minus 6 rewritten assertions).
+- `eslint` on the twelve touched files: the pre-change baseline exactly (2
+  notifications, 4 dialog, 12 convex bot, 2 lib bot — all pre-existing, measured
+  by linting `git show HEAD:<file>`), 0 new problems. The one new-file warning
+  was fixed rather than suppressed.
+- NOT executed: the Convex deploy/cron (deployment still disabled by the
+  free-plan ceiling), and any live Telegram call — this sandbox has no bot token
+  and no outbound Telegram access, so the purge sweep and the new buttons are
+  wire-tested and type-checked, not driven against the real Bot API.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling): serving, not
+   deploying, is what fails.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 25, brainstormed (none started)
+
+1. **Prove confirmation + expiry on one funded devnet send.** The wire tests pin
+   both, but the first real send is what proves `confirmed: true` in ~1 s and
+   `expired: true` on a dropped tx. Still waiting on the same faucet claim.
+2. **Skip the extra height read.** `getBlockHeight` runs once per probe whenever
+   an expiry is supplied, doubling requests for a slow tx. `getSignatureStatuses`
+   already returns `context.slot`; using the slot as the height (or caching the
+   height for `SIG_POLL_START_MS`) removes the extra call.
+3. **Redact URLs inside error bodies.** `postRpc` redacts the endpoint but an
+   RPC body can echo a URL containing a key; run `redactRpcUrl`-style masking
+   over embedded `http(s)://…` tokens in the surfaced line.
+4. **Stop tracking messages that can no longer be deleted.** The Bot API refuses
+   `deleteMessage` after 48 h; when auto-purge is off for a long time, rows pile
+   up and every sweep counts failures. Drop rows older than 48 h without a send.
+5. **Add a `(chatId, sentAt)` index.** `/purge` filters by chat after a
+   `by_chat.take(100)`, so a chat with >100 fresh messages can starve older ones
+   in one pass; a composite index makes the window exact.
+6. **Move the inline keyboards built in `handleUpdate` into lib builders.** The
+   parity test covers builder keyboards, not the ones assembled inline for
+   boot/pairing/claim replies; moving them makes the contract complete.
+7. **Surface partial expiry reads.** A failing `getBlockHeight` is currently
+   swallowed; carrying a `heightReadsFailed` count in the result would let a
+   caller distinguish "still valid" from "could not check".
+8. **Rebroadcast signed bytes after ~3 misses** (round 24, #4, still open) —
+   `sendTransaction` uses `maxRetries: 0`, and the signed bytes are idempotent
+   to resend while the blockhash is valid.
+9. **Refresh the Trade price cache on a cron.** `/prices`, `/markets` and
+   `/trade` read a cache that only refreshes while a UI (or the bot dashboard)
+   opens it, so a quiet period makes the bot say "rates not loaded".

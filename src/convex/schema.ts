@@ -810,8 +810,29 @@ const schema = defineSchema(
       // When Telegram's setMyCommands menu was last pushed (weekly gate;
       // cleared on token save so the new bot gets its own command menu).
       commandsPushedAt: v.optional(v.number()),
+      // Version of the command SPECS that was pushed. The */10 self-heal
+      // re-pushes when this is behind, so a newly added command appears in
+      // Telegram's native menu within one sweep (not up to a week later).
+      commandsVersion: v.optional(v.number()),
+      // Auto-purge (default ON): tracked bot and channel messages older than
+      // BOT_MESSAGE_TTL_MS (10 min) are deleted by the */10 sweep. Optional so
+      // an existing row keeps working — `!== false` is the default.
+      autoPurge: v.optional(v.boolean()),
       updatedAt: v.number(),
     }).index("by_key", ["key"]),
+
+    // Every message the bot posted to a paired chat or to the channel, with
+    // its real Telegram message id, so the 10-minute purge can delete it.
+    // Rows leave the table when the message is deleted (or when the delete is
+    // attempted and refused — the Bot API will not delete older messages).
+    telegramBotMessages: defineTable({
+      chatId: v.string(),
+      messageId: v.number(),
+      source: v.union(v.literal("bot"), v.literal("channel")),
+      sentAt: v.number(),
+    })
+      .index("by_sent", ["sentAt"])
+      .index("by_chat", ["chatId"]),
 
     // Server-issued device trust (v2.5): after a REAL server-side
     // verification (guest access code or operator email OTP) the server mints

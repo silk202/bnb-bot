@@ -167,7 +167,8 @@ describe("preflightSolBuyBalance — a real balance decides affordability", () =
 
     expect(out.kind).toBe("unreadable");
     expect(out.message).not.toContain("SUPERSECRETVALUE");
-    expect(out.message).toContain("?***");
+    // The parameter name survives, its value never does.
+    expect(out.message).toContain("?api-key=***");
   });
 
   test("a zero balance is still a poverty verdict, with the full required amount", async () => {

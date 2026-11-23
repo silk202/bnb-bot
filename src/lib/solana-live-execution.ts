@@ -320,7 +320,11 @@ async function submitJupiterLeg(opts: {
       opts.jitoEngines && opts.jitoEngines.length > 0
         ? await jitoSendProtectedTx(signed, { bundleOnly: true, engines: opts.jitoEngines })
         : await solSendPublicTx(signed, { rpcUrl: opts.solRpcUrl });
-    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl);
+    // Jupiter publishes the blockhash expiry with the build; passing it in
+    // makes a dropped tx fail at the expiry instead of after the full wait.
+    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl, 60_000, {
+      lastValidBlockHeight: built.lastValidBlockHeight,
+    });
     if (!confirm.confirmed) {
       return {
         ok: false,
@@ -377,14 +381,64 @@ export function solRpcCall<T>(rpcUrl: string, method: string, params: unknown[])
   return postRpc<T>(rpcUrl, method, params);
 }
 
+/** First non-empty line of a response body, bounded — for a transport error. */
+function firstLine(text: string, max = 140): string {
+  const line = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return "";
+  return line.length > max ? `${line.slice(0, max)}…` : line;
+}
+
+/**
+ * One transport failure in a form the operator can act on: which method, what
+ * the endpoint said, and WHICH endpoint (credentials redacted). Never the raw
+ * URL — a provider key rides inside it.
+ */
+function rpcTransportError(method: string, detail: string, rpcUrl: string): Error {
+  return new Error(`${method} failed at ${redactRpcUrl(rpcUrl)} — ${detail}`);
+}
+
+/**
+ * Raw JSON-RPC POST with the module's timeout discipline.
+ *
+ * Everything that can go wrong is surfaced as itself: a non-2xx status (a 502
+ * proxy page used to become an opaque JSON parse error with the body lost), a
+ * body that is not JSON, the node's own error object, or a reply with no
+ * `result` field. All four name the method and the redacted endpoint, so an
+ * outage is diagnosable from the error text alone.
+ */
 async function postRpc<T>(rpcUrl: string, method: string, params: unknown[]): Promise<T> {
   const res = await fetchWithTimeout(rpcUrl, 15_000, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
-  const json = (await res.json()) as { result?: T; error?: { message?: string } };
-  if (json.error) throw new Error(json.error.message ?? method + " failed");
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    const line = firstLine(text);
+    throw rpcTransportError(method, `HTTP ${res.status}${line ? `: ${line}` : ""}`, rpcUrl);
+  }
+  let json: { result?: T; error?: { message?: string; code?: number } };
+  try {
+    json = JSON.parse(text) as { result?: T; error?: { message?: string; code?: number } };
+  } catch {
+    const line = firstLine(text);
+    throw rpcTransportError(
+      method,
+      `HTTP ${res.status} but the body was not JSON${line ? `: ${line}` : " (empty body)"}`,
+      rpcUrl,
+    );
+  }
+  if (json?.error) {
+    const msg = json.error.message ?? "RPC error";
+    const code = typeof json.error.code === "number" ? ` (code ${json.error.code})` : "";
+    throw rpcTransportError(method, `${msg}${code}`, rpcUrl);
+  }
+  if (!json || !("result" in json)) {
+    throw rpcTransportError(method, "the response carried no result", rpcUrl);
+  }
   return json.result as T;
 }
 
@@ -394,22 +448,69 @@ export const SIG_POLL_START_MS = 1_500;
 export const SIG_POLL_MAX_MS = 12_000;
 
 /**
- * Poll getSignatureStatuses until the tx lands (or times out) — real confirmation.
+ * True once the network has moved past the blockhash's `lastValidBlockHeight`:
+ * from that height on the transaction can never land, so waiting is not
+ * patience — it is a held position with no possible exit.
+ */
+export function blockhashExpired(blockHeight: number, lastValidBlockHeight: number): boolean {
+  return (
+    Number.isFinite(blockHeight) &&
+    Number.isFinite(lastValidBlockHeight) &&
+    blockHeight > lastValidBlockHeight
+  );
+}
+
+export interface SigConfirmOpts {
+  /**
+   * The blockhash expiry the network itself published for this tx (Jupiter's
+   * swap build returns it). Supplying it turns the wait into a bounded one: as
+   * soon as `getBlockHeight` passes it, the result is `expired: true` and the
+   * caller can release the position immediately instead of waiting 60 s for a
+   * transaction that is already dead.
+   */
+  lastValidBlockHeight?: number;
+}
+
+/**
+ * Poll getSignatureStatuses until the tx lands, expires or times out.
  *
  * The first probe is immediate, then the gap grows 1.5 s → 3 s → 6 s → 12 s
  * (ceiling). A flat 1.5 s loop spent 40 requests a minute per unlanded tx; a
  * burst of exits paid that on every signature. The schedule is deterministic
  * (no jitter) so the wire test can pin it, and the final sleep is clamped to
  * what is left of the timeout so a short wait never overshoots its deadline.
+ *
+ * With `lastValidBlockHeight` supplied it also stops on EXPIRY: the blockhash
+ * window is the network's own deadline, and a tx past it can never land, so
+ * `expired: true` releases the position instead of holding it for 60 s.
  */
 export async function waitForSigConfirm(
   sig: string,
   rpcUrl: string,
   timeoutMs = 60_000,
-): Promise<{ confirmed: boolean; err: string | null }> {
+  opts: SigConfirmOpts = {},
+): Promise<{ confirmed: boolean; err: string | null; expired: boolean }> {
   const start = Date.now();
   let gap = SIG_POLL_START_MS;
   while (Date.now() - start < timeoutMs) {
+    // Expiry first: a dropped tx is unrecoverable and reported as such even
+    // when the status call below is the one that is failing.
+    if (opts.lastValidBlockHeight !== undefined) {
+      try {
+        const height = await postRpc<number>(rpcUrl, "getBlockHeight", [
+          { commitment: "confirmed" },
+        ]);
+        if (blockhashExpired(height, opts.lastValidBlockHeight)) {
+          return {
+            confirmed: false,
+            err: `blockhash expired at height ${height} (last valid ${opts.lastValidBlockHeight}) — the transaction can no longer land`,
+            expired: true,
+          };
+        }
+      } catch {
+        // No height read this pass — keep polling; the timeout still bounds us.
+      }
+    }
     try {
       // `getSignatureStatuses` answers an RpcResponse — `{ context, value }` —
       // with one entry per requested signature. Reading the result as a bare
@@ -424,10 +525,10 @@ export async function waitForSigConfirm(
         // `String(err)` would have shown only "[object Object]".
         if (st.err) {
           const err = typeof st.err === "string" ? st.err : JSON.stringify(st.err);
-          return { confirmed: false, err };
+          return { confirmed: false, err, expired: false };
         }
         if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") {
-          return { confirmed: true, err: null };
+          return { confirmed: true, err: null, expired: false };
         }
       }
     } catch {
@@ -437,7 +538,7 @@ export async function waitForSigConfirm(
     await new Promise((r) => setTimeout(r, Math.max(0, Math.min(gap, remaining))));
     gap = Math.min(gap * 2, SIG_POLL_MAX_MS);
   }
-  return { confirmed: false, err: "confirmation timeout" };
+  return { confirmed: false, err: "confirmation timeout", expired: false };
 }
 
 /** First available injected Solana signing provider (Phantom → Solflare → Backpack). */
@@ -870,7 +971,9 @@ export async function executeLiveSnipeBuy(opts: {
       opts.jitoEngines && opts.jitoEngines.length > 0
         ? await jitoSendProtectedTx(signedTxBase64, { bundleOnly: true, engines: opts.jitoEngines })
         : await solSendPublicTx(signedTxBase64, { rpcUrl: opts.solRpcUrl });
-    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl);
+    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl, 60_000, {
+      lastValidBlockHeight: unsigned.lastValidBlockHeight,
+    });
     if (!confirm.confirmed) {
       return { ok: false, buySig: sent.id, engine: sent.engine, error: confirm.err ?? "buy did not confirm", venue };
     }
@@ -973,7 +1076,9 @@ export async function executeLiveSnipeSell(opts: {
       opts.jitoEngines && opts.jitoEngines.length > 0
         ? await jitoSendProtectedTx(signedTxBase64, { bundleOnly: true, engines: opts.jitoEngines })
         : await solSendPublicTx(signedTxBase64, { rpcUrl: opts.solRpcUrl });
-    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl);
+    const confirm = await waitForSigConfirm(sent.id, opts.solRpcUrl, 60_000, {
+      lastValidBlockHeight: unsigned.lastValidBlockHeight,
+    });
     if (!confirm.confirmed) {
       return { ok: false, sellSig: sent.id, engine: sent.engine, error: confirm.err ?? "sell did not confirm", soldRaw: raw };
     }

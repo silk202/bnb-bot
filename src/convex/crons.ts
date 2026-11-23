@@ -66,6 +66,20 @@ crons.cron(
   {},
 );
 
+// Telegram bot + channel message purge — every 10 minutes, delete the messages
+// the bot itself posted (chat boards, digests, trade alerts) and the channel
+// posts once they are older than BOT_MESSAGE_TTL_MS (10 min), so a linked chat
+// always shows the last ten minutes instead of an unbounded scrollback. The
+// sweep is bounded and batched, removes rows as it goes (no double deletes),
+// and no-ops when the operator turns auto-purge off on /alerts. This is also
+// what keeps the bot's own message volume from feeding DB I/O forever.
+crons.cron(
+  "telegram-bot-purge",
+  "*/10 * * * *",
+  internal.telegramBot.purgeBotMessages,
+  {},
+);
+
 // Telegram bot self-healing sweep — webhook stays registered with Telegram
 // even if it is dropped upstream (deployment URL change, manual deletion).
 // Idempotent: a getWebhookInfo check first, setWebhook only when needed.

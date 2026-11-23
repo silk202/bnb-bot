@@ -35,8 +35,22 @@ export interface BotConfig {
   soundAlerts: boolean;
   /** /start auto-pair policy — ON (default) = a plain /start links + boots. */
   autoPairOnStart: boolean;
+  /**
+   * Auto-purge — ON (default): every message the bot posts to a paired chat or
+   * the channel is tracked and deleted once it is older than
+   * `BOT_MESSAGE_TTL_MS` (10 minutes), so the board always shows the last ten
+   * minutes instead of an unbounded scrollback. Off leaves messages in place.
+   */
+  autoPurge: boolean;
   updatedAt: number;
 }
+
+/**
+ * How long a bot/channel message lives before the purge sweep deletes it.
+ * Ten minutes on purpose: the digest and the channel session board refresh
+ * inside that window, so a purge never removes the only copy of a number.
+ */
+export const BOT_MESSAGE_TTL_MS = 10 * 60 * 1000;
 
 /** Telegram inline-keyboard button shape (url vs callback). */
 export interface TgButton {
@@ -182,11 +196,13 @@ export function helpMessage(): { text: string; keyboard: TgKeyboard } {
       "/digest — scheduled dashboard digest on/off",
       "/sound — notification sound on/off",
       "/silence — mute this chat",
+      "/purge — delete the bot's messages in this chat now",
       "/unpair — unlink this chat",
       "",
       "🗄 **Data & storage**",
       "Daily auto-retention: bell history 30d · paper trades 30d (totals kept) · signal log 7d",
       "Kept forever: trade ledger, live on-chain trades, accounts, licenses & alerts",
+      "Bot + channel messages auto-purge every 10 minutes (toggle on /alerts)",
       "",
       "ℹ️ /help — this list",
     ].join("\n"),
@@ -1117,7 +1133,10 @@ export function txsMessage(rows: TxLite[], now: number): { text: string; keyboar
 // Alerts / settings builders
 // ---------------------------------------------------------------------------
 
-export function alertsMessage(cfg: Pick<BotConfig, "alertFanout" | "digestEnabled" | "soundAlerts">, chat: Pick<BotChat, "silent">): { text: string; keyboard: TgKeyboard } {
+export function alertsMessage(
+  cfg: Pick<BotConfig, "alertFanout" | "digestEnabled" | "soundAlerts" | "autoPurge">,
+  chat: Pick<BotChat, "silent">,
+): { text: string; keyboard: TgKeyboard } {
   return {
     text: [
       "🔔 **Alerts & notifications**",
@@ -1126,6 +1145,7 @@ export function alertsMessage(cfg: Pick<BotConfig, "alertFanout" | "digestEnable
       `• Dashboard digest: ${cfg.digestEnabled ? "✅ ON — periodic dashboard push" : "❌ OFF"}`,
       `• Sounds: ${cfg.soundAlerts ? "🔔 ON" : "🔇 OFF"}`,
       `• This chat: ${chat.silent ? "🔇 muted" : "🔔 normal"}`,
+      `• Auto-purge: ${cfg.autoPurge ? "🧹 ON — bot and channel messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
     ].join("\n"),
     keyboard: [
       [
@@ -1140,6 +1160,13 @@ export function alertsMessage(cfg: Pick<BotConfig, "alertFanout" | "digestEnable
       [
         { text: chat.silent ? "🔔 Unmute this chat" : "🔕 Mute this chat", callback_data: chat.silent ? "set:unmute" : "set:mute" },
       ],
+      [
+        {
+          text: cfg.autoPurge ? "🧹 Auto-purge OFF" : "🧹 Auto-purge ON",
+          callback_data: cfg.autoPurge ? "set:purge_off" : "set:purge_on",
+        },
+      ],
+      [{ text: "🧹 Purge this chat now", callback_data: "cmd:/purge" }],
       [{ text: "🧭 Menu", callback_data: "menu:main" }],
     ],
   };
@@ -1240,6 +1267,7 @@ export type BotCommand =
   | { kind: "digest" }
   | { kind: "sound" }
   | { kind: "silence" }
+  | { kind: "purge" }
   | { kind: "help" }
   | { kind: "start" }
   | { kind: "start_payload"; code: string }
@@ -1321,10 +1349,89 @@ export function parseBotCommand(text: string | null): BotCommand {
     case "digest": return { kind: "digest" };
     case "sound": return { kind: "sound" };
     case "silence": return { kind: "silence" };
+    case "purge": return { kind: "purge" };
     case "unpair": return { kind: "unpair" };
     case "pair": return { kind: "pair_start" };
     default: return { kind: "unknown", raw: `/${name}` };
   }
+}
+
+/**
+ * Every command kind the webhook dispatcher answers with a real reply. The
+ * dispatcher's switch is exhaustive over `BotCommand` at compile time (a
+ * missing case is a type error), and this list is the runtime mirror the menu
+ * parity test walks: any inline button that resolves to a kind outside it is a
+ * dead control.
+ */
+export const HANDLED_COMMAND_KINDS: ReadonlyArray<BotCommand["kind"]> = [
+  "menu",
+  "dashboard",
+  "status",
+  "engines",
+  "bnb",
+  "bnb_on",
+  "bnb_off",
+  "bnb_paper",
+  "bnb_live",
+  "bnb_scan",
+  "routes",
+  "execs",
+  "pnl",
+  "sol",
+  "sol_on",
+  "sol_off",
+  "sol_scan",
+  "trade",
+  "prices",
+  "markets",
+  "txs",
+  "orders",
+  "earn",
+  "claim",
+  "deploy",
+  "settings",
+  "amount",
+  "balance",
+  "withdraw",
+  "stop",
+  "panic",
+  "alerts",
+  "digest",
+  "sound",
+  "silence",
+  "purge",
+  "help",
+  "start",
+  "start_payload",
+  "unpair",
+  "pair_start",
+  "pair_code",
+  "unknown",
+];
+
+export interface CallbackResolution {
+  cmd: BotCommand;
+  /** `set:*` callbacks carry the setting they toggle; everything else null. */
+  setting: string | null;
+}
+
+/**
+ * Resolve an inline-keyboard `callback_data` string to the command it means.
+ *
+ * Every button the builders emit goes through here, so a menu cannot silently
+ * become a dead control: the parity test walks every keyboard and asserts the
+ * resolved kind is in `HANDLED_COMMAND_KINDS`. Unknown payloads resolve to
+ * `unknown`, which the dispatcher answers with the command board — a click
+ * always produces a reply.
+ */
+export function resolveCallbackData(callbackData: string | null): CallbackResolution {
+  const data = (callbackData ?? "").trim();
+  if (data.startsWith("cmd:")) return { cmd: parseBotCommand(data.slice(4)), setting: null };
+  if (data === "menu:main") return { cmd: { kind: "menu" }, setting: null };
+  if (data === "help:main") return { cmd: { kind: "help" }, setting: null };
+  if (data === "pair:start") return { cmd: { kind: "pair_start" }, setting: null };
+  if (data.startsWith("set:")) return { cmd: { kind: "alerts" }, setting: data.slice(4) };
+  return { cmd: parseBotCommand(data), setting: null };
 }
 
 // ---------------------------------------------------------------------------

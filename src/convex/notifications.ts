@@ -8,6 +8,8 @@ import {
   query,
 } from "./_generated/server";
 import { buildTelegramPayload } from "../lib/telegram";
+import { internal } from "./_generated/api";
+import type { ActionCtx } from "./_generated/server";
 
 /**
  * FlashBolt notification center. Only real events are ever stored — bot
@@ -30,7 +32,13 @@ import { buildTelegramPayload } from "../lib/telegram";
 export async function sendTelegramMessage(
   title: string,
   body: string,
-): Promise<{ enabled: boolean; ok: boolean; description: string }> {
+): Promise<{
+  enabled: boolean;
+  ok: boolean;
+  description: string;
+  /** Telegram's real message id — the purge sweep needs it to delete later. */
+  messageId: number | null;
+}> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) {
@@ -38,6 +46,7 @@ export async function sendTelegramMessage(
       enabled: false,
       ok: false,
       description: "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured in Keys",
+      messageId: null,
     };
   }
   try {
@@ -49,18 +58,48 @@ export async function sendTelegramMessage(
         body: JSON.stringify(buildTelegramPayload(chatId, title, body)),
       },
     );
-    const data = (await res.json()) as { ok?: boolean; description?: string };
+    const data = (await res.json()) as {
+      ok?: boolean;
+      description?: string;
+      result?: { message_id?: number };
+    };
+    const messageId =
+      typeof data.result?.message_id === "number" ? data.result.message_id : null;
     return {
       enabled: true,
       ok: data.ok === true,
       description: data.description ?? (data.ok === true ? "sent" : "send failed"),
+      messageId: data.ok === true ? messageId : null,
     };
   } catch (error) {
     return {
       enabled: true,
       ok: false,
       description: error instanceof Error ? error.message : "send failed",
+      messageId: null,
     };
+  }
+}
+
+/**
+ * Record a delivered channel post so the every-10-minutes purge can delete it.
+ * Best-effort: the post already happened, and bookkeeping must never turn a
+ * successful send into a reported failure.
+ */
+async function trackChannelMessage(
+  ctx: ActionCtx,
+  sent: { ok: boolean; messageId: number | null },
+): Promise<void> {
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!sent.ok || sent.messageId === null || !chatId) return;
+  try {
+    await ctx.runMutation(internal.telegramBot.recordBotMessage, {
+      chatId,
+      messageId: sent.messageId,
+      source: "channel",
+    });
+  } catch {
+    // Tracking only — the channel post is live.
   }
 }
 
@@ -72,11 +111,13 @@ export async function sendTelegramMessage(
 export const telegramTradeAlert = internalAction({
   args: { title: v.string(), body: v.string() },
   handler: async (ctx, { title, body }) => {
-    // Channel send (existing behavior — TELEGRAM_CHAT_ID when configured).
-    return sendTelegramMessage(title, body);
+    // Channel send (existing behavior — TELEGRAM_CHAT_ID when configured),
+    // tracked so the 10-minute purge deletes it like every other bot post.
     // Bot fanout is scheduled separately by recordExecution with the
     // structured trade fields (see fanoutTradeAlert in telegramBot.ts).
-    void ctx; void body;
+    const sent = await sendTelegramMessage(title, body);
+    await trackChannelMessage(ctx, sent);
+    return sent;
   },
 });
 
@@ -88,8 +129,10 @@ export const telegramTradeAlert = internalAction({
  */
 export const telegramSignal = internalAction({
   args: { title: v.string(), body: v.string() },
-  handler: async (_ctx, { title, body }) => {
-    return sendTelegramMessage(title, body);
+  handler: async (ctx, { title, body }) => {
+    const sent = await sendTelegramMessage(title, body);
+    await trackChannelMessage(ctx, sent);
+    return sent;
   },
 });
 

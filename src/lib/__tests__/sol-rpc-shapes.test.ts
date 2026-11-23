@@ -35,6 +35,8 @@ const requests: RpcRequest[] = [];
 /** When each request arrived, for pinning the poll schedule. */
 const sentAt: number[] = [];
 let answer: (method: string, params: unknown[]) => unknown = () => null;
+/** Non-JSON / non-2xx replies: a proxy error page, a rate-limited 429. */
+let respondWith: ((method: string) => Response | null) | null = null;
 
 beforeAll(() => {
   server = Bun.serve({
@@ -43,6 +45,8 @@ beforeAll(() => {
       const body = (await req.json()) as RpcRequest;
       requests.push(body);
       sentAt.push(Date.now());
+      const override = respondWith?.(body.method ?? "");
+      if (override) return override;
       return Response.json({
         jsonrpc: "2.0",
         id: 1,
@@ -119,6 +123,7 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
     await expect(waitForSigConfirm(SIG, rpcUrl, 2_000)).resolves.toEqual({
       confirmed: true,
       err: null,
+      expired: false,
     });
 
     expect(requests[0].method).toBe("getSignatureStatuses");
@@ -133,6 +138,7 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
     await expect(waitForSigConfirm(SIG, rpcUrl, 2_000)).resolves.toEqual({
       confirmed: true,
       err: null,
+      expired: false,
     });
   });
 
@@ -158,6 +164,7 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
     await expect(waitForSigConfirm(SIG, rpcUrl, 20)).resolves.toEqual({
       confirmed: false,
       err: "confirmation timeout",
+      expired: false,
     });
   });
 
@@ -170,7 +177,7 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
     const out = await waitForSigConfirm(SIG, rpcUrl, 5_000);
     const elapsed = Date.now() - startedAt;
 
-    expect(out).toEqual({ confirmed: false, err: "confirmation timeout" });
+    expect(out).toEqual({ confirmed: false, err: "confirmation timeout", expired: false });
     // 0 s, 1.5 s, 4.5 s. A flat 1.5 s loop would have sent a fourth at 4.5 s+.
     expect(sentAt).toHaveLength(3);
     const gaps = sentAt.slice(1).map((t, i) => t - sentAt[i]);
@@ -178,7 +185,7 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
     expect(gaps[1]).toBeGreaterThanOrEqual(2_700);
     // The last sleep is clamped to the deadline, so the call does not overshoot.
     expect(elapsed).toBeLessThan(6_000);
-  });
+  }, 15_000);
 
   test("a short timeout never sleeps past its own deadline", async () => {
     answer = () => ({ context: { slot: 9 }, value: [null] });
@@ -190,5 +197,101 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
     expect(requests).toHaveLength(1);
     // The old flat 1.5 s sleep made a 20 ms wait last 1.5 s.
     expect(Date.now() - startedAt).toBeLessThan(700);
+  });
+});
+
+describe("waitForSigConfirm — a dead blockhash fails at the expiry", () => {
+  test("past lastValidBlockHeight the wait ends immediately with expired: true", async () => {
+    answer = (method) =>
+      method === "getBlockHeight" ? 1_000_042 : { context: { slot: 9 }, value: [null] };
+    requests.length = 0;
+
+    const startedAt = Date.now();
+    const out = await waitForSigConfirm(SIG, rpcUrl, 60_000, { lastValidBlockHeight: 1_000_000 });
+
+    expect(out.confirmed).toBe(false);
+    expect(out.expired).toBe(true);
+    expect(out.err).toContain("blockhash expired");
+    // 60 s of waiting would have been patience; the tx can never land.
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    // Expiry is read FIRST, so a dead tx costs one cheap height probe.
+    expect(requests.map((r) => r.method)).toEqual(["getBlockHeight"]);
+  });
+
+  test("inside the window the wait continues, so a slow-landing tx still confirms", async () => {
+    let height = 1_000_000;
+    answer = (method) => {
+      if (method === "getBlockHeight") return height++;
+      return height >= 1_000_002
+        ? { context: { slot: 12 }, value: [{ slot: 12, err: null, confirmationStatus: "confirmed" }] }
+        : { context: { slot: 12 }, value: [null] };
+    };
+
+    const out = await waitForSigConfirm(SIG, rpcUrl, 8_000, { lastValidBlockHeight: 1_000_010 });
+
+    expect(out).toEqual({ confirmed: true, err: null, expired: false });
+  });
+});
+
+describe("postRpc — transport failures surface as themselves", () => {
+  test("a 502 proxy page names the method, the status and the redacted endpoint", async () => {
+    respondWith = () =>
+      new Response("<html><body><h1>502 Bad Gateway</h1></body></html>", {
+        status: 502,
+        headers: { "content-type": "text/html" },
+      });
+
+    const keyed = `${rpcUrl}/AbCdEfGhIjKlMnOp`;
+    const err = await solRpcCall(keyed, "getBalance", [OWNER]).catch((e: Error) => e.message);
+
+    expect(typeof err).toBe("string");
+    const message = err as string;
+    expect(message).toContain("getBalance failed");
+    expect(message).toContain("HTTP 502");
+    expect(message).toContain("502 Bad Gateway");
+    // The provider key rides in the path — it must not ride in the error.
+    expect(message).not.toContain("AbCdEfGhIjKlMnOp");
+    expect(message).toContain("/***");
+    respondWith = null;
+  });
+
+  test("a 429 with a JSON error body keeps the node's own message", async () => {
+    respondWith = () =>
+      Response.json(
+        { jsonrpc: "2.0", id: 1, error: { code: -32005, message: "rate limited" } },
+        { status: 429 },
+      );
+
+    const err = await solRpcCall(rpcUrl, "getBalance", [OWNER]).catch((e: Error) => e.message);
+    expect(err).toContain("HTTP 429");
+    expect(err).toContain("rate limited");
+    respondWith = null;
+  });
+
+  test("a 200 that is not JSON does not become an opaque parse error", async () => {
+    respondWith = () => new Response("not json at all", { status: 200 });
+
+    const err = await solRpcCall(rpcUrl, "getGenesisHash", []).catch((e: Error) => e.message);
+    expect(err).toContain("getGenesisHash failed");
+    expect(err).toContain("not json at all");
+    respondWith = null;
+  });
+
+  test("a JSON-RPC error object is reported with its message and code", async () => {
+    respondWith = () =>
+      Response.json({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "invalid params" } });
+
+    const err = await solRpcCall(rpcUrl, "getBalance", [OWNER]).catch((e: Error) => e.message);
+    expect(err).toContain("invalid params");
+    expect(err).toContain("code -32602");
+    respondWith = null;
+  });
+
+  test("a reply with no result field is an error, not undefined cast to T", async () => {
+    respondWith = () => Response.json({ jsonrpc: "2.0", id: 1 });
+
+    const err = await solRpcCall(rpcUrl, "getBalance", [OWNER]).catch((e: Error) => e.message);
+    expect(err).toContain("no result");
+    respondWith = null;
   });
 });

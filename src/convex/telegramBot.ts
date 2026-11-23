@@ -30,6 +30,8 @@ import { decryptSecret, encryptSecret } from "./encryption";
 import {
   parseTgUpdate,
   parseBotCommand,
+  resolveCallbackData,
+  BOT_MESSAGE_TTL_MS,
   startMessage,
   helpMessage,
   unlinkedMessage,
@@ -157,8 +159,15 @@ const BOT_COMMAND_SPECS: Array<{ command: string; description: string }> = [
   { command: "dashboard", description: "Live dashboard: sessions, AI score, fleet" },
   { command: "status", description: "Engines, mode, PnL, webhook status" },
   { command: "engine", description: "Engine board — BNB + SOL start/stop" },
+  { command: "engines", description: "Engine board (alias of /engine)" },
   { command: "bnb", description: "BNB FlashBolt dashboard" },
+  { command: "bnb_on", description: "Start the BNB scanner engine" },
+  { command: "bnb_off", description: "Stop the BNB scanner engine" },
+  { command: "bnb_paper", description: "Switch BNB to paper mode" },
+  { command: "bnb_live", description: "Switch BNB to live mode" },
   { command: "sol", description: "SOL FlashBolt dashboard" },
+  { command: "sol_on", description: "Start the SOL scanner + sniper" },
+  { command: "sol_off", description: "Stop the SOL scanner + sniper" },
   { command: "routes", description: "Top live arbitrage routes" },
   { command: "execs", description: "Recent executions (all | live | sim)" },
   { command: "pnl", description: "PnL summary (all | live | sim)" },
@@ -174,11 +183,25 @@ const BOT_COMMAND_SPECS: Array<{ command: string; description: string }> = [
   { command: "claim", description: "Claim flexible-earn interest" },
   { command: "withdraw", description: "Cash balances + withdrawals" },
   { command: "txs", description: "Recent transactions" },
-  { command: "alerts", description: "Alert & sound settings" },
+  { command: "alerts", description: "Alert, sound & auto-purge settings" },
+  { command: "digest", description: "Scheduled dashboard digest on/off" },
+  { command: "sound", description: "Notification sound on/off" },
+  { command: "silence", description: "Mute this chat" },
+  { command: "purge", description: "Delete the bot's messages in this chat" },
+  { command: "unpair", description: "Unlink this chat" },
   { command: "stop", description: "Stop BOTH engines" },
   { command: "panic", description: "Emergency stop + force paper mode" },
   { command: "help", description: "Full command list" },
 ];
+
+/**
+ * Bumped whenever BOT_COMMAND_SPECS changes. The self-heal sweep re-pushes the
+ * menu when the stored version is older, so a new command shows up in
+ * Telegram's native menu within one ten-minute self-heal pass instead of
+ * waiting for the weekly refresh — the menu the operator sees always matches
+ * the commands that answer.
+ */
+const BOT_COMMAND_VERSION = 2;
 
 /** Push the command menu to Telegram (idempotent; best-effort). */
 async function pushCommandMenu(token: string): Promise<boolean> {
@@ -247,6 +270,7 @@ export const getConfig = internalQuery({
       alertFanout: row.alertFanout,
       soundAlerts: row.soundAlerts,
       autoPairOnStart: row.autoPairOnStart !== false,
+      autoPurge: row.autoPurge !== false,
       updatedAt: row.updatedAt,
     };
   },
@@ -416,8 +440,9 @@ export const setBotPref = internalMutation({
     alertFanout: v.optional(v.boolean()),
     soundAlerts: v.optional(v.boolean()),
     autoPairOnStart: v.optional(v.boolean()),
+    autoPurge: v.optional(v.boolean()),
   },
-  handler: async (ctx, { digestEnabled, alertFanout, soundAlerts, autoPairOnStart }) => {
+  handler: async (ctx, { digestEnabled, alertFanout, soundAlerts, autoPairOnStart, autoPurge }) => {
     const row = await ctx.db
       .query("telegramBotConfig")
       .withIndex("by_key", (q) => q.eq("key", CONFIG_KEY))
@@ -428,6 +453,7 @@ export const setBotPref = internalMutation({
     if (alertFanout !== undefined) patch.alertFanout = alertFanout;
     if (soundAlerts !== undefined) patch.soundAlerts = soundAlerts;
     if (autoPairOnStart !== undefined) patch.autoPairOnStart = autoPairOnStart;
+    if (autoPurge !== undefined) patch.autoPurge = autoPurge;
     await ctx.db.patch(row._id, patch);
     return true;
   },
@@ -466,14 +492,21 @@ async function tgCall(
   }
 }
 
+/**
+ * Send one message AND track its id, so the 10-minute purge sweep can delete
+ * it later. Tracking is best-effort: a send that succeeded must never be
+ * reported as failed because the bookkeeping insert did. The message id comes
+ * from Telegram's own result, never from a guess.
+ */
 async function sendPayload(
+  ctx: ActionCtx,
   token: string,
   chatId: string,
   text: string,
   keyboard: TgKeyboard | null,
   disableNotification: boolean,
 ): Promise<TgSendResult> {
-  return tgCall(token, "sendMessage", {
+  const res = await tgCall(token, "sendMessage", {
     chat_id: chatId,
     text,
     parse_mode: "Markdown",
@@ -481,6 +514,19 @@ async function sendPayload(
     disable_notification: disableNotification,
     ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
   });
+  const messageId = (res.result as { message_id?: number } | undefined)?.message_id;
+  if (res.ok && typeof messageId === "number") {
+    try {
+      await ctx.runMutation(internal.telegramBot.recordBotMessage, {
+        chatId,
+        messageId,
+        source: "bot",
+      });
+    } catch {
+      // Bookkeeping only — the message was delivered.
+    }
+  }
+  return { ok: res.ok, description: res.description };
 }
 
 /** Answer a callback query so Telegram stops the spinner (null = no callback). */
@@ -527,9 +573,16 @@ export const ensureWebhookReady = internalAction({
     if (ok) {
       try {
         const row = await ctx.runQuery(internal.telegramBot.readConfigRow, {});
-        if (!row?.commandsPushedAt || Date.now() - row.commandsPushedAt > 7 * 24 * 3600 * 1000) {
+        const staleVersion = (row?.commandsVersion ?? 0) < BOT_COMMAND_VERSION;
+        if (
+          !row?.commandsPushedAt ||
+          Date.now() - row.commandsPushedAt > 7 * 24 * 3600 * 1000 ||
+          staleVersion
+        ) {
           if (await pushCommandMenu(token)) {
-            await ctx.runMutation(internal.telegramBot.stampCommandsPushed, {});
+            await ctx.runMutation(internal.telegramBot.stampCommandsPushed, {
+              version: BOT_COMMAND_VERSION,
+            });
           }
         }
       } catch {
@@ -544,14 +597,17 @@ export const ensureWebhookReady = internalAction({
 
 /** Stamp when the setMyCommands menu was last pushed (weekly gate). */
 export const stampCommandsPushed = internalMutation({
-  args: {},
-  handler: async (ctx): Promise<{ ok: boolean }> => {
+  args: { version: v.optional(v.number()) },
+  handler: async (ctx, { version }): Promise<{ ok: boolean }> => {
     const row = await ctx.db
       .query("telegramBotConfig")
       .withIndex("by_key", (q) => q.eq("key", CONFIG_KEY))
       .first();
     if (row) {
-      await ctx.db.patch(row._id, { commandsPushedAt: Date.now() });
+      await ctx.db.patch(row._id, {
+        commandsPushedAt: Date.now(),
+        ...(version !== undefined ? { commandsVersion: version } : {}),
+      });
     } else {
       await ctx.db.insert("telegramBotConfig", {
         key: CONFIG_KEY,
@@ -560,6 +616,7 @@ export const stampCommandsPushed = internalMutation({
         alertFanout: true,
         soundAlerts: true,
         commandsPushedAt: Date.now(),
+        ...(version !== undefined ? { commandsVersion: version } : {}),
         updatedAt: Date.now(),
       });
     }
@@ -713,6 +770,8 @@ export const getBotStatus = query({
     alertFanout: boolean;
     soundAlerts: boolean;
     autoPairOnStart: boolean;
+    /** Auto-purge — tracked bot/channel messages older than 10 min are deleted. */
+    autoPurge: boolean;
     webhookOk: boolean | null;
     webhookCheckedAt: number | null;
     /** Cached @username — stamped by autoConnectBot and the webhook self-heal cron
@@ -764,6 +823,7 @@ export const getBotStatus = query({
       alertFanout: row?.alertFanout ?? true,
       soundAlerts: row?.soundAlerts ?? true,
       autoPairOnStart: row?.autoPairOnStart !== false,
+      autoPurge: row?.autoPurge !== false,
       webhookOk: row?.webhookOk ?? null,
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       botUsername: row?.botUsername ?? null,
@@ -1183,6 +1243,20 @@ export const setAutoPair = mutation({
   },
 });
 
+/**
+ * Auto-purge switch from the app's Telegram Bot panel — the same setting the
+ * bot's /alerts board flips. Operator-gated like every other dialog mutation.
+ */
+export const setAutoPurge = mutation({
+  args: { enabled: v.boolean(), deviceToken: v.optional(v.string()) },
+  handler: async (ctx, { enabled, deviceToken }) => {
+    await requireOperatorEmail(ctx, deviceTokenFromClient(deviceToken));
+    await ctx.runMutation(internal.telegramBot.ensureConfig, {});
+    await ctx.runMutation(internal.telegramBot.setBotPref, { autoPurge: enabled });
+    return { ok: true, enabled };
+  },
+});
+
 export const sendSimTradeAlert = mutation({
   args: { deviceToken: v.optional(v.string()) },
   // Explicit return type breaks the generated-API inference cycle
@@ -1227,16 +1301,15 @@ export const sendSimAlert = internalAction({
     if (!token) {
       return { ok: false, error: "Bot token not configured — set it in the Telegram Bot panel or Keys." };
     }
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: "⚡ Simulated trade alert — check the Trade terminal for this position.",
-        parse_mode: "Markdown",
-      }),
-    });
-    return { ok: res.ok === true, error: res.ok ? null : `HTTP ${res.status}` };
+    const res = await sendPayload(
+      ctx,
+      token,
+      chatId,
+      "⚡ Simulated trade alert — check the Trade terminal for this position.",
+      null,
+      false,
+    );
+    return { ok: res.ok, error: res.ok ? null : res.description };
   },
 });
 
@@ -1308,6 +1381,120 @@ export const linkChat = internalMutation({
 });
 
 // ---------------------------------------------------------------------------
+// Message tracking + the 10-minute purge
+//
+// Every message the bot posts (chat boards, digests, trade alerts) and every
+// post to the configured CHANNEL is recorded with its real Telegram message id,
+// then deleted by `purgeBotMessages` once it is older than
+// `BOT_MESSAGE_TTL_MS`. That keeps a chat that gets a board every few minutes
+// readable: it shows the last ten minutes, not an unbounded scrollback. The
+// sweep is bounded, batched and idempotent, and it is a no-op when the
+// operator turns auto-purge off.
+// ---------------------------------------------------------------------------
+
+/** Record a delivered message so a later sweep can delete it. */
+export const recordBotMessage = internalMutation({
+  args: {
+    chatId: v.string(),
+    messageId: v.number(),
+    source: v.union(v.literal("bot"), v.literal("channel")),
+  },
+  handler: async (ctx, { chatId, messageId, source }) => {
+    await ctx.db.insert("telegramBotMessages", {
+      chatId,
+      messageId,
+      source,
+      sentAt: Date.now(),
+    });
+    return { ok: true };
+  },
+});
+
+/**
+ * Take (and forget) the oldest tracked messages at or before `cutoff`. Rows
+ * leave the table in the same transaction that returns them, so a retried
+ * sweep can never delete the same Telegram message twice. A failed delete is
+ * counted, not retried forever: the Bot API refuses messages older than 48 h.
+ */
+export const takeStaleMessages = internalMutation({
+  args: { cutoff: v.number(), limit: v.number(), chatId: v.optional(v.string()) },
+  handler: async (ctx, { cutoff, limit, chatId }) => {
+    const rows = chatId
+      ? await ctx.db
+          .query("telegramBotMessages")
+          .withIndex("by_chat", (q) => q.eq("chatId", chatId))
+          .take(limit)
+      : await ctx.db
+          .query("telegramBotMessages")
+          .withIndex("by_sent", (q) => q.lte("sentAt", cutoff))
+          .take(limit);
+    const stale = rows.filter((row) => row.sentAt <= cutoff);
+    for (const row of stale) await ctx.db.delete(row._id);
+    return { rows: stale.map((row) => ({ chatId: row.chatId, messageId: row.messageId })) };
+  },
+});
+
+/** Delete tracked messages in bounded batches; returns the honest tally. */
+async function deleteTrackedMessages(
+  ctx: ActionCtx,
+  token: string,
+  cutoff: number,
+  chatId?: string,
+): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+  const limit = 100;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const batch = await ctx.runMutation(internal.telegramBot.takeStaleMessages, {
+      cutoff,
+      limit,
+      ...(chatId ? { chatId } : {}),
+    });
+    if (!batch.rows.length) break;
+    for (const msg of batch.rows) {
+      const res = await tgCall(token, "deleteMessage", {
+        chat_id: msg.chatId,
+        message_id: msg.messageId,
+      });
+      if (res.ok) deleted += 1;
+      else failed += 1;
+    }
+    if (batch.rows.length < limit) break;
+  }
+  return { deleted, failed };
+}
+
+/**
+ * The every-10-minutes sweep (cron `telegram-bot-purge`): deletes tracked bot
+ * and channel messages older than the TTL. No-ops when auto-purge is off, so
+ * turning it off has no side effects on content that is already posted.
+ */
+export const purgeBotMessages = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ ok: boolean; deleted: number; failed: number; skipped?: string }> => {
+    const cfg = await ctx.runQuery(internal.telegramBot.getConfig, {});
+    if (!cfg?.autoPurge) return { ok: true, deleted: 0, failed: 0, skipped: "auto-purge off" };
+    const token = await resolveBotToken(ctx);
+    if (!token) {
+      return { ok: false, deleted: 0, failed: 0, skipped: "bot token not configured" };
+    }
+    const res = await deleteTrackedMessages(ctx, token, Date.now() - BOT_MESSAGE_TTL_MS);
+    return { ok: true, ...res };
+  },
+});
+
+/** /purge — clear THIS chat's tracked bot messages immediately. */
+export const purgeChatMessages = internalAction({
+  args: { chatId: v.string() },
+  handler: async (ctx, { chatId }): Promise<{ ok: boolean; deleted: number; failed: number }> => {
+    const token = await resolveBotToken(ctx);
+    if (!token) return { ok: false, deleted: 0, failed: 0 };
+    const res = await deleteTrackedMessages(ctx, token, Date.now(), chatId);
+    return { ok: true, ...res };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Trade-alert fanout (scheduled by terminal.applyExecution / serverAutoExecution)
 // ---------------------------------------------------------------------------
 
@@ -1350,7 +1537,7 @@ export const fanoutTradeAlert = internalAction({
     });
     let sent = 0;
     for (const chat of chats) {
-      const res = await sendPayload(token, chat.chatId, text, null, disableNotification(chat, cfg));
+      const res = await sendPayload(ctx, token, chat.chatId, text, null, disableNotification(chat, cfg));
       if (res.ok) sent += 1;
     }
     return { ok: true, sent };
@@ -1547,7 +1734,7 @@ export const runDigest = internalAction({
     const text = digestMessage(bundle.session, bundle.score, bundle.metrics).text;
     let sent = 0;
     for (const chat of chats) {
-      const res = await sendPayload(token, chat.chatId, text, null, disableNotification(chat, cfg));
+      const res = await sendPayload(ctx, token, chat.chatId, text, null, disableNotification(chat, cfg));
       if (res.ok) sent += 1;
     }
     return { ok: true, sent, error: null };
@@ -1600,20 +1787,16 @@ export const handleUpdate = internalAction({
     let cfg = initial;
     const chat = await ctx.runQuery(internal.telegramBot.getChat, { chatId });
 
-    // ── 4. Command resolution: text commands + inline-keyboard callbacks. ──
+    // ── 4. Command resolution: text commands + inline-keyboard callbacks.
+    // `resolveCallbackData` is the ONE resolver the builders' parity test also
+    // walks, so a button the presentation layer emits cannot be a dead
+    // control: it always resolves to a command the switch below answers.
     let cmd: BotCommand;
     let setting: string | null = null;
-    if (tg.callbackData?.startsWith("cmd:")) {
-      cmd = parseBotCommand(tg.callbackData.slice(4));
-    } else if (tg.callbackData === "menu:main") {
-      cmd = { kind: "menu" };
-    } else if (tg.callbackData === "help:main") {
-      cmd = { kind: "help" };
-    } else if (tg.callbackData === "pair:start") {
-      cmd = { kind: "pair_start" };
-    } else if (tg.callbackData?.startsWith("set:")) {
-      cmd = { kind: "alerts" };
-      setting = tg.callbackData.slice(4);
+    if (tg.callbackData !== null) {
+      const resolved = resolveCallbackData(tg.callbackData);
+      cmd = resolved.cmd;
+      setting = resolved.setting;
     } else {
       cmd = parseBotCommand(tg.text);
     }
@@ -1628,13 +1811,14 @@ export const handleUpdate = internalAction({
       cmd.kind === "help";
     if ((!chat || chat.blocked) && !alwaysAllowed) {
       const m = unlinkedMessage();
-      await sendPayload(token, chatId, m.text, m.keyboard, false);
+      await sendPayload(ctx, token, chatId, m.text, m.keyboard, false);
       return { ok: true, status: 200, handled: true, reason: "unlinked" };
     }
 
     // Reply helper honoring this chat's mute + the sound pref.
     const reply = async (text: string, keyboard: TgKeyboard | null = null): Promise<void> => {
       await sendPayload(
+        ctx,
         token,
         chatId,
         text,
@@ -1655,6 +1839,7 @@ export const handleUpdate = internalAction({
       await engageEngine(ctx, "bnb");
       const b = bootMessage(st?.mode ?? "paper", st?.chainKey ?? "bsc");
       await sendPayload(
+        ctx,
         token,
         chatId,
         b.text,
@@ -1684,12 +1869,12 @@ export const handleUpdate = internalAction({
           });
           if (!res.ok) {
             const p = pairPrompt();
-            await sendPayload(token, chatId, res.reason, p.keyboard, false);
+            await sendPayload(ctx, token, chatId, res.reason, p.keyboard, false);
             return done("pair-rejected");
           }
           const fresh = await ctx.runQuery(internal.telegramBot.getChat, { chatId });
           const pm = pairedMessage(fresh?.title ?? tg.fromName ?? null);
-          await sendPayload(token, chatId, pm.text, pm.keyboard, false);
+          await sendPayload(ctx, token, chatId, pm.text, pm.keyboard, false);
           await bootConsole();
           return done("paired");
         }
@@ -1703,12 +1888,12 @@ export const handleUpdate = internalAction({
           });
           const fresh = await ctx.runQuery(internal.telegramBot.getChat, { chatId });
           const pm = pairedMessage(fresh?.title ?? tg.fromName ?? null);
-          await sendPayload(token, chatId, pm.text, pm.keyboard, false);
+          await sendPayload(ctx, token, chatId, pm.text, pm.keyboard, false);
           await bootConsole();
           return done("auto-paired");
         }
         const s = startMessage();
-        await sendPayload(token, chatId, s.text, s.keyboard, false);
+        await sendPayload(ctx, token, chatId, s.text, s.keyboard, false);
         return done("start-unlinked");
       }
 
@@ -1761,6 +1946,10 @@ export const handleUpdate = internalAction({
               chatId,
               silent: setting === "mute",
             });
+          } else if (setting === "purge_on" || setting === "purge_off") {
+            const on = setting === "purge_on";
+            await ctx.runMutation(internal.telegramBot.setBotPref, { autoPurge: on });
+            cfg = { ...cfg, autoPurge: on };
           }
           const board = alertsMessage(cfg, { silent: chatSilent });
           await reply(board.text, board.keyboard);
@@ -1791,6 +1980,26 @@ export const handleUpdate = internalAction({
         await ctx.runMutation(internal.telegramBot.setChatPref, { chatId, silent: true });
         await reply(settingsApplied("Chat notifications", false));
         return done("silence");
+      }
+
+      case "purge": {
+        const res = await ctx.runAction(internal.telegramBot.purgeChatMessages, { chatId });
+        const board = alertsMessage(cfg, { silent: chat?.silent ?? false });
+        await reply(
+          res.ok
+            ? [
+                `🧹 Purged ${res.deleted} bot message${res.deleted === 1 ? "" : "s"} from this chat.`,
+                res.failed ? `${res.failed} could not be deleted (older than 48 h).` : "",
+                cfg.autoPurge
+                  ? "Auto-purge stays on: anything the bot posts is deleted after 10 minutes."
+                  : "Auto-purge is off — new messages will stay.",
+              ]
+                .filter(Boolean)
+                .join("\n")
+            : "🧹 Purge needs the bot token — set it in the Telegram Bot panel or Keys.",
+          board.keyboard,
+        );
+        return done("purge");
       }
 
       // ── Engines / control ──────────────────────────────────────────
@@ -2226,7 +2435,18 @@ export const handleUpdate = internalAction({
       }
 
       // ── Unknown input — answer with the command board ──────────────
+      case "unknown": {
+        const h = helpMessage();
+        await reply(h.text, h.keyboard);
+        return done("unknown");
+      }
+
       default: {
+        // EXHAUSTIVENESS: every BotCommand kind is handled above, so `cmd` is
+        // `never` here. A new kind without a case fails `bun run typecheck`
+        // instead of quietly falling into a generic reply.
+        const unhandled: never = cmd;
+        void unhandled;
         const h = helpMessage();
         await reply(h.text, h.keyboard);
         return done("unknown");
