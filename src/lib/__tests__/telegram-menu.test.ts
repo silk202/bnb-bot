@@ -386,4 +386,28 @@ describe("alerts board — auto-purge is visible and toggleable", () => {
     expect(off.text).toContain("bot messages older than 10 min are deleted");
     expect(off.keyboard.flat().find((b) => b.callback_data === "set:channel_on")).toBeDefined();
   });
+
+  test("the board shows the last sweep's tally, and admits when there is none", () => {
+    const now = new Date("2026-11-23T12:00:00Z").getTime();
+    const withSweep = alertsMessage(
+      {
+        alertFanout: true,
+        digestEnabled: true,
+        soundAlerts: true,
+        autoPurge: true,
+        purgeLast: { at: now - 120_000, deleted: 4, failed: 0, skipped: null },
+      },
+      { silent: false },
+      now,
+    );
+    expect(withSweep.text).toContain("Last sweep: 2m ago · 4 deleted");
+
+    const never = alertsMessage(
+      { alertFanout: true, digestEnabled: true, soundAlerts: true, autoPurge: true },
+      { silent: false },
+      now,
+    );
+    expect(never.text).toContain("Last sweep: not reported yet");
+    expect(never.text).not.toContain("0 deleted");
+  });
 });

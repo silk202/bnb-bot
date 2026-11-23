@@ -823,6 +823,14 @@ const schema = defineSchema(
       // because the channel is a feed the operator may want to keep, and a
       // chat-scoped `/purge` must never decide that for it.
       channelPurge: v.optional(v.boolean()),
+      // Last purge sweep's honest tally, stamped by the `telegram-bot-purge`
+      // cron and surfaced on `/alerts`, the bot panel and the header chip.
+      // Optional so an existing row keeps working: absent = "not reported
+      // yet", never "0 deleted". Only the sweep writes these.
+      purgeLastAt: v.optional(v.number()),
+      purgeLastDeleted: v.optional(v.number()),
+      purgeLastFailed: v.optional(v.number()),
+      purgeLastSkipped: v.optional(v.string()),
       updatedAt: v.number(),
     }).index("by_key", ["key"]),
 

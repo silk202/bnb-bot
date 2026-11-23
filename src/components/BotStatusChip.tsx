@@ -20,6 +20,7 @@ import { api } from "@/convex/_generated/api";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { TelegramBotDialog } from "@/components/TelegramBotDialog";
 import { formatExpiry, getDeviceToken } from "@/lib/gate";
+import { purgeTelemetryLine } from "@/lib/telegramBot";
 import { Bot } from "lucide-react";
 import { useState } from "react";
 
@@ -35,12 +36,17 @@ export function BotStatusChip() {
         webhookCheckedAt?: number | null;
         linkedChats?: number;
         digestEnabled?: boolean;
+        purgeLast?: { at: number; deleted: number; failed: number; skipped: string | null } | null;
         engineRunning?: boolean | null;
         solEngineRunning?: boolean | null;
         botUsername?: string | null;
       }
     | undefined;
   const [open, setOpen] = useState(false);
+  // One clock reading per mount (a lazy initializer keeps render pure) — the
+  // tooltip's purge age is relative to when the chip last rendered, never a
+  // Date.now() call inside render.
+  const [now] = useState(() => Date.now());
 
   // Subscribers and unrecognized sessions: render nothing (not even a chip).
   if (health && !health.recognized) return null;
@@ -92,6 +98,7 @@ export function BotStatusChip() {
         engineLine("BNB engine", health.engineRunning),
         engineLine("SOL engine", health.solEngineRunning),
         `Digest: ${health.digestEnabled ? "on (10 min)" : "off"}`,
+        `Purge: ${purgeTelemetryLine(health.purgeLast, now)}`,
         "TASignal channel is separate — this chip is TAEngine only.",
       ].join("\n")
     : "Telegram Operator Bot";

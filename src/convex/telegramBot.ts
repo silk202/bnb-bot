@@ -73,6 +73,7 @@ import {
   type BotChat,
   type BotConfig,
   type BotCommand,
+  type PurgeTelemetry,
   type SessionLite,
   type MetricsLite,
   type AiScoreLite,
@@ -140,6 +141,21 @@ export const readStoredToken = internalQuery({
     }
   },
 });
+
+/**
+ * The last purge sweep's tally as the UI consumes it: absent fields become an
+ * honest zero only when the sweep itself did report (at is present), and no
+ * row at all yields `undefined` = "not reported yet".
+ */
+function purgeTelemetryFrom(row: Doc<"telegramBotConfig"> | null): PurgeTelemetry | undefined {
+  if (!row || row.purgeLastAt === undefined) return undefined;
+  return {
+    at: row.purgeLastAt,
+    deleted: row.purgeLastDeleted ?? 0,
+    failed: row.purgeLastFailed ?? 0,
+    skipped: row.purgeLastSkipped ?? null,
+  };
+}
 
 /** Best-effort env-token presence (queries may not expose env in every runtime). */
 function envTokenPresent(): boolean {
@@ -274,6 +290,7 @@ export const getConfig = internalQuery({
       autoPairOnStart: row.autoPairOnStart !== false,
       autoPurge: row.autoPurge !== false,
       channelPurge: row.channelPurge !== false,
+      purgeLast: purgeTelemetryFrom(row),
       updatedAt: row.updatedAt,
     };
   },
@@ -707,6 +724,8 @@ export const getBotHealth = query({
         webhookCheckedAt: number | null;
         linkedChats: number;
         digestEnabled: boolean;
+        /** Last purge sweep's tally — null until one has reported. */
+        purgeLast: PurgeTelemetry | null;
         engineRunning: boolean | null;
         /** Independent SOL engine switch — its own start/stop state. */
         solEngineRunning: boolean | null;
@@ -742,6 +761,7 @@ export const getBotHealth = query({
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       linkedChats: chats.filter((c) => !c.blocked).length,
       digestEnabled: row?.digestEnabled ?? true,
+      purgeLast: purgeTelemetryFrom(row) ?? null,
       engineRunning: state?.botRunning ?? null,
       solEngineRunning: state ? state.solBotRunning !== false : null,
       botUsername: row?.botUsername ?? null,
@@ -781,6 +801,9 @@ export const getBotStatus = query({
     autoPurge: boolean;
     /** Channel purge — its own switch; channel posts older than 10 min go too. */
     channelPurge: boolean;
+    /** Last purge sweep's tally (stamped by the every-10-minute cron) — null
+        until one has reported, never a fabricated "0 deleted". */
+    purgeLast: PurgeTelemetry | null;
     webhookOk: boolean | null;
     webhookCheckedAt: number | null;
     /** Cached @username — stamped by autoConnectBot and the webhook self-heal cron
@@ -834,6 +857,7 @@ export const getBotStatus = query({
       autoPairOnStart: row?.autoPairOnStart !== false,
       autoPurge: row?.autoPurge !== false,
       channelPurge: row?.channelPurge !== false,
+      purgeLast: purgeTelemetryFrom(row) ?? null,
       webhookOk: row?.webhookOk ?? null,
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       botUsername: row?.botUsername ?? null,
@@ -1506,17 +1530,83 @@ async function deleteTrackedMessages(
 }
 
 /**
+ * Stamp the last sweep's tally on the config row. Telemetry ONLY: it never
+ * decides what gets deleted, and the sweep treats a failed stamp as a non-event
+ * (a delivered delete must not be reported as a failed one because bookkeeping
+ * hiccuped). An existing row is patched; a row is created only when the
+ * deployment runs the sweep without one (env token, no config row yet).
+ */
+export const stampPurgeRun = internalMutation({
+  args: {
+    at: v.number(),
+    deleted: v.number(),
+    failed: v.number(),
+    skipped: v.optional(v.string()),
+  },
+  handler: async (ctx, { at, deleted, failed, skipped }) => {
+    const patch = {
+      purgeLastAt: at,
+      purgeLastDeleted: deleted,
+      purgeLastFailed: failed,
+      purgeLastSkipped: skipped,
+    };
+    const row = await ctx.db
+      .query("telegramBotConfig")
+      .withIndex("by_key", (q) => q.eq("key", CONFIG_KEY))
+      .first();
+    if (row) {
+      await ctx.db.patch(row._id, patch);
+    } else {
+      await ctx.db.insert("telegramBotConfig", {
+        key: CONFIG_KEY,
+        webhookSecret: randomToken(32),
+        digestEnabled: true,
+        alertFanout: true,
+        soundAlerts: true,
+        ...patch,
+        updatedAt: Date.now(),
+      });
+    }
+    return { ok: true };
+  },
+});
+
+/**
  * The every-10-minutes sweep (cron `telegram-bot-purge`): deletes tracked bot
  * and channel messages older than the TTL. No-ops when auto-purge is off, so
  * turning it off has no side effects on content that is already posted.
+ *
+ * Every outcome is stamped, including the ones that delete nothing: `/alerts`
+ * then shows whether the sweep is running, what it removed, and why it stood
+ * down — the difference between "nothing to delete" and "never ran".
  */
 export const purgeBotMessages = internalAction({
   args: {},
   handler: async (ctx): Promise<{ ok: boolean; deleted: number; failed: number; skipped?: string }> => {
     const cfg = await ctx.runQuery(internal.telegramBot.getConfig, {});
-    if (!cfg?.autoPurge) return { ok: true, deleted: 0, failed: 0, skipped: "auto-purge off" };
+    // No config row at all is not "auto-purge off" — say what is true.
+    if (!cfg) return { ok: true, deleted: 0, failed: 0, skipped: "not configured" };
+
+    const stamp = async (deleted: number, failed: number, skipped?: string): Promise<void> => {
+      try {
+        await ctx.runMutation(internal.telegramBot.stampPurgeRun, {
+          at: Date.now(),
+          deleted,
+          failed,
+          ...(skipped ? { skipped } : {}),
+        });
+      } catch {
+        // Telemetry only — never fail a sweep because its tally did not land.
+      }
+    };
+
+    if (!cfg.autoPurge) {
+      await stamp(0, 0, "auto-purge off");
+      return { ok: true, deleted: 0, failed: 0, skipped: "auto-purge off" };
+    }
     const token = await resolveBotToken(ctx);
     if (!token) {
+      await stamp(0, 0, "bot token not configured");
       return { ok: false, deleted: 0, failed: 0, skipped: "bot token not configured" };
     }
     const cutoff = purgeCutoff(Date.now());
@@ -1527,11 +1617,15 @@ export const purgeBotMessages = internalAction({
     const channel = cfg.channelPurge
       ? await deleteTrackedMessages(ctx, token, cutoff, { source: "channel" })
       : { deleted: 0, failed: 0 };
+    const deleted = bot.deleted + channel.deleted;
+    const failed = bot.failed + channel.failed;
+    const skipped = cfg.channelPurge ? undefined : "channel purge off";
+    await stamp(deleted, failed, skipped);
     return {
       ok: true,
-      deleted: bot.deleted + channel.deleted,
-      failed: bot.failed + channel.failed,
-      ...(cfg.channelPurge ? {} : { skipped: "channel purge off" }),
+      deleted,
+      failed,
+      ...(skipped ? { skipped } : {}),
     };
   },
 });

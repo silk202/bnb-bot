@@ -17,6 +17,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BOT_MESSAGE_TTL_MS,
   purgeCutoff,
+  purgeTelemetryLine,
   selectPurgeable,
   type TrackedMessageLite,
 } from "../telegramBot";
@@ -103,5 +104,34 @@ describe("selectPurgeable — what one sweep may delete", () => {
     // that every future sweep re-counts as failures.
     const ancient = NOW - 3 * 24 * 60 * 60 * 1000;
     expect(selectPurgeable([msg({ sentAt: ancient })], { cutoff: OLD })).toHaveLength(1);
+  });
+});
+
+describe("purgeTelemetryLine — the sweep reports honestly", () => {
+  test("no report yet is never rendered as a healthy zero", () => {
+    expect(purgeTelemetryLine(undefined, NOW)).toContain("not reported yet");
+    expect(purgeTelemetryLine(null, NOW)).toContain("not reported yet");
+    expect(
+      purgeTelemetryLine({ at: Number.NaN, deleted: 3, failed: 0, skipped: null }, NOW),
+    ).toContain("not reported yet");
+    expect(purgeTelemetryLine(undefined, NOW)).not.toContain("0 deleted");
+  });
+
+  test("a real sweep says when it ran, what it deleted and what failed", () => {
+    expect(
+      purgeTelemetryLine({ at: NOW - 120_000, deleted: 3, failed: 1, skipped: null }, NOW),
+    ).toBe("2m ago · 3 deleted · 1 failed");
+  });
+
+  test("a clean sweep omits the failed segment instead of printing zero", () => {
+    expect(
+      purgeTelemetryLine({ at: NOW - 60_000, deleted: 0, failed: 0, skipped: null }, NOW),
+    ).toBe("1m ago · 0 deleted");
+  });
+
+  test("a sweep that stood down says why", () => {
+    expect(
+      purgeTelemetryLine({ at: NOW - 60_000, deleted: 0, failed: 0, skipped: "auto-purge off" }, NOW),
+    ).toBe("1m ago — skipped (auto-purge off)");
   });
 });

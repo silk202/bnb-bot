@@ -43,6 +43,7 @@ import { useLocation, useNavigate } from "react-router";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { formatExpiry, getDeviceToken, setDeviceToken } from "@/lib/gate";
+import { purgeTelemetryLine } from "@/lib/telegramBot";
 
 type BotStatus = {
   recognized: boolean;
@@ -53,6 +54,8 @@ type BotStatus = {
   /** Auto-purge: tracked bot/channel messages older than 10 min are deleted. */
   autoPurge?: boolean;
   channelPurge?: boolean;
+  /** Last purge sweep's tally — null until the cron has reported one. */
+  purgeLast?: { at: number; deleted: number; failed: number; skipped: string | null } | null;
   webhookOk?: boolean | null;
   webhookCheckedAt?: number | null;
   botUsername: string | null;
@@ -774,6 +777,10 @@ export function TelegramBotDialog({
                 channel post is deleted after 10 minutes, so a linked chat shows the last
                 ten minutes instead of an unbounded scrollback. The sweep runs every 10
                 minutes; /purge in the chat clears it immediately. OFF keeps everything.
+              </div>
+              {/* The sweep's own honest tally — the same line `/alerts` shows. */}
+              <div className="mt-1 text-[10px] text-muted-foreground/80">
+                Last sweep: {purgeTelemetryLine(status?.purgeLast, now)}
               </div>
             </div>
             <Switch

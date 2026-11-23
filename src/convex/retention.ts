@@ -29,6 +29,12 @@
  *   ttsCache                → 30 days old   (+ their storage blobs)
  *   copierSignals           → 12 hours old  (feed backstop — rolling market
  *                              window, no financial/identity value)
+ *   telegramBotMessages     → 48 hours old  (tracking rows only: Telegram
+ *                              refuses deletes past 48 h and the message
+ *                              itself lives in the chat, not in this table)
+ *
+ * Every purge above is bookkeeping, a cache or a rolling window. Nothing that
+ * carries a balance, a trade, an identity or a report is ever selected here.
  */
 
 import { v } from "convex/values";
@@ -45,6 +51,9 @@ const TTS_KEEP_MS = 30 * DAY_MS;
 // 12 hours — double the poller's own 6h TTL, wide enough to never race a
 // healthy poller run, tight enough that a dead poller costs hours, not GB.
 const COPIER_SIGNALS_KEEP_MS = DAY_MS / 2;
+// Telegram's own deleteMessage limit. A tracking row older than this can never
+// be acted on again, so it is pure dead weight in the table.
+const TRACKED_MESSAGE_ROW_KEEP_MS = 2 * DAY_MS;
 
 // Batch caps — one bounded mutation per run; backlogs drain run by run
 // (the cron fires every 10 minutes, so ~144 sweeps/day of headroom).
@@ -56,6 +65,7 @@ const MAX_CODE_DELETES = 300;
 const MAX_BUCKET_DELETES = 200;
 const MAX_TTS_DELETES = 150;
 const MAX_COPIER_DELETES = 400;
+const MAX_TRACKED_MESSAGE_DELETES = 400;
 
 export const applyDailyRetention = internalMutation({
   args: {},
@@ -166,6 +176,18 @@ export const applyDailyRetention = internalMutation({
       .take(MAX_COPIER_DELETES);
     for (const c of staleCopier) await ctx.db.delete(c._id);
 
+    // ── 8) Telegram message-tracking rows past the 48 h delete limit ──────
+    // The 10-minute sweep removes a row in the same mutation that selects it,
+    // so a row only survives when no sweep could run (auto-purge off, no bot
+    // token, a long outage). Telegram refuses deleteMessage after 48 h, so
+    // such a row can never be acted on again — and the message itself lives in
+    // the chat, not here. This is bookkeeping, not content: drop it.
+    const staleTracked = await ctx.db
+      .query("telegramBotMessages")
+      .withIndex("by_sent", (q) => q.lt("sentAt", now - TRACKED_MESSAGE_ROW_KEEP_MS))
+      .take(MAX_TRACKED_MESSAGE_DELETES);
+    for (const m of staleTracked) await ctx.db.delete(m._id);
+
     return {
       notifications: oldNotifs.length,
       executionsPaper: execsDeleted,
@@ -174,6 +196,7 @@ export const applyDailyRetention = internalMutation({
       rateLimits: bucketsDeleted,
       ttsCache: ttsDeleted,
       copierSignals: staleCopier.length,
+      telegramBotMessages: staleTracked.length,
       scanned: { expiredExecutions: expired.length, codes: codes.length, buckets: buckets.length, tts: ttsAll.length },
     };
   },

@@ -26,6 +26,22 @@ export interface BotChat {
   blocked: boolean;
 }
 
+/**
+ * The last purge sweep's honest tally, stamped by the `telegram-bot-purge`
+ * cron and shown on `/alerts` and in the app panel. Present only after a sweep
+ * has run: a missing value means "not reported yet", never "0 deleted".
+ */
+export interface PurgeTelemetry {
+  /** When the sweep ran (epoch ms). */
+  at: number;
+  /** Messages Telegram accepted a deleteMessage for. */
+  deleted: number;
+  /** Deletes Telegram refused (past its 48 h limit, already gone, …). */
+  failed: number;
+  /** Why the sweep did nothing, when it did nothing on purpose. */
+  skipped: string | null;
+}
+
 export interface BotConfig {
   pairingCode?: string;
   pairingExpiresAt?: number;
@@ -50,6 +66,11 @@ export interface BotConfig {
    * posts in either position.
    */
   channelPurge: boolean;
+  /**
+   * Last purge sweep's tally (see `PurgeTelemetry`). Read-only here — the cron
+   * stamps it, and `/alerts` plus the app panel only display it.
+   */
+  purgeLast?: PurgeTelemetry;
   updatedAt: number;
 }
 
@@ -104,6 +125,26 @@ export function selectPurgeable<T extends TrackedMessageLite>(
       (scope.chatId === undefined || row.chatId === scope.chatId) &&
       (scope.source === undefined || row.source === scope.source),
   );
+}
+
+/**
+ * One line describing the last purge sweep, for `/alerts` and the app panel.
+ *
+ * Explicit about not knowing: an absent tally reads "not reported yet", and a
+ * sweep that did nothing on purpose says why. Neither is ever rendered as
+ * "0 deleted", which would read like a healthy sweep that found nothing.
+ */
+export function purgeTelemetryLine(
+  telemetry: PurgeTelemetry | null | undefined,
+  now: number,
+): string {
+  if (!telemetry || !Number.isFinite(telemetry.at)) {
+    return "not reported yet — the sweep runs every 10 min";
+  }
+  const when = fmtAgo(telemetry.at, now);
+  if (telemetry.skipped) return `${when} — skipped (${telemetry.skipped})`;
+  const failed = telemetry.failed > 0 ? ` · ${telemetry.failed} failed` : "";
+  return `${when} · ${telemetry.deleted} deleted${failed}`;
 }
 
 /** Telegram inline-keyboard button shape (url vs callback). */
@@ -1191,8 +1232,11 @@ export function alertsMessage(
   cfg: Pick<BotConfig, "alertFanout" | "digestEnabled" | "soundAlerts" | "autoPurge"> & {
     /** Defaults to ON, like the stored setting (`!== false`). */
     channelPurge?: boolean;
+    /** Last sweep's tally, when the cron has reported one. */
+    purgeLast?: PurgeTelemetry;
   },
   chat: Pick<BotChat, "silent">,
+  now: number = Date.now(),
 ): { text: string; keyboard: TgKeyboard } {
   const channelPurge = cfg.channelPurge !== false;
   return {
@@ -1205,6 +1249,7 @@ export function alertsMessage(
       `• This chat: ${chat.silent ? "🔇 muted" : "🔔 normal"}`,
       `• Auto-purge (bot chats): ${cfg.autoPurge ? "🧹 ON — bot messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
       `• Auto-purge (channel): ${channelPurge ? "🧹 ON — channel posts older than 10 min are deleted" : "❌ OFF — channel posts stay"}`,
+      `• Last sweep: ${purgeTelemetryLine(cfg.purgeLast, now)}`,
     ].join("\n"),
     keyboard: [
       [

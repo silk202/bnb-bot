@@ -2075,3 +2075,144 @@ the cached fleet-metrics doc rather than scanning tables. The panel chip and
 12. **Let the operator choose the digest cadence** (5/10/15 min) in the panel,
     with the purge window following it — one number, two schedules, so they can
     never drift apart again.
+
+## Round 28 — the tick has an order, the sweep reports itself, and the app cleans its own room (2026-11-23)
+
+Three follow-ups from round 27: make the ordering a schedule property, surface
+what the purge actually did, and apply the same "delete only what is already
+useless" rule to the browser's local data.
+
+### 1. Tick ordering is now a schedule, not a race
+
+The digest and the purge both fired on `*/10`, and Convex does not order crons
+that share an offset — a tick could delete a 10-minute-old digest seconds before
+its replacement posted. The digest keeps minute 0 of every ten (`*/10`); the
+purge moved to `1-59/10` (…:01, :11, :21). The sequence is deterministic: the
+fresh digest lands at :00, the sweep at :01 deletes the previous one (11 minutes
+old, past `BOT_MESSAGE_TTL_MS`), and the one-minute-old digest stays. "Replace,
+then delete" is now a property of the schedule, so no amount of cron reordering
+can empty a chat's dashboard.
+
+`src/lib/__tests__/cron-ordering.test.ts` reads the real `crons.ts`, expands
+the minute fields and holds three properties: the digest owns [0,10,…,50], the
+purge owns [1,11,…,51], and every purge minute has a digest exactly one minute
+earlier — with the TTL arithmetic checked against the constant itself.
+
+Not changed, deliberately: the `session-signal` cron still runs every 15
+minutes and posts a channel board that the 10-minute channel purge deletes, so
+the channel can show a ~5-minute gap each cycle. Fixing that is a product
+decision (post more often, keep channel posts longer, or push the board on the
+digest tick), so it is the first follow-up below rather than a silent change.
+
+### 2. Purge telemetry — the sweep says what it did, including nothing
+
+Until now a sweep that deleted nothing was indistinguishable from a sweep that
+never ran. Every outcome is now stamped on `telegramBotConfig`
+(`purgeLastAt/Deleted/Failed/Skipped`) by a `stampPurgeRun` mutation — including
+`auto-purge off`, `bot token not configured` and `channel purge off`. The tally
+renders in one place (`purgeTelemetryLine`): `/alerts`, the bot panel's
+auto-purge card, and the header chip's tooltip. An absent tally reads "not
+reported yet", and a deliberate no-op says why; neither is ever drawn as
+"0 deleted", which would read as a healthy sweep. Stamping is best-effort — a
+failed stamp can never turn a delivered delete into a failed one.
+
+Two honesty fixes came with it: a missing config row now reports "not
+configured" instead of claiming "auto-purge off", and `getBotHealth` carries
+the same tally so the chip and the dialog cannot disagree.
+
+### 3. The app's own ten-minute sweep (local data)
+
+`src/lib/local-retention.ts` runs at boot and every 10 minutes
+(`startLocalRetention()` in `main.tsx`) against the same window as the backend
+sweeps and the bot TTL. It removes only data the app has ALREADY stopped
+reading:
+
+- `tracker_<key>` rows whose `date` is not today's UTC day — `loadDailyTracker`
+  resets a date-mismatched tracker on read, so the numbers are already invisible;
+  removing the row only stops it occupying storage;
+- `flashbolt.botDialogReopen` — a one-shot navigation flag consumed by the first
+  mount.
+
+Everything else is kept by contract, not by luck: gate grant and device-trust
+token, positions and the payout ledger and circuit breaker, relay latency
+history and TODAY's counters, every settings/RPC-discovery key — and any key the
+module does not recognise, because a key it has never heard of may belong to
+another feature. `local-retention.test.ts` seeds all of those and asserts none
+of them moves.
+
+On the backend the same rule was extended to the one unbounded ephemeral table
+left: `telegramBotMessages` rows older than 48 h now go in the 10-minute
+retention sweep. Telegram refuses `deleteMessage` past 48 h and the message
+itself lives in the chat, so such a row is bookkeeping that can never be acted
+on again — it only survives when no sweep could run at all.
+
+### 4. What was deliberately kept
+
+The retention contract is unchanged for everything that is money, identity or a
+report: trade ledgers, `pnlStats`, LIVE executions, users, subscribers, licenses,
+operator emails, audit logs (own 7-day prune), chain-activation evidence,
+validation runs and code inspections. Trade price and news caches are
+single-row and refreshed in place, so they are not swept — deleting them would
+only force a refetch.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 815 pass / 0 fail across 69 files (796 / 67 → +19 tests in two
+  new files: cron ordering and local retention, plus the telemetry cases added
+  to the purge-window and alerts-board suites).
+- `eslint` on the touched files: no new problems. The remaining errors are the
+  pre-existing ones in `src/convex/telegramBot.ts` (unused imports),
+  `src/convex/retention.ts` (`v`), `src/main.tsx` (`any`, fast-refresh warnings)
+  and `src/lib/telegramBot.ts` (two `\_` escapes) — the same set as round 27,
+  none in the new code. The chip's `Date.now()` in render was caught and moved
+  into a lazy `useState` initializer.
+- NOT executed: the Convex deploy (deployment still disabled by the free-plan
+  ceiling), so the new crons, the telemetry stamp and the retention extension
+  are code-only; no live Telegram call, and no funded devnet send.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling) — the tick
+   offset, telemetry and retention changes take effect only after a deploy.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 28, brainstormed (none started)
+
+1. **Close the channel session-board hole.** `session-signal` posts every 15 min
+   but the channel purge deletes at 10, so the channel is empty for ~5 min each
+   cycle. Pick one: move the board to `*/10`, give channel posts a longer TTL
+   than chat boards, or post the board on the digest tick.
+2. **Prove the telemetry on a live deployment.** The stamp is pinned at the
+   unit level only until `convex deploy` runs.
+3. **Alert when two sweeps in a row report failures.** The tally is visible but
+   passive; a `failed > 0` twice in a row is a real signal (revoked bot admin,
+   deleted chat) and should ping the operator.
+4. **Keep a short sweep history, not just the last one.** Last-only cannot show
+   "the sweep stopped running six hours ago"; a 12-entry ring of {at, deleted,
+   failed} would.
+5. **Contract test for the backend keep-list.** The client sweep has one; the
+   retention sweep's KEPT list is still a comment. A test that seeds each
+   permanent table and asserts the sweep's selection excludes it would make the
+   contract executable.
+6. **Expired `operatorDeviceTrust` sweep.** Dead identity rows accumulate; it
+   needs a `by_expires` index, and index changes are blocked while codegen
+   cannot run against the deployment.
+7. **Prove the cached height path on a funded send** (round 27 #1, carried).
+8. **`heightReadsFailed` count** (round 25 #7, carried): "still valid" and
+   "could not check" still look alike to a caller.
+9. **Redact URLs inside RPC error bodies** (round 25 #3, carried).
+10. **Add a `(chatId, sentAt)` composite index** (round 25 #5, carried) — now
+    also the shape the purge's per-chat scope would want.
+11. **Rebroadcast signed bytes after ~3 misses** (round 24 #4, carried).
+12. **Operator-selectable digest cadence** (round 27 #11, carried): once it is
+    a stored number, the purge offset must be derived from it too, or the
+    ordering guarantee quietly breaks.
+13. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6, carried).
+14. **Track multiple channel ids, not one env id** (round 26 #12, carried).
+15. **Show the local sweep in Settings.** `runLocalRetention` already returns
+    {at, removed, remaining}; a one-line data-health row would make the app-side
+    purge as inspectable as the bot's.

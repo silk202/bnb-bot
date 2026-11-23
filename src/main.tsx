@@ -16,12 +16,19 @@ import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
 import { installConvexFetchRetry } from "@/lib/convex-fetch-resilience";
 import { resolveConvexUrl } from "@/lib/convex-url";
+import { startLocalRetention } from "@/lib/local-retention";
 
 // Install the Convex-backend fetch retry BEFORE any Convex client boots —
 // this is what fixes the preview's "TypeError: Failed to fetch" build error
 // from the auth handshake's unauthenticatedCall hitting a transient proxy
 // drop. See src/lib/convex-fetch-resilience.ts for the full rationale.
 installConvexFetchRetry();
+
+// Client-side retention: one sweep at boot, then every 10 minutes. Only local
+// data that is already unreachable is removed (stale day counters and consumed
+// navigation scratch); positions, ledgers, relay history and settings are never
+// touched. See src/lib/local-retention.ts for the keep/remove contract.
+startLocalRetention();
 
 // Lazy load route components for better code splitting.
 //

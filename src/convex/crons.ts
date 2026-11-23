@@ -56,6 +56,11 @@ crons.cron("trade-chain-watch", "*/3 * * * *", internal.tradeAutoDetection.watch
 // cadence matches BOT_MESSAGE_TTL_MS, so the sweep always deletes the older
 // digest AFTER the next one has replaced it — a chat that leaves digests on
 // never sits in a gap where the dashboard it was reading is gone.
+//
+// TICK ORDER — the digest owns minute 0 of every ten; the purge below is
+// offset to minute 1 (see there). Convex does not order crons that share an
+// offset, so the pair deliberately does NOT share one: "replace, then
+// delete" is a schedule property, not a race.
 crons.cron("telegram-bot-digest", "*/10 * * * *", internal.telegramBot.runDigest, {});
 
 // Copier/sniper signal poller — continuously refreshes the shared
@@ -73,13 +78,20 @@ crons.cron(
 // the bot itself posted (chat boards, digests, trade alerts) and the channel
 // posts once they are older than BOT_MESSAGE_TTL_MS (10 min), so a linked chat
 // always shows the last ten minutes instead of an unbounded scrollback. The
-// digest cron above runs on the same 10-minute window for that reason; the
 // sweep is bounded and batched, removes rows as it goes (no double deletes),
 // and no-ops when the operator turns auto-purge off on /alerts. This is also
 // what keeps the bot's own message volume from feeding DB I/O forever.
+//
+// TICK ORDER — minute 1 of every ten, one minute AFTER the digest cron. Both
+// used to sit on `*/10`, and Convex does not order crons that share an offset,
+// so a tick could delete a 10-minute-old digest seconds before its
+// replacement posted. The offset makes the sequence deterministic: the fresh
+// digest lands at :00, the sweep at :01 deletes only the previous one (11 min
+// old, past the TTL), and the chat never shows an empty dashboard. The tally
+// is stamped on the config row and shown on `/alerts`, the panel and the chip.
 crons.cron(
   "telegram-bot-purge",
-  "*/10 * * * *",
+  "1-59/10 * * * *",
   internal.telegramBot.purgeBotMessages,
   {},
 );
