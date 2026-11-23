@@ -482,7 +482,10 @@ export interface SigConfirmOpts {
  *
  * With `lastValidBlockHeight` supplied it also stops on EXPIRY: the blockhash
  * window is the network's own deadline, and a tx past it can never land, so
- * `expired: true` releases the position instead of holding it for 60 s.
+ * `expired: true` releases the position instead of holding it for 60 s. The
+ * status answer already carries `context.slot`, which bounds the block height,
+ * so the separate `getBlockHeight` probe is only sent when the slot says the
+ * window may be over — a live wait costs one request per pass, not two.
  */
 export async function waitForSigConfirm(
   sig: string,
@@ -493,32 +496,26 @@ export async function waitForSigConfirm(
   const start = Date.now();
   let gap = SIG_POLL_START_MS;
   while (Date.now() - start < timeoutMs) {
-    // Expiry first: a dropped tx is unrecoverable and reported as such even
-    // when the status call below is the one that is failing.
-    if (opts.lastValidBlockHeight !== undefined) {
-      try {
-        const height = await postRpc<number>(rpcUrl, "getBlockHeight", [
-          { commitment: "confirmed" },
-        ]);
-        if (blockhashExpired(height, opts.lastValidBlockHeight)) {
-          return {
-            confirmed: false,
-            err: `blockhash expired at height ${height} (last valid ${opts.lastValidBlockHeight}) — the transaction can no longer land`,
-            expired: true,
-          };
-        }
-      } catch {
-        // No height read this pass — keep polling; the timeout still bounds us.
-      }
-    }
+    // The status probe comes first: it answers "did it land?" and carries
+    // `context.slot`, which is an UPPER BOUND on the block height (a block
+    // height never exceeds its slot). A slot at or below
+    // `lastValidBlockHeight` therefore proves the tx is still inside its
+    // window, so the `getBlockHeight` probe is skipped on every pass where it
+    // cannot change the answer — one request per pass instead of two. The slot
+    // is never used AS the height: skipped slots make it run ahead, and that
+    // would kill a live transaction early.
+    let slot: number | null = null;
     try {
       // `getSignatureStatuses` answers an RpcResponse — `{ context, value }` —
       // with one entry per requested signature. Reading the result as a bare
       // array made `statuses[0]` undefined on every reply, so each landed
       // transaction was reported as "confirmation timeout" after the full wait.
       const json = await postRpc<{
+        context?: { slot?: number };
         value?: Array<null | { err: unknown; confirmationStatus?: string }>;
       }>(rpcUrl, "getSignatureStatuses", [[sig], { searchHistory: true }]);
+      const reported = json?.context?.slot;
+      slot = typeof reported === "number" && Number.isFinite(reported) ? reported : null;
       const st = json?.value?.[0];
       if (st) {
         // The node's own failure object is the useful part of a reverted tx;
@@ -532,7 +529,29 @@ export async function waitForSigConfirm(
         }
       }
     } catch {
-      // RPC hiccup — keep polling until the timeout, at the same growing gap.
+      // RPC hiccup — no slot this pass; the timeout still bounds the wait.
+    }
+
+    // Expiry is still checked when the status call fails (slot stays null), so
+    // an outage cannot hide a dead transaction.
+    if (opts.lastValidBlockHeight !== undefined) {
+      const insideWindow = slot !== null && slot <= opts.lastValidBlockHeight;
+      if (!insideWindow) {
+        try {
+          const height = await postRpc<number>(rpcUrl, "getBlockHeight", [
+            { commitment: "confirmed" },
+          ]);
+          if (blockhashExpired(height, opts.lastValidBlockHeight)) {
+            return {
+              confirmed: false,
+              err: `blockhash expired at height ${height} (last valid ${opts.lastValidBlockHeight}) — the transaction can no longer land`,
+              expired: true,
+            };
+          }
+        } catch {
+          // No height read this pass — keep polling; the timeout still bounds us.
+        }
+      }
     }
     const remaining = timeoutMs - (Date.now() - start);
     await new Promise((r) => setTimeout(r, Math.max(0, Math.min(gap, remaining))));

@@ -814,10 +814,15 @@ const schema = defineSchema(
       // re-pushes when this is behind, so a newly added command appears in
       // Telegram's native menu within one sweep (not up to a week later).
       commandsVersion: v.optional(v.number()),
-      // Auto-purge (default ON): tracked bot and channel messages older than
+      // Auto-purge (default ON): tracked bot messages older than
       // BOT_MESSAGE_TTL_MS (10 min) are deleted by the */10 sweep. Optional so
       // an existing row keeps working — `!== false` is the default.
       autoPurge: v.optional(v.boolean()),
+      // Channel purge scope (default ON, independent of autoPurge): channel
+      // posts older than the TTL are deleted by the same sweep. Kept separate
+      // because the channel is a feed the operator may want to keep, and a
+      // chat-scoped `/purge` must never decide that for it.
+      channelPurge: v.optional(v.boolean()),
       updatedAt: v.number(),
     }).index("by_key", ["key"]),
 

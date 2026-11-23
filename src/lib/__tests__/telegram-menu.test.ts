@@ -258,6 +258,8 @@ const KNOWN_SETTINGS = new Set([
   "unmute",
   "purge_on",
   "purge_off",
+  "channel_on",
+  "channel_off",
 ]);
 
 describe("every inline button answers", () => {
@@ -358,5 +360,30 @@ describe("alerts board — auto-purge is visible and toggleable", () => {
 
   test("the purge window is exactly ten minutes", () => {
     expect(BOT_MESSAGE_TTL_MS).toBe(10 * 60 * 1000);
+  });
+
+  test("channel purge has its own scope and switch", () => {
+    const on = alertsMessage(
+      { alertFanout: true, digestEnabled: true, soundAlerts: true, autoPurge: true },
+      { silent: false },
+    );
+    // Omitted means ON, the same `!== false` default the table uses.
+    expect(on.text).toContain("channel posts older than 10 min are deleted");
+    expect(on.keyboard.flat().find((b) => b.callback_data === "set:channel_off")).toBeDefined();
+
+    const off = alertsMessage(
+      {
+        alertFanout: true,
+        digestEnabled: true,
+        soundAlerts: true,
+        autoPurge: true,
+        channelPurge: false,
+      },
+      { silent: false },
+    );
+    expect(off.text).toContain("channel posts stay");
+    // The chat sweep is untouched by the channel switch.
+    expect(off.text).toContain("bot messages older than 10 min are deleted");
+    expect(off.keyboard.flat().find((b) => b.callback_data === "set:channel_on")).toBeDefined();
   });
 });

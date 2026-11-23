@@ -36,12 +36,20 @@ export interface BotConfig {
   /** /start auto-pair policy — ON (default) = a plain /start links + boots. */
   autoPairOnStart: boolean;
   /**
-   * Auto-purge — ON (default): every message the bot posts to a paired chat or
-   * the channel is tracked and deleted once it is older than
-   * `BOT_MESSAGE_TTL_MS` (10 minutes), so the board always shows the last ten
-   * minutes instead of an unbounded scrollback. Off leaves messages in place.
+   * Auto-purge — ON (default): every message the bot posts to a paired chat is
+   * tracked and deleted once it is older than `BOT_MESSAGE_TTL_MS` (10
+   * minutes), so the board always shows the last ten minutes instead of an
+   * unbounded scrollback. Off is the master switch and stops both scopes.
    */
   autoPurge: boolean;
+  /**
+   * Channel purge — its own scope, ON by default because the channel is a
+   * feed, not a record: channel posts older than `BOT_MESSAGE_TTL_MS` are
+   * deleted by the same every-10-minutes sweep. Off leaves the channel alone
+   * while chat boards keep purging; `/purge` in a chat never touches channel
+   * posts in either position.
+   */
+  channelPurge: boolean;
   updatedAt: number;
 }
 
@@ -51,6 +59,51 @@ export interface BotConfig {
  * inside that window, so a purge never removes the only copy of a number.
  */
 export const BOT_MESSAGE_TTL_MS = 10 * 60 * 1000;
+
+/** Which surface a tracked message came from. */
+export type BotMessageSource = "bot" | "channel";
+
+/** The row shape a purge sweep needs — the Convex table, minus its `_id`. */
+export interface TrackedMessageLite {
+  chatId: string;
+  messageId: number;
+  source: BotMessageSource;
+  sentAt: number;
+}
+
+/** Cutoff for a sweep at `now`: rows at or before it are due for deletion. */
+export function purgeCutoff(now: number, ttlMs: number = BOT_MESSAGE_TTL_MS): number {
+  return now - ttlMs;
+}
+
+/** One sweep's scope: a chat (or all of them) and one surface (or both). */
+export interface PurgeScope {
+  cutoff: number;
+  chatId?: string;
+  source?: BotMessageSource;
+}
+
+/**
+ * The rows a sweep may delete.
+ *
+ * Pure on purpose: the window (exactly ten minutes, never a millisecond early),
+ * the chat scope (`/purge` clears the chat in front of the operator) and the
+ * surface scope (a chat purge must never erase the channel's posts) are pinned
+ * by tests without a Convex runtime, and every sweep — cron, `/purge`, panel —
+ * shares this one rule.
+ */
+export function selectPurgeable<T extends TrackedMessageLite>(
+  rows: readonly T[],
+  scope: PurgeScope,
+): T[] {
+  return rows.filter(
+    (row) =>
+      Number.isFinite(row.sentAt) &&
+      row.sentAt <= scope.cutoff &&
+      (scope.chatId === undefined || row.chatId === scope.chatId) &&
+      (scope.source === undefined || row.source === scope.source),
+  );
+}
 
 /** Telegram inline-keyboard button shape (url vs callback). */
 export interface TgButton {
@@ -1134,9 +1187,13 @@ export function txsMessage(rows: TxLite[], now: number): { text: string; keyboar
 // ---------------------------------------------------------------------------
 
 export function alertsMessage(
-  cfg: Pick<BotConfig, "alertFanout" | "digestEnabled" | "soundAlerts" | "autoPurge">,
+  cfg: Pick<BotConfig, "alertFanout" | "digestEnabled" | "soundAlerts" | "autoPurge"> & {
+    /** Defaults to ON, like the stored setting (`!== false`). */
+    channelPurge?: boolean;
+  },
   chat: Pick<BotChat, "silent">,
 ): { text: string; keyboard: TgKeyboard } {
+  const channelPurge = cfg.channelPurge !== false;
   return {
     text: [
       "🔔 **Alerts & notifications**",
@@ -1145,7 +1202,8 @@ export function alertsMessage(
       `• Dashboard digest: ${cfg.digestEnabled ? "✅ ON — periodic dashboard push" : "❌ OFF"}`,
       `• Sounds: ${cfg.soundAlerts ? "🔔 ON" : "🔇 OFF"}`,
       `• This chat: ${chat.silent ? "🔇 muted" : "🔔 normal"}`,
-      `• Auto-purge: ${cfg.autoPurge ? "🧹 ON — bot and channel messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
+      `• Auto-purge (bot chats): ${cfg.autoPurge ? "🧹 ON — bot messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
+      `• Auto-purge (channel): ${channelPurge ? "🧹 ON — channel posts older than 10 min are deleted" : "❌ OFF — channel posts stay"}`,
     ].join("\n"),
     keyboard: [
       [
@@ -1162,8 +1220,12 @@ export function alertsMessage(
       ],
       [
         {
-          text: cfg.autoPurge ? "🧹 Auto-purge OFF" : "🧹 Auto-purge ON",
+          text: cfg.autoPurge ? "🧹 Bot purge OFF" : "🧹 Bot purge ON",
           callback_data: cfg.autoPurge ? "set:purge_off" : "set:purge_on",
+        },
+        {
+          text: channelPurge ? "📣 Channel purge OFF" : "📣 Channel purge ON",
+          callback_data: channelPurge ? "set:channel_off" : "set:channel_on",
         },
       ],
       [{ text: "🧹 Purge this chat now", callback_data: "cmd:/purge" }],

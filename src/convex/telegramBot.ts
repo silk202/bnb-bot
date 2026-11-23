@@ -31,7 +31,9 @@ import {
   parseTgUpdate,
   parseBotCommand,
   resolveCallbackData,
-  BOT_MESSAGE_TTL_MS,
+  purgeCutoff,
+  selectPurgeable,
+  type BotMessageSource,
   startMessage,
   helpMessage,
   unlinkedMessage,
@@ -271,6 +273,7 @@ export const getConfig = internalQuery({
       soundAlerts: row.soundAlerts,
       autoPairOnStart: row.autoPairOnStart !== false,
       autoPurge: row.autoPurge !== false,
+      channelPurge: row.channelPurge !== false,
       updatedAt: row.updatedAt,
     };
   },
@@ -292,6 +295,8 @@ export const ensureConfig = internalMutation({
       digestEnabled: true,
       alertFanout: true,
       soundAlerts: true,
+      autoPurge: true,
+      channelPurge: true,
       updatedAt: Date.now(),
     });
     return { secret };
@@ -441,8 +446,9 @@ export const setBotPref = internalMutation({
     soundAlerts: v.optional(v.boolean()),
     autoPairOnStart: v.optional(v.boolean()),
     autoPurge: v.optional(v.boolean()),
+    channelPurge: v.optional(v.boolean()),
   },
-  handler: async (ctx, { digestEnabled, alertFanout, soundAlerts, autoPairOnStart, autoPurge }) => {
+  handler: async (ctx, { digestEnabled, alertFanout, soundAlerts, autoPairOnStart, autoPurge, channelPurge }) => {
     const row = await ctx.db
       .query("telegramBotConfig")
       .withIndex("by_key", (q) => q.eq("key", CONFIG_KEY))
@@ -454,6 +460,7 @@ export const setBotPref = internalMutation({
     if (soundAlerts !== undefined) patch.soundAlerts = soundAlerts;
     if (autoPairOnStart !== undefined) patch.autoPairOnStart = autoPairOnStart;
     if (autoPurge !== undefined) patch.autoPurge = autoPurge;
+    if (channelPurge !== undefined) patch.channelPurge = channelPurge;
     await ctx.db.patch(row._id, patch);
     return true;
   },
@@ -770,8 +777,10 @@ export const getBotStatus = query({
     alertFanout: boolean;
     soundAlerts: boolean;
     autoPairOnStart: boolean;
-    /** Auto-purge — tracked bot/channel messages older than 10 min are deleted. */
+    /** Auto-purge — tracked bot messages older than 10 min are deleted. */
     autoPurge: boolean;
+    /** Channel purge — its own switch; channel posts older than 10 min go too. */
+    channelPurge: boolean;
     webhookOk: boolean | null;
     webhookCheckedAt: number | null;
     /** Cached @username — stamped by autoConnectBot and the webhook self-heal cron
@@ -824,6 +833,7 @@ export const getBotStatus = query({
       soundAlerts: row?.soundAlerts ?? true,
       autoPairOnStart: row?.autoPairOnStart !== false,
       autoPurge: row?.autoPurge !== false,
+      channelPurge: row?.channelPurge !== false,
       webhookOk: row?.webhookOk ?? null,
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       botUsername: row?.botUsername ?? null,
@@ -1257,6 +1267,22 @@ export const setAutoPurge = mutation({
   },
 });
 
+/**
+ * Channel-purge switch from the app's Telegram Bot panel — the same scope the
+ * bot's /alerts board flips. Separate from auto-purge on purpose: the channel
+ * is a feed, and clearing chat boards must never be the thing that decides
+ * whether the channel's posts survive.
+ */
+export const setChannelPurge = mutation({
+  args: { enabled: v.boolean(), deviceToken: v.optional(v.string()) },
+  handler: async (ctx, { enabled, deviceToken }) => {
+    await requireOperatorEmail(ctx, deviceTokenFromClient(deviceToken));
+    await ctx.runMutation(internal.telegramBot.ensureConfig, {});
+    await ctx.runMutation(internal.telegramBot.setBotPref, { channelPurge: enabled });
+    return { ok: true, enabled };
+  },
+});
+
 export const sendSimTradeAlert = mutation({
   args: { deviceToken: v.optional(v.string()) },
   // Explicit return type breaks the generated-API inference cycle
@@ -1386,10 +1412,11 @@ export const linkChat = internalMutation({
 // Every message the bot posts (chat boards, digests, trade alerts) and every
 // post to the configured CHANNEL is recorded with its real Telegram message id,
 // then deleted by `purgeBotMessages` once it is older than
-// `BOT_MESSAGE_TTL_MS`. That keeps a chat that gets a board every few minutes
-// readable: it shows the last ten minutes, not an unbounded scrollback. The
-// sweep is bounded, batched and idempotent, and it is a no-op when the
-// operator turns auto-purge off.
+// `BOT_MESSAGE_TTL_MS` (10 min). That keeps a chat that gets a board every few
+// minutes readable: it shows the last ten minutes, not an unbounded scrollback.
+// Chat boards and channel posts are separate SCOPES: `autoPurge` clears chats,
+// `channelPurge` clears the channel, and `/purge` in a chat only ever selects
+// `source: "bot"`. The sweep is bounded, batched and idempotent.
 // ---------------------------------------------------------------------------
 
 /** Record a delivered message so a later sweep can delete it. */
@@ -1417,8 +1444,14 @@ export const recordBotMessage = internalMutation({
  * counted, not retried forever: the Bot API refuses messages older than 48 h.
  */
 export const takeStaleMessages = internalMutation({
-  args: { cutoff: v.number(), limit: v.number(), chatId: v.optional(v.string()) },
-  handler: async (ctx, { cutoff, limit, chatId }) => {
+  args: {
+    cutoff: v.number(),
+    limit: v.number(),
+    chatId: v.optional(v.string()),
+    /** One surface only — `/purge` in a chat must never select channel rows. */
+    source: v.optional(v.union(v.literal("bot"), v.literal("channel"))),
+  },
+  handler: async (ctx, { cutoff, limit, chatId, source }) => {
     const rows = chatId
       ? await ctx.db
           .query("telegramBotMessages")
@@ -1428,7 +1461,14 @@ export const takeStaleMessages = internalMutation({
           .query("telegramBotMessages")
           .withIndex("by_sent", (q) => q.lte("sentAt", cutoff))
           .take(limit);
-    const stale = rows.filter((row) => row.sentAt <= cutoff);
+    // One selection rule (`selectPurgeable`) for the cron sweep, `/purge` and
+    // the panel: the window and both scopes are unit-tested there rather than
+    // re-derived at each call site.
+    const stale = selectPurgeable(rows, {
+      cutoff,
+      ...(chatId ? { chatId } : {}),
+      ...(source ? { source } : {}),
+    });
     for (const row of stale) await ctx.db.delete(row._id);
     return { rows: stale.map((row) => ({ chatId: row.chatId, messageId: row.messageId })) };
   },
@@ -1439,7 +1479,7 @@ async function deleteTrackedMessages(
   ctx: ActionCtx,
   token: string,
   cutoff: number,
-  chatId?: string,
+  scope: { chatId?: string; source?: BotMessageSource } = {},
 ): Promise<{ deleted: number; failed: number }> {
   let deleted = 0;
   let failed = 0;
@@ -1448,7 +1488,8 @@ async function deleteTrackedMessages(
     const batch = await ctx.runMutation(internal.telegramBot.takeStaleMessages, {
       cutoff,
       limit,
-      ...(chatId ? { chatId } : {}),
+      ...(scope.chatId ? { chatId: scope.chatId } : {}),
+      ...(scope.source ? { source: scope.source } : {}),
     });
     if (!batch.rows.length) break;
     for (const msg of batch.rows) {
@@ -1478,18 +1519,37 @@ export const purgeBotMessages = internalAction({
     if (!token) {
       return { ok: false, deleted: 0, failed: 0, skipped: "bot token not configured" };
     }
-    const res = await deleteTrackedMessages(ctx, token, Date.now() - BOT_MESSAGE_TTL_MS);
-    return { ok: true, ...res };
+    const cutoff = purgeCutoff(Date.now());
+    // Two scopes, one sweep. Chat boards clear whenever auto-purge is on;
+    // channel posts are the channel's own feed and follow `channelPurge` — a
+    // chat setting can never erase the channel, and vice versa.
+    const bot = await deleteTrackedMessages(ctx, token, cutoff, { source: "bot" });
+    const channel = cfg.channelPurge
+      ? await deleteTrackedMessages(ctx, token, cutoff, { source: "channel" })
+      : { deleted: 0, failed: 0 };
+    return {
+      ok: true,
+      deleted: bot.deleted + channel.deleted,
+      failed: bot.failed + channel.failed,
+      ...(cfg.channelPurge ? {} : { skipped: "channel purge off" }),
+    };
   },
 });
 
-/** /purge — clear THIS chat's tracked bot messages immediately. */
+/**
+ * /purge — clear THIS chat's tracked **bot** messages immediately.
+ *
+ * Deliberately source-scoped: a `/purge` typed in a chat is the operator
+ * clearing the board in front of them. Channel posts are the channel's record
+ * and are only ever cleared by the channel sweep, never as a side effect of a
+ * chat command.
+ */
 export const purgeChatMessages = internalAction({
   args: { chatId: v.string() },
   handler: async (ctx, { chatId }): Promise<{ ok: boolean; deleted: number; failed: number }> => {
     const token = await resolveBotToken(ctx);
     if (!token) return { ok: false, deleted: 0, failed: 0 };
-    const res = await deleteTrackedMessages(ctx, token, Date.now(), chatId);
+    const res = await deleteTrackedMessages(ctx, token, Date.now(), { chatId, source: "bot" });
     return { ok: true, ...res };
   },
 });
@@ -1950,6 +2010,10 @@ export const handleUpdate = internalAction({
             const on = setting === "purge_on";
             await ctx.runMutation(internal.telegramBot.setBotPref, { autoPurge: on });
             cfg = { ...cfg, autoPurge: on };
+          } else if (setting === "channel_on" || setting === "channel_off") {
+            const on = setting === "channel_on";
+            await ctx.runMutation(internal.telegramBot.setBotPref, { channelPurge: on });
+            cfg = { ...cfg, channelPurge: on };
           }
           const board = alertsMessage(cfg, { silent: chatSilent });
           await reply(board.text, board.keyboard);
@@ -1990,9 +2054,10 @@ export const handleUpdate = internalAction({
             ? [
                 `🧹 Purged ${res.deleted} bot message${res.deleted === 1 ? "" : "s"} from this chat.`,
                 res.failed ? `${res.failed} could not be deleted (older than 48 h).` : "",
+                "Channel posts are left alone by /purge — they follow the channel purge switch above.",
                 cfg.autoPurge
-                  ? "Auto-purge stays on: anything the bot posts is deleted after 10 minutes."
-                  : "Auto-purge is off — new messages will stay.",
+                  ? "Auto-purge stays on: anything the bot posts here is deleted after 10 minutes."
+                  : "Auto-purge is off — new bot messages will stay.",
               ]
                 .filter(Boolean)
                 .join("\n")

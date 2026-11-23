@@ -52,6 +52,7 @@ type BotStatus = {
   autoPairOnStart?: boolean;
   /** Auto-purge: tracked bot/channel messages older than 10 min are deleted. */
   autoPurge?: boolean;
+  channelPurge?: boolean;
   webhookOk?: boolean | null;
   webhookCheckedAt?: number | null;
   botUsername: string | null;
@@ -103,6 +104,7 @@ export function TelegramBotDialog({
   const testAlert = useMutation(api.telegramBot.sendSimTradeAlert);
   const setAutoPair = useMutation(api.telegramBot.setAutoPair);
   const setAutoPurge = useMutation(api.telegramBot.setAutoPurge);
+  const setChannelPurge = useMutation(api.telegramBot.setChannelPurge);
   const saveBotToken = useAction(api.telegramBot.setBotToken);
   const removeBotToken = useMutation(api.telegramBot.clearBotToken);
   const [tokenInput, setTokenInput] = useState("");
@@ -788,6 +790,35 @@ export function TelegramBotDialog({
                   .catch((err) => toast.error(err instanceof Error ? err.message : "Could not update"));
               }}
               aria-label="Toggle auto-purge of bot messages"
+            />
+          </div>
+        )}
+
+        {/* Channel purge scope — separate from the chat sweep on purpose. */}
+        {recognized && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-card/50 p-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">Purge channel posts</div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                ON: trade and signal posts to the channel are deleted after 10 minutes by the same
+                sweep. OFF: the channel keeps its history while linked chats still clear. Kept
+                separate on purpose — /purge in a chat never deletes channel posts.
+              </div>
+            </div>
+            <Switch
+              checked={status?.channelPurge !== false}
+              onCheckedChange={(checked) => {
+                setChannelPurge({ enabled: checked, deviceToken: getDeviceToken() ?? undefined })
+                  .then(() =>
+                    toast.success(
+                      checked
+                        ? "Channel purge on — posts are deleted after 10 minutes"
+                        : "Channel purge off — channel posts stay",
+                    )
+                  )
+                  .catch((err) => toast.error(err instanceof Error ? err.message : "Could not update"));
+              }}
+              aria-label="Toggle purge of channel posts"
             />
           </div>
         )}

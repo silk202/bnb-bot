@@ -203,7 +203,9 @@ describe("waitForSigConfirm — reads the RpcResponse envelope", () => {
 describe("waitForSigConfirm — a dead blockhash fails at the expiry", () => {
   test("past lastValidBlockHeight the wait ends immediately with expired: true", async () => {
     answer = (method) =>
-      method === "getBlockHeight" ? 1_000_042 : { context: { slot: 9 }, value: [null] };
+      method === "getBlockHeight"
+        ? 1_000_042
+        : { context: { slot: 1_000_500 }, value: [null] };
     requests.length = 0;
 
     const startedAt = Date.now();
@@ -214,22 +216,81 @@ describe("waitForSigConfirm — a dead blockhash fails at the expiry", () => {
     expect(out.err).toContain("blockhash expired");
     // 60 s of waiting would have been patience; the tx can never land.
     expect(Date.now() - startedAt).toBeLessThan(1_500);
-    // Expiry is read FIRST, so a dead tx costs one cheap height probe.
-    expect(requests.map((r) => r.method)).toEqual(["getBlockHeight"]);
+    // The status slot is past the window, but a slot is not a height: the real
+    // height is read before the tx is declared dead, then the wait ends.
+    expect(requests.map((r) => r.method)).toEqual(["getSignatureStatuses", "getBlockHeight"]);
   });
 
-  test("inside the window the wait continues, so a slow-landing tx still confirms", async () => {
-    let height = 1_000_000;
+  test("a landed tx costs one request — no height probe at all", async () => {
+    answer = () => ({
+      context: { slot: 1_000_005 },
+      value: [{ slot: 1_000_004, err: null, confirmationStatus: "confirmed" }],
+    });
+    requests.length = 0;
+
+    const out = await waitForSigConfirm(SIG, rpcUrl, 2_000, { lastValidBlockHeight: 1_000_000 });
+
+    expect(out).toEqual({ confirmed: true, err: null, expired: false });
+    expect(requests.map((r) => r.method)).toEqual(["getSignatureStatuses"]);
+  });
+
+  test("inside the window the wait continues without a height read", async () => {
+    let probes = 0;
     answer = (method) => {
-      if (method === "getBlockHeight") return height++;
-      return height >= 1_000_002
-        ? { context: { slot: 12 }, value: [{ slot: 12, err: null, confirmationStatus: "confirmed" }] }
-        : { context: { slot: 12 }, value: [null] };
+      if (method === "getBlockHeight") throw new Error("height read must be skipped inside the window");
+      probes += 1;
+      return probes >= 3
+        ? {
+            context: { slot: 1_000_000 },
+            value: [{ slot: 999_990, err: null, confirmationStatus: "confirmed" }],
+          }
+        : { context: { slot: 1_000_000 }, value: [null] };
     };
+    requests.length = 0;
 
     const out = await waitForSigConfirm(SIG, rpcUrl, 8_000, { lastValidBlockHeight: 1_000_010 });
 
     expect(out).toEqual({ confirmed: true, err: null, expired: false });
+    // `context.slot` <= lastValidBlockHeight proves the height is still inside
+    // the window, so the extra `getBlockHeight` probe is never sent.
+    expect(requests.map((r) => r.method)).toEqual([
+      "getSignatureStatuses",
+      "getSignatureStatuses",
+      "getSignatureStatuses",
+    ]);
+  }, 15_000);
+
+  test("the slot is never used AS the height — a skipped slot cannot kill a live tx", async () => {
+    answer = (method) =>
+      method === "getBlockHeight"
+        ? 999_999 // still inside lastValidBlockHeight
+        : { context: { slot: 1_000_200 }, value: [null] }; // slot already past it
+    requests.length = 0;
+
+    const out = await waitForSigConfirm(SIG, rpcUrl, 40, { lastValidBlockHeight: 1_000_000 });
+
+    expect(out).toEqual({ confirmed: false, err: "confirmation timeout", expired: false });
+    expect(requests.map((r) => r.method)).toContain("getBlockHeight");
+  });
+
+  test("a failing status probe cannot hide the expiry", async () => {
+    // The node answers the height but 503s the status call: the expiry check
+    // must still run, because a dead tx is dead whatever the status API says.
+    respondWith = (method) =>
+      method === "getSignatureStatuses"
+        ? new Response("upstream down", {
+            status: 503,
+            headers: { "content-type": "text/plain" },
+          })
+        : null;
+    answer = () => 1_000_042;
+    requests.length = 0;
+
+    const out = await waitForSigConfirm(SIG, rpcUrl, 60_000, { lastValidBlockHeight: 1_000_000 });
+
+    expect(out.expired).toBe(true);
+    expect(requests.map((r) => r.method)).toContain("getBlockHeight");
+    respondWith = null;
   });
 });
 

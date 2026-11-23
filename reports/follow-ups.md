@@ -1865,3 +1865,119 @@ the native menu matches the board.
 9. **Refresh the Trade price cache on a cron.** `/prices`, `/markets` and
    `/trade` read a cache that only refreshes while a UI (or the bot dashboard)
    opens it, so a quiet period makes the bot say "rates not loaded".
+
+---
+
+## Round 26 — the channel purge gets its own scope, and a passing confirmation stops paying for a height probe (2026-11-23)
+
+Four items: scope the channel purge, stop the second RPC in the confirmation
+loop, put the purge window under direct test, and re-rank the follow-ups.
+
+### 1. Channel purge and chat purge are separate scopes
+
+Round 25 tracked channel posts but deleted them under the same `autoPurge` flag
+as chat boards. That couples two different things: a chat board is scrollback
+that should not accumulate, while the channel is a feed the operator may want
+to keep. `telegramBotConfig.channelPurge` (default ON, `!== false`) now scopes
+channel posts on their own:
+
+- `purgeBotMessages` runs two source-scoped passes — `source: "bot"` whenever
+  `autoPurge` is on, `source: "channel"` only when `channelPurge` is on.
+  `autoPurge` stays the master switch.
+- `/purge` in a chat is `{ chatId, source: "bot" }`: it can no longer select a
+  channel row even if a chat id and the channel id ever coincided, and its reply
+  says so.
+- `/alerts` carries both switches (`set:purge_on|off`, `set:channel_on|off`),
+  and the app's Telegram Bot panel gets the matching `setChannelPurge` switch.
+- `takeStaleMessages` accepts `source`, and ONE pure rule (`selectPurgeable`)
+  decides what any sweep may delete — cron, `/purge` and the panel share it.
+
+### 2. One RPC per confirmation pass
+
+`waitForSigConfirm` used to read `getBlockHeight` first on every pass whenever
+an expiry was supplied. But `getSignatureStatuses` already answers with
+`context.slot`, and a block height can never exceed its slot — so a slot at or
+below `lastValidBlockHeight` PROVES the tx is still inside its window. The
+status probe now runs first and the height probe is only sent when the slot is
+missing (status failure) or past the window:
+
+- landed tx: 1 request (was 2) — it returns before any height read;
+- waiting tx inside its window: 1 request per pass (was 2);
+- tx past the window: status + height, then `expired: true` immediately, so the
+  fast-fail behaviour from round 25 is preserved (it now costs two cheap reads
+  on the dead pass instead of one);
+- a failing status call leaves the slot null, so the height probe still runs:
+  an RPC outage cannot hide a dead blockhash (pinned by a 503 wire test).
+
+The slot is deliberately NOT used as the height, which is what round 25's
+follow-up #2 suggested. Skipped slots make the slot run AHEAD of the block
+height, so substituting it would kill a live transaction early; the slot is an
+upper bound, and this round uses it only as one.
+
+### 3. The purge window and its scope are unit-tested
+
+New `src/lib/__tests__/bot-purge-window.test.ts` (11 tests) pins `purgeCutoff`
+and `selectPurgeable`: exactly ten minutes old is due and 1 ms younger is not; a
+message posted now survives; future timestamps (clock skew) and non-finite
+`sentAt` are never guessed at; chat scope and surface scope; `/purge`'s
+`{ chat, bot }` scope cannot see a channel row; and a three-day-old row is still
+selected, so a Telegram-refused delete cannot pin a row in the table forever.
+`telegram-menu.test.ts` also pins the channel switch (ON when the field is
+omitted, OFF leaves the chat sweep untouched).
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 793 pass / 0 fail across 67 files (778 → 793: +11 purge-window
+  tests, +3 confirmation wire tests, +1 channel-switch test).
+- `eslint` on the eight touched files: 18 problems, exactly the pre-existing
+  baseline (4 dialog, 12 convex bot, 2 lib bot). The one new unused-import
+  error (`BOT_MESSAGE_TTL_MS` after the cutoff moved into `purgeCutoff`) was
+  fixed rather than suppressed, and the new test file lints clean.
+- NOT executed: the Convex deploy/cron (deployment still disabled by the
+  free-plan ceiling), any live Telegram call (no token, no outbound Telegram in
+  this sandbox), and any funded devnet send.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 26, brainstormed (none started)
+
+1. **Prove confirmation + expiry on one funded devnet send** (round 25 #1).
+   Still waiting on the faucet claim; the wire tests pin the logic, not the
+   network.
+2. **Redact URLs inside error bodies** (round 25 #3). `postRpc` redacts the
+   endpoint, but a node's error text can echo a keyed URL.
+3. **Drop tracked rows older than 48 h without a send** (round 25 #4). With
+   auto-purge off for a long time, every sweep re-counts the same refused
+   deletes; the Bot API will never delete them.
+4. **Add a `(chatId, sentAt)` composite index** (round 25 #5). `/purge` filters
+   after `by_chat.take(100)`, so >100 fresh messages in one chat can starve its
+   older rows in a single pass.
+5. **Cache the height once the slot passes `lastValidBlockHeight`.** Inside the
+   window the height read is now free; past it, a sweep can read the height on
+   every remaining pass. One read per `SIG_POLL_START_MS` is enough.
+6. **Surface partial expiry reads** (round 25 #7): carry a
+   `heightReadsFailed` count so a caller can tell "still valid" from "could not
+   check".
+7. **Rebroadcast signed bytes after ~3 misses** (round 24 #4). `maxRetries: 0`
+   plus an idempotent signed tx means a resend is free while the blockhash is
+   valid.
+8. **Refresh the Trade price cache on a cron** (round 25 #9). A quiet period
+   otherwise makes `/prices` and `/trade` say "rates not loaded".
+9. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+   #6): the parity test only walks builder keyboards today.
+10. **Show purge telemetry on `/alerts`** — last sweep time, deleted/failed
+    counts and the tracked-row count — so an operator can tell "nothing to
+    purge" from "the sweep is not running" without opening Convex.
+11. **Reconcile the digest TTL with the purge TTL.** The digest cron is every
+    15 min and the purge window is 10 min, so a digest can be deleted before
+    the next one replaces it; either give digests a longer TTL or align the
+    schedules.
+12. **Track channel ids, not one channel.** `trackChannelMessage` reads
+    `TELEGRAM_CHAT_ID` at send time; if alert routing ever supports more than
+    one channel, the purge needs per-target ids rather than one ambient value.
