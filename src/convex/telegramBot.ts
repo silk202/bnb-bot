@@ -33,7 +33,7 @@ import {
   resolveCallbackData,
   purgeCutoff,
   purgeSkipNote,
-  shouldAlertPurgeFailures,
+  purgeAlertPlan,
   purgeFailureAlert,
   purgeFailureSummary,
   classifyPurgeFailure,
@@ -79,6 +79,7 @@ import {
   type BotChat,
   type BotConfig,
   type BotCommand,
+  type PurgeAlertInfo,
   type PurgeTelemetry,
   type SessionLite,
   type MetricsLite,
@@ -299,6 +300,8 @@ export const getConfig = internalQuery({
       channelPurge: row.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row),
       purgeAlertedAt: row.purgeAlertedAt,
+      purgeAlertsSent: row.purgeAlertsSent,
+      purgeFaultSince: row.purgeFaultSince,
       updatedAt: row.updatedAt,
     };
   },
@@ -1611,10 +1614,13 @@ export const stampPurgeRun = internalMutation({
       purgeLastFailed: failed,
       purgeLastRetrying: retrying,
       purgeLastSkipped: skipped,
-      // A clean sweep ends the fault, so the alert throttle starts fresh: the
-      // NEXT fault must alert on its second failing sweep, not wait out an
-      // hour left over from the previous one. `undefined` deletes the field.
-      ...(failed === 0 ? { purgeAlertedAt: undefined } : {}),
+      // A clean sweep ends the fault, so the alert throttle AND the cap start
+      // fresh: the NEXT fault must alert on its second failing sweep, and get
+      // its own six alerts, not inherit the previous fault's stamps.
+      // `undefined` deletes the fields.
+      ...(failed === 0
+        ? { purgeAlertedAt: undefined, purgeAlertsSent: undefined, purgeFaultSince: undefined }
+        : {}),
     };
     const row = await ctx.db
       .query("telegramBotConfig")
@@ -1638,19 +1644,26 @@ export const stampPurgeRun = internalMutation({
 });
 
 /**
- * Record that a fault alert went out, so the next sweeps can be throttled.
- * Written BEFORE the sends on purpose: if the alert path crashes halfway, the
- * chats that were spared a repeat should not be re-spammed ten minutes later.
- * A clean sweep clears the stamp via `stampPurgeRun`.
+ * Record that a fault alert went out, so the next sweeps can be throttled and
+ * the cap can count. Written BEFORE the sends on purpose: if the alert path
+ * crashes halfway, the chats that were spared a repeat should not be re-spammed
+ * ten minutes later, and a crash must not hand the fault a fresh sixth alert.
+ * A clean sweep clears all three stamps via `stampPurgeRun`.
  */
 export const markPurgeAlert = internalMutation({
-  args: { at: v.number() },
-  handler: async (ctx, { at }) => {
+  args: { at: v.number(), alertsSent: v.number(), faultSince: v.number() },
+  handler: async (ctx, { at, alertsSent, faultSince }) => {
     const row = await ctx.db
       .query("telegramBotConfig")
       .withIndex("by_key", (q) => q.eq("key", CONFIG_KEY))
       .first();
-    if (row) await ctx.db.patch(row._id, { purgeAlertedAt: at });
+    if (row) {
+      await ctx.db.patch(row._id, {
+        purgeAlertedAt: at,
+        purgeAlertsSent: alertsSent,
+        purgeFaultSince: faultSince,
+      });
+    }
     return { ok: true };
   },
 });
@@ -1658,9 +1671,9 @@ export const markPurgeAlert = internalMutation({
 /**
  * Ping every linked chat when two sweeps in a row could not delete. Best-effort
  * by construction: an undeliverable alert must never turn a sweep into a
- * failure. A fault that persists re-alerts at most once per
- * `PURGE_ALERT_REPEAT_MS` (hourly, not every 10-minute sweep) and stops on the
- * first clean sweep.
+ * failure. `plan` already decided repetition (hourly) and the cap, and it is
+ * the single source of the wording — the bell entry and the chat message can
+ * never disagree about which repeat this is.
  */
 async function alertPurgeFailures(
   ctx: ActionCtx,
@@ -1669,20 +1682,21 @@ async function alertPurgeFailures(
   previous: PurgeTelemetry | null,
   current: PurgeTelemetry,
   now: number,
+  plan: PurgeAlertInfo,
 ): Promise<number> {
   // The bell entry is the channel that still works when Telegram itself is the
   // broken one, so it is written FIRST and independently of any chat existing.
   try {
     await ctx.runMutation(internal.notifications.recordBotHealthAlert, {
       title: "Message sweep failing",
-      body: purgeFailureSummary(previous, current, now),
+      body: purgeFailureSummary(previous, current, now, plan),
     });
   } catch {
     // Advisory only — the stamped tally stays the record of the fault.
   }
   const chats = await ctx.runQuery(internal.telegramBot.listChats, { activeOnly: true });
   if (!chats.length) return 0;
-  const text = purgeFailureAlert(previous, current, now);
+  const text = purgeFailureAlert(previous, current, now, plan);
   let sent = 0;
   for (const chat of chats) {
     try {
@@ -1789,13 +1803,25 @@ export const purgeBotMessages = internalAction({
     const at = await stamp(deleted, failed, retrying);
 
     // `cfg.purgeLast` was read before this sweep ran, so it IS the previous
-    // tally — a two-in-a-row fault needs no extra stored state. The throttle
-    // needs one number that a tally cannot carry (when we last alerted), which
-    // `markPurgeAlert` stores; `undefined` means no alert is outstanding.
+    // tally — a two-in-a-row fault needs no extra stored state. The count and
+    // the fault's start are what a tally cannot carry, and `markPurgeAlert`
+    // stores them together with the throttle stamp.
     let alerted = 0;
-    if (shouldAlertPurgeFailures(cfg.purgeLast, failed, cfg.purgeAlertedAt ?? null, at)) {
+    const plan = purgeAlertPlan({
+      previous: cfg.purgeLast,
+      failed,
+      lastAlertedAt: cfg.purgeAlertedAt ?? null,
+      alertsSent: cfg.purgeAlertsSent,
+      faultSince: cfg.purgeFaultSince ?? null,
+      now: at,
+    });
+    if (plan.alert) {
       try {
-        await ctx.runMutation(internal.telegramBot.markPurgeAlert, { at });
+        await ctx.runMutation(internal.telegramBot.markPurgeAlert, {
+          at,
+          alertsSent: plan.number,
+          faultSince: plan.since ?? at,
+        });
       } catch {
         // A failed stamp must not silence the alert: worst case it repeats on
         // the next sweep, which is better than never telling the operator.
@@ -1807,6 +1833,7 @@ export const purgeBotMessages = internalAction({
         cfg.purgeLast ?? null,
         { at, deleted, failed, skipped: null },
         at,
+        plan,
       );
     }
 

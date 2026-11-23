@@ -18,14 +18,15 @@ import {
   BOT_MESSAGE_TTL_MS,
   CHANNEL_MESSAGE_TTL_MS,
   classifyPurgeFailure,
+  PURGE_ALERT_CAP,
   PURGE_ALERT_REPEAT_MS,
+  purgeAlertPlan,
   purgeCutoff,
   purgeFailureAlert,
   purgeFailureSummary,
   purgeSkipNote,
   purgeTelemetryLine,
   selectPurgeable,
-  shouldAlertPurgeFailures,
   type TrackedMessageLite,
 } from "../telegramBot";
 
@@ -213,30 +214,76 @@ describe("purgeSkipNote — a scope being off is not a skipped sweep", () => {
 
 describe("purge failure alert — two sweeps in a row, real numbers", () => {
   test("one failing sweep is not yet an alert", () => {
-    expect(shouldAlertPurgeFailures(undefined, 2)).toBe(false);
+    expect(purgeAlertPlan({ failed: 2 }).alert).toBe(false);
     expect(
-      shouldAlertPurgeFailures({ at: NOW - 600_000, deleted: 3, failed: 0, skipped: null }, 2),
+      purgeAlertPlan({
+        previous: { at: NOW - 600_000, deleted: 3, failed: 0, skipped: null },
+        failed: 2,
+      }).alert,
     ).toBe(false);
   });
 
-  test("a second consecutive failing sweep alerts, a clean one clears it", () => {
+  test("a second consecutive failing sweep alerts with the fault's start", () => {
     const previous = { at: NOW - 600_000, deleted: 1, failed: 2, skipped: null };
-    expect(shouldAlertPurgeFailures(previous, 3)).toBe(true);
-    expect(shouldAlertPurgeFailures(previous, 0)).toBe(false);
-    expect(shouldAlertPurgeFailures({ at: NOW, deleted: 0, failed: 0, skipped: "auto-purge off" }, 3)).toBe(
-      false,
-    );
+    expect(purgeAlertPlan({ previous, failed: 3, now: NOW })).toMatchObject({
+      alert: true,
+      kind: "first",
+      number: 1,
+      cap: PURGE_ALERT_CAP,
+      since: previous.at,
+    });
+    expect(purgeAlertPlan({ previous, failed: 0, now: NOW }).alert).toBe(false);
+    expect(
+      purgeAlertPlan({
+        previous: { at: NOW, deleted: 0, failed: 0, skipped: "auto-purge off" },
+        failed: 3,
+      }).alert,
+    ).toBe(false);
   });
 
   test("a persisting fault re-alerts hourly, not every sweep", () => {
     const previous = { at: NOW - 600_000, deleted: 0, failed: 2, skipped: null };
-    expect(shouldAlertPurgeFailures(previous, 3, NOW - 60 * 60 * 1000, NOW)).toBe(true);
-    expect(shouldAlertPurgeFailures(previous, 3, NOW - 10 * 60 * 1000, NOW)).toBe(false);
-    expect(shouldAlertPurgeFailures(previous, 3, NOW - PURGE_ALERT_REPEAT_MS + 1, NOW)).toBe(
-      false,
-    );
+    const repeat = (lastAlertedAt: number, alertsSent = 1) =>
+      purgeAlertPlan({ previous, failed: 3, lastAlertedAt, alertsSent, now: NOW });
+    expect(repeat(NOW - 60 * 60 * 1000)).toMatchObject({
+      alert: true,
+      kind: "repeat",
+      number: 2,
+    });
+    expect(repeat(NOW - 10 * 60 * 1000).alert).toBe(false);
+    expect(repeat(NOW - PURGE_ALERT_REPEAT_MS + 1).alert).toBe(false);
     // No stamp at all (first fault, or a clean sweep cleared it) alerts at once.
-    expect(shouldAlertPurgeFailures(previous, 3, null, NOW)).toBe(true);
+    expect(purgeAlertPlan({ previous, failed: 3, lastAlertedAt: null, now: NOW }).alert).toBe(true);
+  });
+
+  test("a fault is capped: the sixth alert is the last, then the sweep goes quiet", () => {
+    const previous = { at: NOW - 600_000, deleted: 0, failed: 2, skipped: null };
+    const last = purgeAlertPlan({
+      previous,
+      failed: 3,
+      lastAlertedAt: NOW - 2 * 60 * 60 * 1000,
+      alertsSent: PURGE_ALERT_CAP - 1,
+      now: NOW,
+    });
+    expect(last).toMatchObject({ alert: true, kind: "repeat", number: PURGE_ALERT_CAP });
+    expect(
+      purgeAlertPlan({
+        previous,
+        failed: 3,
+        lastAlertedAt: NOW - 2 * 60 * 60 * 1000,
+        alertsSent: PURGE_ALERT_CAP,
+        now: NOW,
+      }),
+    ).toMatchObject({ alert: false, kind: "capped", number: PURGE_ALERT_CAP });
+    // A clean sweep clears the count, so a new fault gets its own six.
+    expect(purgeAlertPlan({ previous, failed: 3, alertsSent: 0, now: NOW }).alert).toBe(true);
+  });
+
+  test("a round-31 row (stamp, no counter) counts as one alert already sent", () => {
+    const previous = { at: NOW - 600_000, deleted: 0, failed: 2, skipped: null };
+    expect(
+      purgeAlertPlan({ previous, failed: 3, lastAlertedAt: NOW - 2 * 60 * 60 * 1000, now: NOW }),
+    ).toMatchObject({ alert: true, kind: "repeat", number: 2 });
   });
 
   test("the latest tally shows how many refusals are retrying", () => {
@@ -263,6 +310,55 @@ describe("purge failure alert — two sweeps in a row, real numbers", () => {
     expect(summary).not.toContain("**");
     expect(summary).toContain("Previous: 10m ago · 1 deleted · 2 failed");
     expect(purgeFailureAlert(previous, current, NOW)).toContain(summary);
+  });
+});
+
+describe("purge failure wording — a repeat never claims 'two sweeps in a row'", () => {
+  const current = { at: NOW - 60_000, deleted: 0, failed: 3, retrying: 2, skipped: null };
+
+  test("a first alert explains the trigger and the usual cause", () => {
+    const first = purgeFailureSummary(undefined, current, NOW, {
+      number: 1,
+      cap: PURGE_ALERT_CAP,
+      since: null,
+    });
+    expect(first).toContain("Two sweeps in a row");
+    expect(first).toContain("Usual cause");
+  });
+
+  test("a repeat says which repeat it is and how long the fault has run", () => {
+    const repeat = purgeFailureSummary(undefined, current, NOW, {
+      number: 3,
+      cap: PURGE_ALERT_CAP,
+      since: NOW - 50 * 60 * 1000,
+    });
+    expect(repeat).not.toContain("Two sweeps in a row");
+    expect(repeat).toContain("still failing");
+    expect(repeat).toContain(`repeat alert 3 of ${PURGE_ALERT_CAP}`);
+    expect(repeat).toContain("failing for 50m");
+    expect(repeat).toContain("0 deleted · 3 failed · 2 retrying");
+    expect(repeat).toContain("2 refused messages are still tracked");
+    expect(repeat).not.toContain("Usual cause");
+  });
+
+  test("the capped alert says the repeats stop; the header follows the fault's age", () => {
+    const last = purgeFailureSummary(undefined, current, NOW, {
+      number: PURGE_ALERT_CAP,
+      cap: PURGE_ALERT_CAP,
+      since: NOW - 5 * 60 * 60 * 1000,
+    });
+    expect(last).toContain("last automatic alert");
+    expect(last).toContain("failing for 5h");
+    expect(
+      purgeFailureAlert(undefined, current, NOW, { number: 1, cap: PURGE_ALERT_CAP, since: null }),
+    ).toContain("**Message sweep is failing**");
+    expect(
+      purgeFailureAlert(undefined, current, NOW, {
+        number: 2,
+        cap: PURGE_ALERT_CAP,
+        since: NOW - 70 * 60 * 1000,
+      }),
+    ).toContain("**Message sweep still failing**");
   });
 });
 

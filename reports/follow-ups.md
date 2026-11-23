@@ -2568,3 +2568,130 @@ draining or stuck.
     #6).
 16. **Track multiple channel ids** (round 26 #12).
 17. **Show the local sweep in Settings** (round 28 #15).
+
+## Round 32 — the repeat alert tells the truth, and a long fault goes quiet (2026-11-23)
+
+Two round-31 follow-ups, both about the same failure mode: an alert that keeps
+talking after it has stopped being useful. The hourly ping still opened with
+"Two sweeps in a row could not delete…" on its sixth send, and nothing ever
+ended a fault that could not be fixed.
+
+### 1. A repeat no longer claims it is the first alert
+
+The body was written for the first alert and reused verbatim every hour after
+it. On the fourth ping that is simply false: it was not two sweeps, it was
+forty, and the "Usual cause" paragraph was a repeat of something the operator
+had already read three times.
+
+`shouldAlertPurgeFailures` (boolean) became `purgeAlertPlan`, which returns the
+decision AND the wording inputs in one shape:
+
+- `alert` — send now? False covers "not yet" (first failing sweep), "too soon"
+  (inside the hourly window) and "capped";
+- `kind` — `first` | `repeat` | `capped` | `silent`;
+- `number` / `cap` — which repeat this is, out of how many the fault may send;
+- `since` — when the fault began, from the stored stamp or the previous failing
+  sweep's own timestamp.
+
+Wording follows the plan, and both channels get it from the same builders:
+
+- first: `Two sweeps in a row could not delete messages from Telegram.` plus
+  the usual-cause paragraph, header `⚠️ Message sweep is failing`;
+- repeat: `The sweep is still failing — repeat alert 3 of 6, failing for 1h
+  50m.` then the Previous/Latest tallies and the retrying consequence. The
+  cause paragraph is dropped — it was in the first alert, and it is what makes
+  an hourly message feel like spam. Header `⚠️ Message sweep still failing`;
+- the sixth (cap) send adds: `This is the last automatic alert for this fault.
+  Sweeps keep retrying, and /alerts keeps showing the tally until one
+  succeeds.`
+
+`fmtDuration` renders the span ("45m", "2h 10m", "3d 4h") without the `ago`
+suffix that `fmtAgo` carries, so the sentence cannot come out as "failing for
+2h ago".
+
+### 2. A fault is capped at six alerts
+
+Hourly repetition is survivable for an afternoon and wrong for a month. A bot
+removed from a group nobody watches would otherwise ping every linked chat
+every hour for as long as the row exists — the exact behaviour operators mute,
+which also mutes the next real fault.
+
+- `PURGE_ALERT_CAP = 6`: an hour apart, that covers a working day.
+- `purgeAlertsSent` stores how many alerts the current fault has sent;
+  `purgeFaultSince` stores when it began, so the wording survives a config read
+  that no longer has the original tally.
+- `markPurgeAlert` writes the count, the fault start and the throttle stamp
+  together, BEFORE the sends — a crash mid-alert cannot buy the fault a fresh
+  sixth alert.
+- At the cap, `purgeAlertPlan` returns `kind: "capped"` and the sweep alerts
+  nobody. It still stamps the tally every ten minutes, so `/alerts`, the header
+  chip and the dialog keep showing the live failure; only the interruption
+  stops.
+- A clean sweep clears `purgeAlertedAt`, `purgeAlertsSent` and
+  `purgeFaultSince`, so the next fault alerts on its second failing sweep and
+  gets its own six.
+- Migration: a round-31 row has `purgeAlertedAt` but no counter. An outstanding
+  stamp is counted as one alert already sent, so upgrading cannot reset the cap
+  — the next alert is correctly a repeat, not a fresh "first". Either way the
+  first clean sweep clears the field.
+
+The bell entry keeps its stable title ("Message sweep failing") across repeats
+because its one-hour dedupe is title-keyed; the repeat wording lives in the
+body. Changing the title per repeat would silently defeat that dedupe.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 836 pass / 0 fail across 69 files (831 → +5: first-alert plan,
+  capped plan, round-31 migration, repeat wording, capped wording/header).
+- `eslint` on the four touched files: 14 problems — 12 unused imports and 2
+  `\_` escapes, all pre-existing (the round-30 baseline for these files), none
+  on changed lines.
+- NOT executed: the Convex deploy (free-plan ceiling), so the two new fields,
+  the cap and the migration path are code-only; no live hourly cadence and no
+  browser view of the bell body.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 32, brainstormed (none started)
+
+1. **Prove the capped cadence on a live deployment** (round 31 #1 extends to
+   the cap): break delete rights, watch alert 1…6 land an hour apart, watch
+   sweep 7 go silent while the tally keeps changing, restore rights, watch the
+   retry drain and all three stamps clear.
+2. **Show the muted state, not just the failure.** After the cap, `/alerts` and
+   the chip show failures with no alert coming. A `purgeAlertsSent >= cap`
+   suffix ("alerts paused after 6 — one sweep must succeed") on the last-sweep
+   line is the honest counterpart to the cap and needs no codegen.
+3. **Add a `bot_health` notification kind** (round 30 #2) — still needs
+   `convex codegen`; the bell's hourly dedupe already matches the throttle.
+4. **Bound retry attempts per row** (round 30 #4) — a `chat not found` row is
+   retried until the 48 h retention backstop; `retrying` makes it visible, an
+   `attempts` counter would settle it sooner.
+5. **Keep a short sweep history** (round 30 #5) — last-only cannot show "the
+   sweep stopped running six hours ago".
+6. **Escalate once instead of only stopping.** The cap ends the noise, but an
+   unfixed fault is still unfixed; a single "this has failed since 09:10"
+   summary on the next app open (not on a timer) would close that gap.
+7. **Make the bell's dedupe explicit.** It is keyed on the title and hard-coded
+   to one hour; if the title ever carries the repeat number, pass the window in
+   instead of relying on the title staying stable.
+8. **Show `retrying` in the chip's label** (round 31 #6) when a backlog
+   persists — needs a threshold so the chip does not flicker on one 5xx.
+9. **Contract test for the backend keep-list** (round 28 #5).
+10. **Expired `operatorDeviceTrust` sweep** (round 28 #6; needs an index).
+11. **Prove the cached height path on a funded send** (round 27 #1).
+12. **`heightReadsFailed` count** (round 25 #7).
+13. **Redact URLs inside RPC error bodies** (round 25 #3).
+14. **Add a `(chatId, sentAt)` composite index** (round 25 #5).
+15. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+16. **Operator-selectable digest cadence** (round 27 #11).
+17. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6).
+18. **Track multiple channel ids** (round 26 #12).
+19. **Show the local sweep in Settings** (round 28 #15).

@@ -838,6 +838,13 @@ const schema = defineSchema(
       // When a sweep-fault alert was last sent, so a persisting fault repeats
       // hourly instead of every sweep. Cleared by the first clean sweep.
       purgeAlertedAt: v.optional(v.number()),
+      // How many alerts this fault has sent (1..PURGE_ALERT_CAP). At the cap the
+      // sweep stops alerting altogether instead of pinging forever; the tally
+      // keeps being stamped, so /alerts still shows the live failure.
+      purgeAlertsSent: v.optional(v.number()),
+      // When the current fault began (the first failing sweep), for the
+      // "failing for 2h 10m" wording on repeats. Cleared with the rest.
+      purgeFaultSince: v.optional(v.number()),
       updatedAt: v.number(),
     }).index("by_key", ["key"]),
 

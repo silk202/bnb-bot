@@ -91,6 +91,14 @@ export interface BotConfig {
    * clean sweep clears it. Never displayed.
    */
   purgeAlertedAt?: number;
+  /**
+   * How many alerts this fault has sent (1..`PURGE_ALERT_CAP`). The cap is what
+   * finally silences a fault that never heals. Absent on a row stamped before
+   * round 32, where a set `purgeAlertedAt` still counts as one sent.
+   */
+  purgeAlertsSent?: number;
+  /** When the current fault began — the first failing sweep — for the wording. */
+  purgeFaultSince?: number;
   updatedAt: number;
 }
 
@@ -223,34 +231,105 @@ export function purgeSkipNote(input: {
 export const PURGE_ALERT_REPEAT_MS = 60 * 60 * 1000;
 
 /**
+ * How many alerts one persisting fault may send before it falls silent.
+ *
+ * Hourly is survivable for an afternoon; indefinite is not. A bot that lost
+ * its rights in a group nobody watches would otherwise ping every linked chat
+ * every hour for as long as the row exists. Six alerts covers a working day,
+ * and the sixth SAYS it is the last, so silence is never mistaken for a fix.
+ * Only a clean sweep resets the count.
+ */
+export const PURGE_ALERT_CAP = 6;
+
+/** What the wording needs to know about this alert's place in the fault. */
+export interface PurgeAlertInfo {
+  /** 1-based number of this alert; 1 is the first. */
+  number: number;
+  /** Alerts this fault may send in total. */
+  cap: number;
+  /** When the fault began, when the sweep can know it. */
+  since: number | null;
+}
+
+/** One sweep's alert decision — and the inputs its wording is built from. */
+export interface PurgeAlertPlan extends PurgeAlertInfo {
+  /** Send an alert now? False covers "not yet", "too soon" and "capped". */
+  alert: boolean;
+  kind: "silent" | "first" | "repeat" | "capped";
+}
+
+/**
+ * Decide whether this sweep alerts, and which wording it gets.
+ *
  * Two sweeps in a row that could not delete anything Telegram should have
  * accepted are a fault, not a blip: the bot was removed from the chat/channel
  * or lost its delete/admin rights. One failing sweep can be a transient 5xx;
  * the SECOND means the next one will fail the same way.
  *
- * `lastAlertedAt` throttles a fault that DOES persist: the first alert still
- * goes out on the second failing sweep, then the next one only after
- * `PURGE_ALERT_REPEAT_MS`. Without it a broken bot pings every chat six times
- * an hour. A clean sweep clears the stamp, so a new fault is never silenced by
- * an hour-old alert from the previous one.
+ * `lastAlertedAt` throttles a fault that DOES persist: the first alert goes out
+ * on the second failing sweep, then the next one only after
+ * `PURGE_ALERT_REPEAT_MS` — an hour, not six alerts an hour. `alertsSent` then
+ * CAPS the whole fault at `PURGE_ALERT_CAP` sends, so a fault that never heals
+ * stops talking instead of pinging forever. A clean sweep clears all three
+ * inputs, so a new fault is never silenced by the previous one's count.
+ *
+ * `kind` is part of the result because the wording differs: a first alert
+ * explains the usual cause, a repeat must never claim "two sweeps in a row"
+ * when the fault is hours old, and the cap's last send has to say it is final.
  */
-export function shouldAlertPurgeFailures(
-  previous: PurgeTelemetry | null | undefined,
-  failed: number,
-  lastAlertedAt: number | null = null,
-  now?: number,
-): boolean {
-  if (!(failed > 0)) return false;
-  if (!((previous?.failed ?? 0) > 0)) return false;
+export function purgeAlertPlan(input: {
+  previous?: PurgeTelemetry | null;
+  failed: number;
+  lastAlertedAt?: number | null;
+  alertsSent?: number;
+  faultSince?: number | null;
+  now?: number;
+}): PurgeAlertPlan {
+  const cap = PURGE_ALERT_CAP;
+  const lastAlertedAt = input.lastAlertedAt ?? null;
+  const alerting = lastAlertedAt !== null && Number.isFinite(lastAlertedAt);
+  // A round-31 row carries `purgeAlertedAt` but no counter. An outstanding
+  // stamp means at least one alert DID go out, so the next one is a repeat —
+  // never a fresh "first alert" that resets the cap by migration.
+  const sent = Number.isFinite(input.alertsSent)
+    ? Math.max(0, Math.floor(input.alertsSent as number))
+    : alerting
+      ? 1
+      : 0;
+  const since =
+    input.faultSince !== undefined &&
+    input.faultSince !== null &&
+    Number.isFinite(input.faultSince)
+      ? input.faultSince
+      : input.previous && Number.isFinite(input.previous.at)
+        ? input.previous.at
+        : null;
+  const silent: PurgeAlertPlan = {
+    alert: false,
+    kind: "silent",
+    number: Math.min(sent + 1, cap),
+    cap,
+    since,
+  };
+  if (!(input.failed > 0)) return silent;
+  if (!((input.previous?.failed ?? 0) > 0)) return silent;
+  if (sent >= cap) return { ...silent, kind: "capped", number: cap };
+  const now = input.now;
   if (
-    lastAlertedAt !== null &&
-    Number.isFinite(lastAlertedAt) &&
+    alerting &&
     now !== undefined &&
-    Number.isFinite(now)
+    Number.isFinite(now) &&
+    now - (lastAlertedAt as number) < PURGE_ALERT_REPEAT_MS
   ) {
-    return now - lastAlertedAt >= PURGE_ALERT_REPEAT_MS;
+    return silent;
   }
-  return true;
+  return {
+    alert: true,
+    kind: sent === 0 ? "first" : "repeat",
+    number: sent + 1,
+    cap,
+    since,
+  };
 }
 
 /**
@@ -282,25 +361,47 @@ export function classifyPurgeFailure(description: string): "permanent" | "transi
 /**
  * The fault's plain-text body — shared by the Telegram alert and the in-app
  * bell entry, so both channels tell the same story from the same numbers.
+ *
+ * `alert` decides the opening. A first alert (or no info at all) explains the
+ * two-sweep trigger and the usual cause; a repeat says which repeat it is and
+ * how long the fault has run, because "two sweeps in a row" is simply false on
+ * the fourth hourly ping. Repeats also drop the cause line — it was in the
+ * first alert, and an hourly repetition is what makes the alert easy to mute.
+ * The cap's last send states that no further alert will come.
  */
 export function purgeFailureSummary(
   previous: PurgeTelemetry | null | undefined,
   current: PurgeTelemetry,
   now: number,
+  alert?: PurgeAlertInfo,
 ): string {
   const retrying = current.retrying ?? 0;
   const line = (label: string, t: PurgeTelemetry) => {
     const held = (t.retrying ?? 0) > 0 ? ` · ${t.retrying} retrying` : "";
     return `${label}: ${fmtAgo(t.at, now)} · ${t.deleted} deleted · ${t.failed} failed${held}`;
   };
+  const number = alert?.number ?? 1;
+  const repeat = number > 1;
+  const since = alert?.since ?? null;
+  const opening = repeat
+    ? `The sweep is still failing — repeat alert ${number} of ${alert?.cap ?? PURGE_ALERT_CAP}${since !== null && Number.isFinite(since) ? `, failing for ${fmtDuration(now - since)}` : ""}.`
+    : "Two sweeps in a row could not delete messages from Telegram.";
+  const last = repeat && number >= (alert?.cap ?? PURGE_ALERT_CAP);
   return [
-    "Two sweeps in a row could not delete messages from Telegram.",
+    opening,
     ...(previous ? [`• ${line("Previous", previous)}`] : []),
     `• ${line("Latest", current)}`,
-    "Usual cause: the bot was removed from the chat/channel, or lost its delete/admin rights.",
+    ...(repeat
+      ? []
+      : ["Usual cause: the bot was removed from the chat/channel, or lost its delete/admin rights."]),
     retrying > 0
       ? `${retrying} refused message${retrying === 1 ? " is" : "s are"} still tracked and will be retried on the next sweep; only messages Telegram will never accept a delete for are dropped.`
       : "Refused messages stay tracked, so the next sweep retries them once the rights are back; only messages Telegram will never accept a delete for are dropped.",
+    ...(last
+      ? [
+          `This is the last automatic alert for this fault. Sweeps keep retrying, and /alerts keeps showing the tally until one succeeds.`,
+        ]
+      : []),
   ].join("\n");
 }
 
@@ -309,10 +410,13 @@ export function purgeFailureAlert(
   previous: PurgeTelemetry | null | undefined,
   current: PurgeTelemetry,
   now: number,
+  alert?: PurgeAlertInfo,
 ): string {
-  return ["⚠️ **Message sweep is failing**", "", purgeFailureSummary(previous, current, now)].join(
-    "\n",
-  );
+  const header =
+    (alert?.number ?? 1) > 1
+      ? "⚠️ **Message sweep still failing**"
+      : "⚠️ **Message sweep is failing**";
+  return [header, "", purgeFailureSummary(previous, current, now, alert)].join("\n");
 }
 
 /** Telegram inline-keyboard button shape (url vs callback). */
@@ -663,6 +767,23 @@ export function fmtAgo(ts: number, now: number): string {
   const h = Math.round(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
+}
+
+/**
+ * A span in words for "failing for …": "45m", "2h 10m", "3d 4h". No "ago"
+ * suffix — the sentence already supplies the tense, and "failing for 2h ago"
+ * is the kind of copy bug this helper exists to prevent.
+ */
+export function fmtDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  if (h < 24) return rem ? `${h}h ${rem}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const remH = h % 24;
+  return remH ? `${d}d ${remH}h` : `${d}d`;
 }
 
 export function fmtDate(ts: number): string {
