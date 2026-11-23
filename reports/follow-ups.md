@@ -1529,3 +1529,43 @@ blocked clipboard always says so.
    meet, not an optional nicety.
 6. Round 19's DRILLS.md line and the `cargo-build-sbf --version` assertion are
    still open, as is the SBF v1 pin.
+
+## Round 22 — 2026-11-23 · the balance boundary got a test, the copy control got a browser check
+
+**1. `getBalance` is now exercised across a real HTTP boundary.** `src/lib/__tests__/sol-balance-read.test.ts` starts a `Bun.serve` JSON-RPC endpoint (no fetch stub, no mocking) and pins what the helper had only been asserted to do in prose: the `{ context, value }` envelope → `123456789`; the exact request (`getBalance`, `[owner, {commitment:"confirmed"}]`); a stringified value and a missing `value` both refused as "no numeric balance"; a node error surfaced verbatim ("node is behind"); an endpoint that is not JSON and a dead port both reject. Seven tests.
+
+**2. The preflight verdicts are pinned too.** A funded 0.2 SOL wallet buys 0.1 SOL — the regression guard for the bug this helper fixed; a 0.104 SOL wallet is short by exactly 0.001 SOL; an RPC error says "could not be read" and never "short by"/"top up"/"Insufficient"; a malformed value takes the same branch; a real 0 balance stays a poverty verdict. Five more tests.
+
+**3. The copy control was clicked in a browser.** On a standalone Vite page (deleted after) mounting the real `CopyButton`: the labelled button wrote `solana airdrop 2 abc --url devnet` to the clipboard, showed `Copied`, the `lucide-check … text-emerald-400` icon and a `Copied` toast; the icon-only button wrote its address and kept `aria-label="Copy devnet wallet address"`; with `writeText` rejecting `NotAllowedError` the toast read `Copy failed — Your browser blocked clipboard access — select the text and copy it manually.` and the button stayed on `Copy` with the copy icon, so a refusal never looks like a success. The app's own routes could not be used: `BackendPausedBoundary` wraps the router, so every route — public ones included — renders standby while Convex is paused (follow-up 5).
+
+**4. The rendered contract is unit-tested** (`src/components/CopyButton.test.tsx`): one accessible name, `type`, visible label, icon-only default, `ariaLabel`/`title` overrides, `disabled`/`type=submit`, and that the copied value never enters the markup.
+
+### Code review — fixed
+
+1. `preflightSolBuyBalance`'s doc block had been left stacked above `fetchSolBalanceLamports`, so the new helper looked double-documented and the preflight itself undocumented; the doc also still claimed "throws only on RPC transport failure" after the function was changed to return a verdict. Both corrected.
+2. The success check lost its green wherever a caller passed `iconClassName` (`iconClassName ?? "size-3.5 text-emerald-400"`): the devnet card (`size-3`) and Contract's "Copy source" (`size-4`) flashed a plain check. Now `cn(iconClassName ?? "size-3.5", "text-emerald-400")`.
+3. The write path was untestable and treated "no clipboard API" as an exception. Extraction to `writeClipboard(text, clipboard?)` (`src/lib/clipboard.ts`) makes a denial and an absent API the same honest `false`, and keeps the component file's exports to the control.
+
+### Code review — open findings
+
+1. **`preflightSolBuyBalance` prints the full RPC URL into a user-visible refusal.** Private endpoints routinely carry a key in the path (`private-rpc.ts`), so this can put a credential into the UI, a screenshot or a support paste. Redact to a host/path shape before it is shown.
+2. **The unreadable verdict asserts numbers it never measured:** `balanceLamports: 0` and `shortfallLamports: requiredLamports`. The message is honest, but a future consumer formatting those fields would say "short by 0.105 SOL" about an RPC failure. Prefer a `kind: "affordable" | "insufficient" | "unreadable"` discriminant.
+3. **`use-sol-positions.ts` still reads `solRpcCall<{value:number}>` in four places** with no validation. `{ value }` is right today, but `undefined` would feed `NaN` into realized PnL. Route those reads through `fetchSolBalanceLamports`.
+4. **The fit path trusts `balanceLamports: 0`.** With `fitToWallet`, an unreadable balance enters `fitRouteLoanToWallet`; the 0.05 SOL floor refuses it today, so behaviour is correct but incidental. Refuse explicitly before fitting.
+5. **`BackendPausedBoundary` covers public routes.** `/download` and `/auth` show standby while Convex is paused — why this round verified the button on a standalone page. Decide whether public routes belong outside the boundary.
+6. **`aria-label` stays "Copy" after the visible label says "Copied"**, so a screen reader hears the action and not the result. Minor.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling): serving, not deploying, is what fails.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### New follow-ups — round 22
+
+1. **Only the balance read now has a wire-format test.** `fetchTokenBalanceRaw` and `getSignatureStatuses` are read correctly by inspection alone; the fixture server this round added makes pinning each shape cheap.
+2. **The clicked state is browser-verified, not unit-tested.** If a DOM test environment ever lands, the three cases worth pinning are the 2 s reset, a rapid second click restarting the timer, and unmount cleanup.
+3. **Finish the copy unification** (round 21, #4): TradeHome, Wallets, SolWallets, Auth and both passcode dialogs still hand-roll `writeText` + `toast`.
+4. Round 19's DRILLS.md airdrop line and the `cargo-build-sbf --version` assertion remain open, as does the SBF v1 pin.
+5. **The funded round trip still has no evidence** (round 21, #2): `realizedNetLamports`/`netPct` remain unmeasured against a real balance.

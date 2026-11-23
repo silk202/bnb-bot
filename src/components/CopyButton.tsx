@@ -16,6 +16,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { writeClipboard } from "@/lib/clipboard";
+import { cn } from "@/lib/utils";
 
 export interface CopyOptions {
   /** Toast headline; defaults to "Copied". */
@@ -39,25 +41,24 @@ export function useCopy(durationMs = 2000) {
 
   const copy = useCallback(
     async (text: string, opts: CopyOptions = {}) => {
-      try {
-        await navigator.clipboard.writeText(text);
-        setCopied(true);
-        if (timer.current !== null) window.clearTimeout(timer.current);
-        timer.current = window.setTimeout(() => setCopied(false), durationMs);
-        if (!opts.silent) {
-          toast.success(
-            opts.message ?? "Copied",
-            opts.description ? { description: opts.description } : undefined,
-          );
-        }
-        return true;
-      } catch {
+      const written = await writeClipboard(text);
+      if (!written) {
         toast.error("Copy failed", {
           description:
             "Your browser blocked clipboard access — select the text and copy it manually.",
         });
         return false;
       }
+      setCopied(true);
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), durationMs);
+      if (!opts.silent) {
+        toast.success(
+          opts.message ?? "Copied",
+          opts.description ? { description: opts.description } : undefined,
+        );
+      }
+      return true;
     },
     [durationMs],
   );
@@ -115,7 +116,9 @@ export function CopyButton({
       onClick={() => void copy(text, { message, description })}
     >
       {copied ? (
-        <Check className={iconClassName ?? "size-3.5 text-emerald-400"} />
+        // The success colour is the control's own state, so it survives a
+        // caller-supplied size (the card used to lose its green check here).
+        <Check className={cn(iconClassName ?? "size-3.5", "text-emerald-400")} />
       ) : (
         <Copy className={iconClassName ?? "size-3.5"} />
       )}

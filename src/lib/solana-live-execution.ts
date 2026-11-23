@@ -625,12 +625,6 @@ export function fitRouteLoanToWallet(
 }
 
 /**
- * REAL pre-flight: live getBalance (lamports) for the wallet owner, then the
- * pure affordability math. Throws only on RPC transport failure (the caller
- * decides whether that blocks execution); an insufficient balance is NOT a
- * throw — it is an `ok: false` verdict with the exact shortfall.
- */
-/**
  * Live native balance in lamports.
  *
  * `getBalance` answers `{ context, value }`, never a bare number. Reading it as
@@ -654,6 +648,12 @@ export async function fetchSolBalanceLamports(
   return value;
 }
 
+/**
+ * REAL pre-flight: live getBalance (lamports) for the wallet owner, then the
+ * pure affordability math. Never throws: an unreadable balance is its own
+ * verdict ("could not be read"), never reported as insufficient funds, and an
+ * insufficient balance is an `ok: false` verdict with the exact shortfall.
+ */
 export async function preflightSolBuyBalance(
   rpcUrl: string,
   owner: string,
