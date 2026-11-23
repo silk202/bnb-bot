@@ -7,6 +7,7 @@
  * the terminal's connectedWallets so the Flasher knows a signer exists.
  * Includes the operator-only Source Code link, mirroring the BNB sidebar.
  */
+import { copyText } from "@/components/copy-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,7 +24,7 @@ import {
   vaultSignerAddresses,
   wipeVault,
 } from "@/lib/solana-vault";
-import { solRpcCall } from "@/lib/solana-live-execution";
+import { fetchSolBalanceLamports } from "@/lib/solana-live-execution";
 import { SOL_RPC_ENDPOINTS } from "@/lib/solana-jito";
 import { SolImportError } from "@/lib/solana-import";
 import { describeVaultRemoval } from "@/lib/vault-remove-flow";
@@ -180,8 +181,8 @@ export default function SolWallets() {
   // the extension actually exposes it; a locked wallet shows no copy button
   // rather than a shortened string pretending to be the whole address).
   const copyAddress = (address: string) => {
-    void navigator.clipboard.writeText(address);
-    toast.success("Address copied", {
+    void copyText(address, {
+      message: "Address copied",
       description: `${address.slice(0, 8)}…${address.slice(-4)} — full Solana address on your clipboard.`,
     });
   };
@@ -247,8 +248,8 @@ export default function SolWallets() {
       await Promise.all(
         addresses.map(async (a) => {
           try {
-            const json = await solRpcCall<{ value: number }>(SOL_RPC_ENDPOINTS.mainnet, "getBalance", [a]);
-            next[a] = (json.value / 1e9).toFixed(4);
+            const lamports = await fetchSolBalanceLamports(SOL_RPC_ENDPOINTS.mainnet, a);
+            next[a] = (lamports / 1e9).toFixed(4);
           } catch {
             next[a] = "—"; // RPC unreachable — honest placeholder, never a guess
           }
@@ -493,8 +494,7 @@ export default function SolWallets() {
                       variant="ghost"
                       className="h-7 gap-1.5 text-[10px]"
                       onClick={() => {
-                        void navigator.clipboard.writeText(sheetText);
-                        toast("Sheet copied to clipboard");
+                        void copyText(sheetText, { message: "Sheet copied to clipboard" });
                       }}
                     >
                       <FileDown className="size-3" />

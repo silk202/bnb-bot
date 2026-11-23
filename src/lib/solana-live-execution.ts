@@ -31,6 +31,7 @@ import {
   type SolWalletRole,
 } from "./solana-policy";
 import { fetchWithTimeout } from "./fetch-timeout";
+import { redactRpcUrl } from "./redact";
 import {
   SOL_RAIL_UNVERIFIED_MESSAGE,
   solSigningVerdict,
@@ -396,14 +397,21 @@ export async function waitForSigConfirm(
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const statuses = await postRpc<Array<null | { err: unknown; confirmationStatus?: string }>>(
-        rpcUrl,
-        "getSignatureStatuses",
-        [[sig], { searchHistory: true }],
-      );
-      const st = statuses?.[0];
+      // `getSignatureStatuses` answers an RpcResponse — `{ context, value }` —
+      // with one entry per requested signature. Reading the result as a bare
+      // array made `statuses[0]` undefined on every reply, so each landed
+      // transaction was reported as "confirmation timeout" after the full wait.
+      const json = await postRpc<{
+        value?: Array<null | { err: unknown; confirmationStatus?: string }>;
+      }>(rpcUrl, "getSignatureStatuses", [[sig], { searchHistory: true }]);
+      const st = json?.value?.[0];
       if (st) {
-        if (st.err) return { confirmed: false, err: String(st.err) };
+        // The node's own failure object is the useful part of a reverted tx;
+        // `String(err)` would have shown only "[object Object]".
+        if (st.err) {
+          const err = typeof st.err === "string" ? st.err : JSON.stringify(st.err);
+          return { confirmed: false, err };
+        }
         if (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized") {
           return { confirmed: true, err: null };
         }
@@ -503,7 +511,16 @@ export function solBuySimExpectation(pubkey: string, amountLamports: number) {
   };
 }
 
+/** Which verdict this is: affordable, genuinely short, or a failed read. */
+export type BuyAffordabilityKind = "affordable" | "insufficient" | "unreadable";
+
 export interface BuyAffordability {
+  /**
+   * The discriminant. `ok: false` alone never means "short" — branch on this
+   * before formatting `shortfallLamports`, which is only measured when the
+   * balance was actually read.
+   */
+  kind: BuyAffordabilityKind;
   ok: boolean;
   balanceLamports: number;
   amountLamports: number;
@@ -533,6 +550,7 @@ export function computeBuyAffordability(
   const shortfallLamports = Math.max(0, requiredLamports - balance);
   const ok = shortfallLamports === 0;
   return {
+    kind: ok ? "affordable" : "insufficient",
     ok,
     balanceLamports: balance,
     amountLamports: amount,
@@ -665,16 +683,19 @@ export async function preflightSolBuyBalance(
     balance = await fetchSolBalanceLamports(rpcUrl, owner);
   } catch {
     // An unreadable balance is not "insufficient funds" — say which one it is,
-    // or an operator tops up a wallet that was never the problem.
-    const requiredLamports = amountLamports + reserveLamports;
+    // or an operator tops up a wallet that was never the problem. Nothing was
+    // measured here, so the measured fields stay at zero and `kind` carries the
+    // meaning; a shortfall is only ever reported from a real read.
     return {
+      kind: "unreadable",
       ok: false,
       balanceLamports: 0,
       amountLamports,
       reserveLamports,
-      requiredLamports,
-      shortfallLamports: requiredLamports,
-      message: `getBalance could not be read, so the wallet's real balance is unknown — nothing was signed. Check the RPC (${rpcUrl}) and retry.`,
+      requiredLamports: amountLamports + reserveLamports,
+      shortfallLamports: 0,
+      // The endpoint is named, never quoted: provider keys live in these URLs.
+      message: `getBalance could not be read, so the wallet's real balance is unknown — nothing was signed. Check the RPC (${redactRpcUrl(rpcUrl)}) and retry.`,
     };
   }
   return computeBuyAffordability(balance, amountLamports, reserveLamports);
@@ -758,6 +779,12 @@ export async function executeLiveSnipeBuy(opts: {
     let amountLamports = opts.amountLamports;
     let fit: LiveSnipeBuyOutcome["fit"];
     if (!afford.ok) {
+      // A failed read is not a small wallet: fitting against a zero that was
+      // never measured would clip the signal to nothing — or tell the operator
+      // to top up a wallet that is already funded. Refuse with the read error.
+      if (afford.kind === "unreadable") {
+        return { ok: false, engine: "preflight-balance", error: afford.message, venue: "Jupiter" };
+      }
       const walletFit = fitRouteLoanToWallet(afford.balanceLamports, opts.amountLamports);
       if (opts.fitToWallet && walletFit.ok) {
         amountLamports = walletFit.loanLamports;
@@ -1119,6 +1146,8 @@ export async function executeLiveArb(opts: {
     let loanLamports = opts.loanLamports;
     let fit: LiveArbOutcome["fit"];
     if (!afford.ok) {
+      // Same rule as the snipe buy: never fit a clip against an unmeasured balance.
+      if (afford.kind === "unreadable") return fail("preflight-balance", afford.message);
       const walletFit = fitRouteLoanToWallet(afford.balanceLamports, opts.loanLamports);
       if (opts.fitToWallet && walletFit.ok) {
         loanLamports = walletFit.loanLamports;

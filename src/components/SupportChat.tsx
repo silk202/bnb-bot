@@ -1,6 +1,7 @@
 import { api } from "@/convex/_generated/api";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/components/copy-text";
 import {
   Dialog,
   DialogContent,
@@ -135,9 +136,13 @@ export function SupportChat({
   }, [messages, typing]);
 
   const copyMessage = (index: number, text: string) => {
-    navigator.clipboard?.writeText(text).catch(() => undefined);
-    setCopiedAt(index);
-    window.setTimeout(() => setCopiedAt(null), 1400);
+    // Silent success (the check icon is the feedback), but a blocked clipboard
+    // is reported — the message bubble used to pretend it had copied.
+    void copyText(text, { silent: true }).then((ok) => {
+      if (!ok) return;
+      setCopiedAt(index);
+      window.setTimeout(() => setCopiedAt(null), 1400);
+    });
   };
 
   const botReply = (text: string, source: MessageSource) => {

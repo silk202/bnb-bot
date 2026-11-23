@@ -10,6 +10,7 @@ import { useMutation, useQuery, useAction } from "convex/react";
 import { useNavigate } from "react-router";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/components/copy-text";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -624,8 +625,7 @@ function DepositModal({
                         size="sm"
                         className="h-7 text-xs"
                         onClick={() => {
-                          void navigator.clipboard.writeText(cryptoDetail);
-                          toast.success("Address copied");
+                          void copyText(cryptoDetail, { message: "Address copied" });
                         }}
                       >
                         Copy address
@@ -738,8 +738,7 @@ function DepositModal({
                         size="sm"
                         className="h-6 text-[11px]"
                         onClick={() => {
-                          void navigator.clipboard.writeText(myAddr.address!);
-                          toast.success("Deposit address copied");
+                          void copyText(myAddr.address!, { message: "Deposit address copied" });
                         }}
                       >
                         Copy
@@ -1083,8 +1082,7 @@ function DepositModal({
                         size="sm"
                         className="mt-2 h-7 text-xs"
                         onClick={() => {
-                          void navigator.clipboard.writeText(activeAcct.details);
-                          toast.success("Account details copied");
+                          void copyText(activeAcct.details, { message: "Account details copied" });
                         }}
                       >
                         Copy details
@@ -1099,8 +1097,7 @@ function DepositModal({
                       size="sm"
                       className="mt-2 h-7 text-xs"
                       onClick={() => {
-                        void navigator.clipboard.writeText(cashDetail);
-                        toast.success("Account details copied");
+                        void copyText(cashDetail, { message: "Account details copied" });
                       }}
                     >
                       Copy details
@@ -1167,8 +1164,7 @@ function DepositModal({
                 className="mt-3 h-7 text-xs"
                 disabled={!email}
                 onClick={() => {
-                  void navigator.clipboard.writeText(email);
-                  toast.success("Email copied");
+                  void copyText(email, { message: "Email copied" });
                 }}
               >
                 Copy
@@ -1452,8 +1448,7 @@ function InternalTransferModal({
               size="sm"
               className="mt-3 h-7 text-xs"
               onClick={() => {
-                void navigator.clipboard.writeText(email);
-                toast.success("Email copied");
+                void copyText(email, { message: "Email copied" });
               }}
               disabled={!email}
             >

@@ -15,10 +15,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  fetchSolBalanceLamports,
   fetchTokenBalanceRaw,
   jupiterQuoteTokenToSol,
   executeLiveSnipeSell,
-  solRpcCall,
   type SolSigningProvider,
 } from "@/lib/solana-live-execution";
 import { decideExit, type ExitReason } from "@/lib/solana-exit-engine";
@@ -135,9 +135,7 @@ export function useSolPositions(opts: {
         patchPosition(pos.id, { status: "closed", closeReason: "none", realizedNetLamports: 0, closedAt: Date.now() });
         return true;
       }
-      const lamportsBefore = (
-        await solRpcCall<{ value: number }>(optsRef.current.rpcUrl, "getBalance", [pos.owner])
-      ).value;
+      const lamportsBefore = await fetchSolBalanceLamports(optsRef.current.rpcUrl, pos.owner);
       const sell = await executeLiveSnipeSell({
         mint: pos.mint,
         tokenAmountRaw: balance,
@@ -150,9 +148,7 @@ export function useSolPositions(opts: {
         optsRef.current.onExitError?.(pos, sell.error ?? "manual sell failed");
         return false;
       }
-      const lamportsAfter = (
-        await solRpcCall<{ value: number }>(optsRef.current.rpcUrl, "getBalance", [pos.owner])
-      ).value;
+      const lamportsAfter = await fetchSolBalanceLamports(optsRef.current.rpcUrl, pos.owner);
       const realized = lamportsAfter - lamportsBefore;
       const closed: LivePosition = {
         ...pos,
@@ -214,9 +210,7 @@ export function useSolPositions(opts: {
           patchPosition(pos.id, { peakRoiPct: decision.newPeakRoiPct });
           if (!decision.shouldExit) continue;
           // 4. REAL exit — measure the owner's SOL across the confirmed sell.
-          const lamportsBefore = (
-            await solRpcCall<{ value: number }>(o.rpcUrl, "getBalance", [pos.owner])
-          ).value;
+          const lamportsBefore = await fetchSolBalanceLamports(o.rpcUrl, pos.owner);
           const sell = await executeLiveSnipeSell({
             mint: pos.mint,
             tokenAmountRaw: decision.amountRaw,
@@ -229,9 +223,7 @@ export function useSolPositions(opts: {
             o.onExitError?.(pos, sell.error ?? "auto exit failed");
             continue;
           }
-          const lamportsAfter = (
-            await solRpcCall<{ value: number }>(o.rpcUrl, "getBalance", [pos.owner])
-          ).value;
+          const lamportsAfter = await fetchSolBalanceLamports(o.rpcUrl, pos.owner);
           const realized = lamportsAfter - lamportsBefore;
           const remainingRaw = (BigInt(balance) - BigInt(sell.soldRaw ?? "0")).toString();
           const closed =

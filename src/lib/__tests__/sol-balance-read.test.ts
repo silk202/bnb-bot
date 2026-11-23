@@ -111,6 +111,7 @@ describe("preflightSolBuyBalance — a real balance decides affordability", () =
 
     const out = await preflightSolBuyBalance(rpcUrl, OWNER, AMOUNT);
 
+    expect(out.kind).toBe("affordable");
     expect(out.ok).toBe(true);
     expect(out.balanceLamports).toBe(200_000_000);
     expect(out.requiredLamports).toBe(AMOUNT + BUY_FEE_RESERVE_LAMPORTS);
@@ -124,6 +125,7 @@ describe("preflightSolBuyBalance — a real balance decides affordability", () =
 
     const out = await preflightSolBuyBalance(rpcUrl, OWNER, AMOUNT);
 
+    expect(out.kind).toBe("insufficient");
     expect(out.ok).toBe(false);
     expect(out.shortfallLamports).toBe(1_000_000);
     expect(out.message).toContain("short by 0.00100 SOL");
@@ -135,7 +137,10 @@ describe("preflightSolBuyBalance — a real balance decides affordability", () =
 
     const out = await preflightSolBuyBalance(rpcUrl, OWNER, AMOUNT);
 
+    expect(out.kind).toBe("unreadable");
     expect(out.ok).toBe(false);
+    // Nothing was measured, so no shortfall may be reported.
+    expect(out.shortfallLamports).toBe(0);
     expect(out.message).toContain("could not be read");
     expect(out.message).toContain(rpcUrl);
     expect(out.message).toContain("nothing was signed");
@@ -149,8 +154,20 @@ describe("preflightSolBuyBalance — a real balance decides affordability", () =
   test("the same verdict for a malformed value", async () => {
     mode = "string-value";
     const out = await preflightSolBuyBalance(rpcUrl, OWNER, AMOUNT);
+    expect(out.kind).toBe("unreadable");
     expect(out.ok).toBe(false);
     expect(out.message).toContain("could not be read");
+  });
+
+  test("names the endpoint but never its credentials", async () => {
+    mode = "rpc-error";
+    const keyed = `${rpcUrl}/?api-key=SUPERSECRETVALUE`;
+
+    const out = await preflightSolBuyBalance(keyed, OWNER, AMOUNT);
+
+    expect(out.kind).toBe("unreadable");
+    expect(out.message).not.toContain("SUPERSECRETVALUE");
+    expect(out.message).toContain("?***");
   });
 
   test("a zero balance is still a poverty verdict, with the full required amount", async () => {
@@ -159,6 +176,7 @@ describe("preflightSolBuyBalance — a real balance decides affordability", () =
 
     const out = await preflightSolBuyBalance(rpcUrl, OWNER, AMOUNT);
 
+    expect(out.kind).toBe("insufficient");
     expect(out.ok).toBe(false);
     expect(out.shortfallLamports).toBe(AMOUNT + BUY_FEE_RESERVE_LAMPORTS);
     expect(out.message).toContain("short by");

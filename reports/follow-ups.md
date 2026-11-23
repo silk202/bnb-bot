@@ -1569,3 +1569,84 @@ blocked clipboard always says so.
 3. **Finish the copy unification** (round 21, #4): TradeHome, Wallets, SolWallets, Auth and both passcode dialogs still hand-roll `writeText` + `toast`.
 4. Round 19's DRILLS.md airdrop line and the `cargo-build-sbf --version` assertion remain open, as does the SBF v1 pin.
 5. **The funded round trip still has no evidence** (round 21, #2): `realizedNetLamports`/`netPct` remain unmeasured against a real balance.
+
+## Round 23 — 2026-11-23 · the round-22 follow-ups, and a second envelope bug
+
+**1. RPC URLs are redacted before they reach a message.** `src/lib/redact.ts`
+(`redactRpcUrl`) keeps the scheme and host, drops userinfo (`parsed.host`
+excludes it), drops the query string entirely and masks any path segment long
+enough to be a key (`/v2/<key>`). `preflightSolBuyBalance`'s unreadable verdict
+now prints `https://mainnet.helius-rpc.com/?***` instead of the keyed URL.
+`src/lib/__tests__/redact.test.ts` pins five cases, and the balance suite adds
+one end-to-end: an endpoint carrying `?api-key=SUPERSECRETVALUE` produces a
+refusal whose message does not contain the key.
+
+**2. The verdict says which verdict it is.** `BuyAffordability` gained
+`kind: "affordable" | "insufficient" | "unreadable"`. `ok: false` no longer
+means "short" by implication, and the unreadable branch stops fabricating a
+shortfall (`shortfallLamports: 0`) because nothing was measured. Both callers
+(snipe buy and arb) now refuse an unreadable balance **before** the fit path, so
+a zero that was never read can no longer clip a signal to nothing or tell a
+funded operator to top up.
+
+**3. Every balance read goes through one helper.** `use-sol-positions.ts` (four
+reads: the realized-PnL baseline and delta on both the manual and automatic
+exit) and `SolWallets.tsx` were the last `{ value: number }` callers; both use
+`fetchSolBalanceLamports` now. An unreadable reply throws instead of feeding
+`undefined`/`NaN` into realized PnL.
+
+**4. Copy unification is finished in app source.** `copyText` moved to
+`src/components/copy-text.ts` — same `writeClipboard` path as `CopyButton`,
+same failure message — and the remaining fourteen
+`navigator.clipboard.writeText` sites use it: Wallets (address, sheet),
+SolWallets (address, sheet), TradeHome (address, deposit address, two account
+detail blocks, email ×2), History (the tx-hash rows keep their check animation,
+but only for a copy that actually happened), Auth and DesktopAppsDialog
+(passcode), TelegramBotDialog (pairing code), Scanner (hot-wallet mnemonic) and
+SupportChat (message bubble — silent success, reported denial).
+`overlay-script.ts` and the extension `background.js` keep their own
+`writeText`: an injected IIFE and an extension worker cannot import app modules.
+
+**5. The other RPC shapes are pinned — and one was wrong.**
+`src/lib/__tests__/sol-rpc-shapes.test.ts` (8 tests, real `Bun.serve`
+JSON-RPC): `getTokenAccountsByOwner` sums accounts (700 + 300 → "1000") with the
+exact `[owner, {mint}, {encoding:"jsonParsed", commitment:"confirmed"}]`
+request, answers "0" for no accounts and skips an account with no parsed
+amount; `getGenesisHash` is a bare string with `[]` params.
+`getSignatureStatuses` answers `{ context, value }` — an RpcResponse — and
+`waitForSigConfirm` read the result as a bare array, so `statuses[0]` was
+`undefined` on every reply and **every landed transaction would have been
+reported as "confirmation timeout" after the full 60 s wait**. Fixed to read
+`value[0]`; a reverted tx now reports the node's own error object
+(`{"InstructionError":[0,{"Custom":6001}]}`) instead of `String(err)`'s
+`[object Object]`.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 758 pass / 0 fail across 65 files (744 → 758: +5 redact, +8 RPC
+  shapes, +1 redaction end-to-end).
+- `eslint` on the 18 touched files: 55 problems (45 errors, 10 warnings) —
+  the pre-change baseline exactly, measured by stashing this round's diff. The
+  extra fast-refresh warning `copyText` would have added was removed by moving
+  it out of `CopyButton.tsx` instead of suppressing it.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling): serving, not
+   deploying, is what fails.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### New follow-ups — round 23
+
+1. **`getSignatureStatuses` has never been exercised against a funded tx.** The
+   fix is pinned at the wire; the first funded devnet round trip is what proves
+   it end to end.
+2. `waitForSigConfirm` still polls every 1.5 s for a flat 60 s with no backoff.
+   Fine for one tx, noisy for a burst.
+3. `redactRpcUrl` masks a path segment by length (≥12 chars), so a real route
+   like `/solana-mainnet` is over-redacted. Safe direction, imprecise.
+4. Round 19's DRILLS.md airdrop line, the `cargo-build-sbf --version`
+   assertion and the SBF v1 pin remain open.

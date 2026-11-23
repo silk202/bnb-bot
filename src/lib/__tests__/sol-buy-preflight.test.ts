@@ -15,6 +15,7 @@ describe("computeBuyAffordability — the no-doomed-Phantom-popup guard", () => 
   test("exact fit (amount + reserve) is affordable", () => {
     const a = computeBuyAffordability(REQUIRED, AMOUNT);
     expect(a.ok).toBe(true);
+    expect(a.kind).toBe("affordable");
     expect(a.shortfallLamports).toBe(0);
     expect(a.requiredLamports).toBe(REQUIRED);
   });
@@ -22,12 +23,14 @@ describe("computeBuyAffordability — the no-doomed-Phantom-popup guard", () => 
   test("one lamport short is refused with the exact shortfall", () => {
     const a = computeBuyAffordability(REQUIRED - 1, AMOUNT);
     expect(a.ok).toBe(false);
+    expect(a.kind).toBe("insufficient");
     expect(a.shortfallLamports).toBe(1);
   });
 
   test("classic failing case: 0.104 SOL wallet, 0.1 SOL buy → short 0.001 SOL", () => {
     const a = computeBuyAffordability(104_000_000, AMOUNT);
     expect(a.ok).toBe(false);
+    expect(a.kind).toBe("insufficient");
     expect(a.shortfallLamports).toBe(1_000_000);
     expect(a.message).toContain("0.10400 SOL");
     expect(a.message).toContain("0.10500 SOL");
@@ -60,6 +63,7 @@ describe("computeBuyAffordability — the no-doomed-Phantom-popup guard", () => 
     expect(a.amountLamports).toBe(0);
     expect(a.reserveLamports).toBe(0);
     expect(a.ok).toBe(true); // 0 required, 0 held — trivially affordable
+    expect(a.kind).toBe("affordable");
     expect(a.shortfallLamports).toBe(0);
   });
 

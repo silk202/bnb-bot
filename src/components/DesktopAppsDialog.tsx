@@ -15,10 +15,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
-import { toast } from "sonner";
 import { api } from "@/convex/_generated/api";
 import { getGrant } from "@/lib/gate";
 import { WhatsAppMessageButton } from "@/components/WhatsAppMessageButton";
+import { copyText } from "@/components/copy-text";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -619,8 +619,7 @@ function OperatorWindow() {
                   type="button"
                   className="rounded-md border border-border/60 p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
                   onClick={() => {
-                    navigator.clipboard.writeText(popupDisplayedCode);
-                    toast.success("Passcode copied to clipboard");
+                    void copyText(popupDisplayedCode, { message: "Passcode copied to clipboard" });
                   }}
                   title="Copy passcode"
                 >

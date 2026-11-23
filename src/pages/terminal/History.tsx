@@ -1,3 +1,4 @@
+import { copyText } from "@/components/copy-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -299,16 +300,11 @@ export default function History() {
   };
 
   const copyHash = async (hash: string) => {
-    try {
-      await navigator.clipboard.writeText(hash);
-      setCopiedHash(hash);
-      toast.success("Tx hash copied");
-      setTimeout(() => setCopiedHash(null), 2000);
-    } catch {
-      toast.error("Copy failed", {
-        description: "Your browser blocked clipboard access.",
-      });
-    }
+    // One write path: `copyText` reports a blocked clipboard itself, so the
+    // row's check only appears for a copy that actually happened.
+    if (!(await copyText(hash, { message: "Tx hash copied" }))) return;
+    setCopiedHash(hash);
+    setTimeout(() => setCopiedHash(null), 2000);
   };
 
   return (

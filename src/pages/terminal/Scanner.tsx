@@ -11,6 +11,7 @@ import { useMempoolMonitor } from "@/hooks/use-mempool-monitor";
 import { useTokenDiscovery } from "@/hooks/use-token-discovery";
 import { TokenDiscoveryPanel } from "@/components/TokenDiscoveryPanel";
 import { ScannerAlertBanner, type ScannerEvent } from "@/components/ScannerAlertBanner";
+import { copyText } from "@/components/copy-text";
 import { useTerminal } from "@/hooks/use-terminal";
 import {
   BNB_NETWORKS,
@@ -1829,8 +1830,9 @@ export default function Scanner() {
                 size="sm"
                 className="h-6 px-2 text-[10px]"
                 onClick={() => {
-                  void navigator.clipboard.writeText(hotWallet.mnemonic).then(() => {
-                    toast.success("Mnemonic copied", { description: "Paste it somewhere safe — this wallet is NOT stored and disappears on reload." });
+                  void copyText(hotWallet.mnemonic, {
+                    message: "Mnemonic copied",
+                    description: "Paste it somewhere safe — this wallet is NOT stored and disappears on reload.",
                   });
                 }}
               >

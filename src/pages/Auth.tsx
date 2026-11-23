@@ -31,6 +31,7 @@ import {
   type TerminalFlavor,
 } from "@/components/TerminalChooserDialog";
 import { ShcsCredit } from "@/components/ShcsCredit";
+import { copyText } from "@/components/copy-text";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { WhatsAppChannelButton } from "@/components/WhatsAppChannelButton";
 import { WorldClock } from "@/components/WorldClock";
@@ -1327,8 +1328,7 @@ function Auth({ redirectAfterAuth }: AuthProps = {}) {
                   type="button"
                   className="rounded-md border border-border/60 p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
                   onClick={() => {
-                    navigator.clipboard.writeText(popupDisplayedCode);
-                    toast.success("Passcode copied to clipboard");
+                    void copyText(popupDisplayedCode, { message: "Passcode copied to clipboard" });
                   }}
                   title="Copy passcode"
                 >

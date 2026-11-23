@@ -10,23 +10,14 @@
  *   · timers  → cleared on unmount, so no setState after a dialog closes
  *
  * `useCopy` is exported for the places that need their own markup (a message
- * bubble, a raw table cell); `CopyButton` is the button-shaped default.
+ * bubble, a raw table cell); `CopyButton` is the button-shaped default. The
+ * write itself lives in `copy-text.ts` so both share one path.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { writeClipboard } from "@/lib/clipboard";
+import { copyText, type CopyOptions } from "./copy-text";
 import { cn } from "@/lib/utils";
-
-export interface CopyOptions {
-  /** Toast headline; defaults to "Copied". */
-  message?: string;
-  /** Second toast line — the copied value, or what to do with it. */
-  description?: string;
-  /** Suppress the success toast (failure is always reported). */
-  silent?: boolean;
-}
 
 export function useCopy(durationMs = 2000) {
   const [copied, setCopied] = useState(false);
@@ -41,23 +32,10 @@ export function useCopy(durationMs = 2000) {
 
   const copy = useCallback(
     async (text: string, opts: CopyOptions = {}) => {
-      const written = await writeClipboard(text);
-      if (!written) {
-        toast.error("Copy failed", {
-          description:
-            "Your browser blocked clipboard access — select the text and copy it manually.",
-        });
-        return false;
-      }
+      if (!(await copyText(text, opts))) return false;
       setCopied(true);
       if (timer.current !== null) window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => setCopied(false), durationMs);
-      if (!opts.silent) {
-        toast.success(
-          opts.message ?? "Copied",
-          opts.description ? { description: opts.description } : undefined,
-        );
-      }
       return true;
     },
     [durationMs],

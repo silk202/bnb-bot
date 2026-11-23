@@ -13,6 +13,7 @@
 import { useAction, useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/components/copy-text";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -265,8 +266,7 @@ export function TelegramBotDialog({
 
   const copyCode = () => {
     if (!pairing) return;
-    void navigator.clipboard.writeText(pairing.code);
-    toast.success("Code copied — paste it into the bot chat");
+    void copyText(pairing.code, { message: "Code copied — paste it into the bot chat" });
   };
 
   // Bot-token mini-dashboard: save verifies the candidate token against

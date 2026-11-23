@@ -1,4 +1,5 @@
 import { TerminalContextStrip } from "@/components/TerminalContextStrip";
+import { copyText } from "@/components/copy-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -259,8 +260,8 @@ export default function Wallets() {
 
   // One-tap copy for a full address (the shortened rows hide it).
   const copyAddress = (address: string) => {
-    void navigator.clipboard.writeText(address);
-    toast.success("Address copied", {
+    void copyText(address, {
+      message: "Address copied",
       description: `${address.slice(0, 10)}…${address.slice(-6)} — full 0x address on your clipboard.`,
     });
   };
@@ -761,8 +762,7 @@ export default function Wallets() {
                       variant="ghost"
                       className="h-7 gap-1.5 text-[10px]"
                       onClick={() => {
-                        void navigator.clipboard.writeText(sheetText);
-                        toast("Sheet copied to clipboard");
+                        void copyText(sheetText, { message: "Sheet copied to clipboard" });
                       }}
                     >
                       <FileDown className="size-3" />
