@@ -20,7 +20,7 @@ import { api } from "@/convex/_generated/api";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { TelegramBotDialog } from "@/components/TelegramBotDialog";
 import { formatExpiry, getDeviceToken } from "@/lib/gate";
-import { purgeTelemetryLine } from "@/lib/telegramBot";
+import { purgeAlertPauseNote, purgeTelemetryLine } from "@/lib/telegramBot";
 import { Bot } from "lucide-react";
 import { useState } from "react";
 
@@ -44,6 +44,8 @@ export function BotStatusChip() {
           retrying?: number;
           skipped: string | null;
         } | null;
+        /** Alerts sent for the current fault; at the cap, alerting is paused. */
+        purgeAlertsSent?: number;
         engineRunning?: boolean | null;
         solEngineRunning?: boolean | null;
         botUsername?: string | null;
@@ -106,7 +108,7 @@ export function BotStatusChip() {
         engineLine("SOL engine", health.solEngineRunning),
         `Digest: ${health.digestEnabled ? "on (10 min)" : "off"}`,
         `Channel purge: ${health.channelPurge === false ? "off" : "on (15 min)"}`,
-        `Purge: ${purgeTelemetryLine(health.purgeLast, now)}`,
+        `Purge: ${purgeTelemetryLine(health.purgeLast, now)}${purgeAlertPauseNote(health.purgeAlertsSent)}`,
         "TASignal channel is separate — this chip is TAEngine only.",
       ].join("\n")
     : "Telegram Operator Bot";

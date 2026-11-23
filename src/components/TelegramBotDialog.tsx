@@ -43,7 +43,7 @@ import { useLocation, useNavigate } from "react-router";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { formatExpiry, getDeviceToken, setDeviceToken } from "@/lib/gate";
-import { purgeTelemetryLine } from "@/lib/telegramBot";
+import { purgeAlertPauseNote, purgeTelemetryLine } from "@/lib/telegramBot";
 
 type BotStatus = {
   recognized: boolean;
@@ -62,6 +62,8 @@ type BotStatus = {
     retrying?: number;
     skipped: string | null;
   } | null;
+  /** Alerts sent for the current fault; at the cap, alerting is paused. */
+  purgeAlertsSent?: number;
   webhookOk?: boolean | null;
   webhookCheckedAt?: number | null;
   botUsername: string | null;
@@ -787,6 +789,7 @@ export function TelegramBotDialog({
               {/* The sweep's own honest tally — the same line `/alerts` shows. */}
               <div className="mt-1 text-[10px] text-muted-foreground/80">
                 Last sweep: {purgeTelemetryLine(status?.purgeLast, now)}
+                {purgeAlertPauseNote(status?.purgeAlertsSent)}
               </div>
             </div>
             <Switch

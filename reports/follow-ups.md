@@ -2695,3 +2695,101 @@ body. Changing the title per repeat would silently defeat that dedupe.
     #6).
 18. **Track multiple channel ids** (round 26 #12).
 19. **Show the local sweep in Settings** (round 28 #15).
+
+## Round 33 — the pause is visible, and bot health gets its own bell kind (2026-11-23)
+
+Round 32's top two follow-ups, both about a cap that works but is invisible and
+a fault that borrows another feature's bucket.
+
+### 1. A capped fault says it stopped alerting
+
+Round 32 silenced a fault after six alerts and kept stamping the tally, which
+left the worst possible reading on screen: "3 failed" every ten minutes with no
+alerts and no explanation. The operator cannot tell a deliberate pause from a
+broken notifier.
+
+- `purgeAlertPauseNote(alertsSent)` is the one suffix, shared like
+  `purgeTelemetryLine`: empty below the cap, ` · alerts paused after 6 (a clean
+  sweep resumes them)` at or above it. The wording derives from
+  `PURGE_ALERT_CAP`, so the copy cannot drift from the rule.
+- `getBotHealth` (chip) and `getBotStatus` (dialog) now return
+  `purgeAlertsSent` with the tally, and the `/alerts` board's `cfg` carries it
+  too, so all three surfaces read the same number.
+- It appears on the existing last-sweep line (`/alerts`, chip tooltip, dialog)
+  rather than as a new banner: the pause belongs next to the failures it
+  explains. A clean sweep clears `purgeAlertsSent`, so the note disappears by
+  itself when alerting resumes.
+- No note while alerts still flow — the line stays quiet in the normal case.
+
+### 2. `bot_health` is its own notification kind
+
+Round 30 wrote the bell entry into `session_update` and recorded that a
+distinct kind needed `convex codegen` against a deployment. That turned out to
+be wrong, and this round proves it: `_generated/dataModel.d.ts` derives `Doc<>`
+from `schema.ts` itself, including union literals, so declaring
+`v.literal("bot_health")` is enough for typecheck and for the deployment's
+schema push. No codegen, no hand-edited `_generated`.
+
+- `notifications.kind` gains `bot_health`; `recordBotHealthAlert` reads its
+  dedupe rows with `by_user_kind` scoped to that literal and writes it.
+- The bell renders it rose with a `ShieldAlert` icon instead of borrowing the
+  session-update clock.
+- The dedupe key is now genuinely the fault's own: an hourly bot-health entry
+  can no longer suppress, or be suppressed by, a session update that happens to
+  carry the same title inside the hour.
+- Existing `session_update` entries stay where they are and keep rendering; the
+  kind is additive, and no migration is needed.
+
+### Checks
+
+- `bun run typecheck`: exit 0, including the new union literal and the two
+  query return types — the evidence that the schema-derived `Doc` needs no
+  codegen.
+- `bun test`: 838 pass / 0 fail across 69 files (836 → +2: the pause-note
+  boundary and its wording).
+- `eslint` on the eight touched files: 21 problems, all pre-existing (12 unused
+  imports and 2 `\_` escapes in the bot modules, 2 in `notifications.ts`, 1
+  `setState`-in-effect and 1 purity warning in the dialog) — none on changed
+  lines.
+- NOT executed: the Convex deploy (free-plan ceiling), so `purgeAlertsSent` is
+  not queryable live, the `bot_health` insert has never run against a real
+  table, and the rose bell entry was not viewed in a browser.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 33, brainstormed (none started)
+
+1. **Prove the capped cadence and the paused note on a live deployment**
+   (round 32 #1 + #2): break delete rights, watch alerts 1…6 an hour apart,
+   sweep 7 go silent with "alerts paused" on `/alerts`, the chip and the dialog,
+   restore rights, watch the retry drain and every stamp clear.
+2. **Bound retry attempts per row** (round 30 #4) — a `chat not found` row is
+   retried until the 48 h retention backstop; `retrying` makes it visible, an
+   `attempts` counter would settle it sooner.
+3. **Keep a short sweep history** (round 30 #5) — last-only cannot show "the
+   sweep stopped running six hours ago".
+4. **Escalate once instead of only stopping** (round 32 #6): the cap and its
+   note end the noise, but an unfixed fault is still unfixed; one "failing
+   since 09:10" summary on the next app open would close the loop without a
+   timer.
+5. **Make the bell's dedupe explicit** (round 32 #7) — it is title-keyed and
+   hard-coded to one hour; pass the window in rather than relying on titles.
+6. **Show `retrying` in the chip's label** (round 31 #6) when a backlog
+   persists — needs a threshold so the chip does not flicker on one 5xx.
+7. **Contract test for the backend keep-list** (round 28 #5).
+8. **Expired `operatorDeviceTrust` sweep** (round 28 #6; needs an index).
+9. **Prove the cached height path on a funded send** (round 27 #1).
+10. **`heightReadsFailed` count** (round 25 #7).
+11. **Redact URLs inside RPC error bodies** (round 25 #3).
+12. **Add a `(chatId, sentAt)` composite index** (round 25 #5).
+13. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+14. **Operator-selectable digest cadence** (round 27 #11).
+15. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6).
+16. **Track multiple channel ids** (round 26 #12).
+17. **Show the local sweep in Settings** (round 28 #15).

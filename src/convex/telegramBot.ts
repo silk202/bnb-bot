@@ -739,6 +739,9 @@ export const getBotHealth = query({
         channelPurge: boolean;
         /** Last purge sweep's tally — null until one has reported. */
         purgeLast: PurgeTelemetry | null;
+        /** Alerts the current fault has sent (0 when none is outstanding); at
+            PURGE_ALERT_CAP the sweep is silent and the UI explains why. */
+        purgeAlertsSent: number;
         engineRunning: boolean | null;
         /** Independent SOL engine switch — its own start/stop state. */
         solEngineRunning: boolean | null;
@@ -776,6 +779,7 @@ export const getBotHealth = query({
       digestEnabled: row?.digestEnabled ?? true,
       channelPurge: row?.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row) ?? null,
+      purgeAlertsSent: row?.purgeAlertsSent ?? 0,
       engineRunning: state?.botRunning ?? null,
       solEngineRunning: state ? state.solBotRunning !== false : null,
       botUsername: row?.botUsername ?? null,
@@ -818,6 +822,9 @@ export const getBotStatus = query({
     /** Last purge sweep's tally (stamped by the every-10-minute cron) — null
         until one has reported, never a fabricated "0 deleted". */
     purgeLast: PurgeTelemetry | null;
+    /** Alerts the current fault has sent; at PURGE_ALERT_CAP the sweep has gone
+        quiet on purpose and the dialog says so next to the tally. */
+    purgeAlertsSent: number;
     webhookOk: boolean | null;
     webhookCheckedAt: number | null;
     /** Cached @username — stamped by autoConnectBot and the webhook self-heal cron
@@ -872,6 +879,7 @@ export const getBotStatus = query({
       autoPurge: row?.autoPurge !== false,
       channelPurge: row?.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row) ?? null,
+      purgeAlertsSent: row?.purgeAlertsSent ?? 0,
       webhookOk: row?.webhookOk ?? null,
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       botUsername: row?.botUsername ?? null,

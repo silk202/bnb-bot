@@ -241,6 +241,20 @@ export const PURGE_ALERT_REPEAT_MS = 60 * 60 * 1000;
  */
 export const PURGE_ALERT_CAP = 6;
 
+/**
+ * The suffix that keeps a capped fault from reading as a healthy one.
+ *
+ * At the cap the sweep stops alerting but keeps stamping failures, so the
+ * `/alerts` line, the chip tooltip and the dialog would otherwise show "3
+ * failed" next to total silence with no explanation. Empty while alerts are
+ * still flowing (and after a clean sweep clears the count), so the line stays
+ * quiet in the normal case.
+ */
+export function purgeAlertPauseNote(alertsSent: number | null | undefined): string {
+  if ((alertsSent ?? 0) < PURGE_ALERT_CAP) return "";
+  return ` · alerts paused after ${PURGE_ALERT_CAP} (a clean sweep resumes them)`;
+}
+
 /** What the wording needs to know about this alert's place in the fault. */
 export interface PurgeAlertInfo {
   /** 1-based number of this alert; 1 is the first. */
@@ -1523,6 +1537,8 @@ export function alertsMessage(
     channelPurge?: boolean;
     /** Last sweep's tally, when the cron has reported one. */
     purgeLast?: PurgeTelemetry;
+    /** Alerts the current fault has sent — at the cap the board says so. */
+    purgeAlertsSent?: number;
   },
   chat: Pick<BotChat, "silent">,
   now: number = Date.now(),
@@ -1538,7 +1554,7 @@ export function alertsMessage(
       `• This chat: ${chat.silent ? "🔇 muted" : "🔔 normal"}`,
       `• Auto-purge (bot chats): ${cfg.autoPurge ? "🧹 ON — bot messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
       `• Auto-purge (channel): ${channelPurge ? "🧹 ON — channel posts older than 15 min are deleted" : "❌ OFF — channel posts stay"}`,
-      `• Last sweep: ${purgeTelemetryLine(cfg.purgeLast, now)}`,
+      `• Last sweep: ${purgeTelemetryLine(cfg.purgeLast, now)}${purgeAlertPauseNote(cfg.purgeAlertsSent)}`,
     ].join("\n"),
     keyboard: [
       [

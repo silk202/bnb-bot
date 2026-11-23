@@ -9,7 +9,16 @@ import { useTerminal } from "@/hooks/use-terminal";
 import { cn } from "@/lib/utils";
 import { api } from "@/convex/_generated/api";
 import { useQuery } from "convex/react";
-import { Bell, BellRing, CheckCheck, Clock, Newspaper, Sparkles, Zap } from "lucide-react";
+import {
+  Bell,
+  BellRing,
+  CheckCheck,
+  Clock,
+  Newspaper,
+  ShieldAlert,
+  Sparkles,
+  Zap,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 function ago(ts: number): string {
@@ -161,7 +170,9 @@ export function NotificationsBell() {
                         ? "bg-emerald-500/15 text-emerald-400"
                         : n.kind === "session_update"
                           ? "bg-sky-500/15 text-sky-400"
-                          : "bg-primary/12 text-primary",
+                          : n.kind === "bot_health"
+                            ? "bg-rose-500/15 text-rose-400"
+                            : "bg-primary/12 text-primary",
                   )}
                 >
                   {n.kind === "honey_pot" ? (
@@ -170,6 +181,8 @@ export function NotificationsBell() {
                     <Newspaper className="size-3" />
                   ) : n.kind === "session_update" ? (
                     <Clock className="size-3" />
+                  ) : n.kind === "bot_health" ? (
+                    <ShieldAlert className="size-3" />
                   ) : (
                     <Zap className="size-3" />
                   )}

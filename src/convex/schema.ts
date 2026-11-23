@@ -279,6 +279,10 @@ const schema = defineSchema(
         v.literal("honey_pot"),
         v.literal("market_news"),
         v.literal("session_update"),
+        // Operator-only infrastructure fault (the bot message sweep). Its own
+        // kind so the bell gets its own icon and its dedupe key cannot collide
+        // with a session update; the writer resolves recipients server-side.
+        v.literal("bot_health"),
       ),
       title: v.string(),
       body: v.string(),

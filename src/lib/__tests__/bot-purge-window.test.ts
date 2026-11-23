@@ -20,6 +20,7 @@ import {
   classifyPurgeFailure,
   PURGE_ALERT_CAP,
   PURGE_ALERT_REPEAT_MS,
+  purgeAlertPauseNote,
   purgeAlertPlan,
   purgeCutoff,
   purgeFailureAlert,
@@ -359,6 +360,21 @@ describe("purge failure wording — a repeat never claims 'two sweeps in a row'"
         since: NOW - 70 * 60 * 1000,
       }),
     ).toContain("**Message sweep still failing**");
+  });
+});
+
+describe("purgeAlertPauseNote — a capped fault is not a silent healthy one", () => {
+  test("no note while alerts still flow", () => {
+    expect(purgeAlertPauseNote(undefined)).toBe("");
+    expect(purgeAlertPauseNote(0)).toBe("");
+    expect(purgeAlertPauseNote(PURGE_ALERT_CAP - 1)).toBe("");
+  });
+
+  test("at the cap the line says alerting stopped, and how it resumes", () => {
+    expect(purgeAlertPauseNote(PURGE_ALERT_CAP)).toContain(
+      `alerts paused after ${PURGE_ALERT_CAP}`,
+    );
+    expect(purgeAlertPauseNote(PURGE_ALERT_CAP + 3)).toContain("a clean sweep resumes them");
   });
 });
 

@@ -382,12 +382,9 @@ export const recordSessionAlerts = internalMutation({
  * persists: the sweep retries every 10 minutes, and a badge climbing six times
  * an hour would drown the signal.
  *
- * Kind note: the bell's kind union has no bot-health literal yet, and adding
- * one changes the generated data model (codegen needs a deployment, which is
- * disabled). Until then this uses `session_update`, the existing system-event
- * bucket, and states the fault plainly in the title and body — the content is
- * real, only the bucket is borrowed. Follow-up: add a distinct `bot_health`
- * kind when codegen is available so the icon and dedupe key are its own.
+ * Own kind: `bot_health` (round 33). It is a distinct bucket so the bell's
+ * icon and its dedupe key are the fault's own — an hourly bot-health entry can
+ * never suppress, or be suppressed by, a session update.
  */
 export const recordBotHealthAlert = internalMutation({
   args: { title: v.string(), body: v.string() },
@@ -406,7 +403,7 @@ export const recordBotHealthAlert = internalMutation({
       const recent = await ctx.db
         .query("notifications")
         .withIndex("by_user_kind", (q) =>
-          q.eq("userId", state.userId).eq("kind", "session_update"),
+          q.eq("userId", state.userId).eq("kind", "bot_health"),
         )
         .order("desc")
         .take(20);
@@ -414,7 +411,7 @@ export const recordBotHealthAlert = internalMutation({
       if (already) continue;
       await ctx.db.insert("notifications", {
         userId: state.userId,
-        kind: "session_update",
+        kind: "bot_health",
         title,
         body,
         ts: now,
