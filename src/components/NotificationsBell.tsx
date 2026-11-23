@@ -138,7 +138,8 @@ export function NotificationsBell() {
             <Bell className="size-5 text-muted-foreground/50" />
             <p className="text-xs text-muted-foreground">
               No notifications yet — executions, honey-pot finds, session
-              changes and market-news alerts land here the moment they happen.
+              changes, market-news alerts and bot-health faults land here the moment they
+              happen.
             </p>
           </div>
         ) : (

@@ -2334,3 +2334,124 @@ change here.
     #6).
 14. **Track multiple channel ids, not one env id** (round 26 #12).
 15. **Show the local sweep in Settings** (round 28 #15).
+
+---
+
+## Round 30 — the sweep retries instead of forgetting, and the fault reaches the bell (2026-11-23)
+
+Two follow-ups from round 29, plus the re-ranked list. This closes the largest
+correctness gap in the purge: a delete that failed for a reason that can heal
+used to lose its tracking row forever.
+
+### 1. Attempt first, drop on a verdict
+
+The sweep used to `takeStaleMessages` — remove the rows in the same mutation
+that handed them to the action — and then call Telegram. Any refusal, transient
+or permanent, therefore untracked the message: a 5xx, a rate limit, or the bot
+briefly losing admin rights left the message in the chat with no row to retry
+and no way to ever remove it. The round-29 alert had to promise only that NEW
+posts would purge again.
+
+The order is now inverted:
+
+- `listStaleMessages` (internal query) returns the due rows WITHOUT deleting
+  them;
+- `deleteTrackedMessages` attempts `deleteMessage` for each, then drops the row
+  (`dropTrackedMessages`) only when Telegram has a verdict:
+  - accepted → counted `deleted`, row dropped;
+  - refused permanently → counted `failed`, row dropped;
+  - refused transiently → counted `failed`, row KEPT and counted `retrying`.
+- `classifyPurgeFailure(description)` owns the verdict: `permanent` only for
+  "message to delete not found", "message can't be deleted", "message is too
+  old" and invalid message ids — the cases where Telegram will never accept a
+  delete. Missing rights, a kicked bot, `chat not found`, 429s, 5xx and network
+  errors are `transient`, because restoring rights or waiting heals them.
+- Rows attempted in one run are skipped by id, so a retry backlog cannot make
+  the bounded batch loop spin; the next sweep (10 minutes later) retries them.
+  The 48 h retention sweep remains the backstop for a row that never settles.
+- A retried delete is harmless: deleting a message that is already gone comes
+  back as "message to delete not found", which settles the row.
+
+The tally keeps `deleted`/`failed`; `failed` now means "refused this sweep" and
+includes retries. `purgeChatMessages` carries `retrying` too, and `/purge`'s
+reply tells the operator which failures will be retried versus which are final
+(already gone or past Telegram's 48 h limit).
+
+### 2. The fault alert reaches the in-app bell
+
+The Telegram alert is useless exactly when Telegram is the broken channel. The
+same two-in-a-row trigger now also writes a notification for every operator
+user (resolved from `terminalStates` owners and gated by `isOperatorEmail`), so
+the bell shows the fault with the same tallies. The body is one shared builder
+(`purgeFailureSummary`) rendered plain for the bell and with a bold header for
+Telegram — the numbers cannot drift between the two channels.
+
+Deduped to one entry per hour per operator while the fault persists: the sweep
+runs every 10 minutes, and a badge climbing six times an hour would bury the
+signal. Writing the bell entry is independent of linked chats existing, and
+best-effort like every other part of the alert.
+
+Honest limitation: the notifications kind union has no bot-health literal, and
+adding one changes the generated data model, which needs `convex codegen`
+against a deployment — blocked while serving is disabled (codegen without a
+deployment fails on `CONVEX_DEPLOYMENT`). The entry therefore uses the existing
+`session_update` system-event bucket and says what it is in its title/body.
+Follow-up #2 below adds a distinct kind once codegen can run.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 828 pass / 0 fail across 69 files (825 → +3: one shared-summary
+  test and two classification tests covering every permanent and transient
+  description shape the Bot API returns).
+- `eslint` on the five touched files: 17 problems, the pre-existing baseline
+  (12 convex bot unused imports, 2 `\_` escapes, 2 notifications, 1 bell
+  warning) — none in the new code or tests.
+- NOT executed: the Convex deploy (still disabled by the free-plan ceiling), so
+  the retry ordering, the new internal query/mutation and the bell entry are
+  code-only; no live Telegram call, no browser view of the bell, and no funded
+  devnet send.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 30, brainstormed (none started)
+
+1. **Prove the retry path on a live deployment.** The one thing unit tests
+   cannot show: a revoked admin right, a restored right, and the same rows
+   deleted on the next sweep. Until a deploy runs, the ordering is code-only.
+2. **Add a `bot_health` notification kind.** Needs `convex codegen` against a
+   deployment; then the bell gets its own icon and dedupe key instead of
+   borrowing `session_update`.
+3. **Stop alerting every 10 minutes on a long fault.** The alert repeats each
+   sweep while failures continue (deliberate: it is an active fault), but a
+   fault that lasts hours should escalate once, not 36 times. A stored
+   `purgeAlertedAt`/streak length would let it alert at 2 sweeps and then only
+   every hour.
+4. **Bound retry attempts per row.** A transient classification that never
+   heals (`chat not found` for a deleted group) keeps a row until the 48 h
+   retention sweep. That is safe because retention is a hard backstop, but an
+   `attempts` counter would settle it sooner and make the "stuck" state
+   visible.
+5. **Keep a short sweep history** (round 28 #4) — last-only still cannot show
+   "the sweep stopped running six hours ago".
+6. **Expose `retrying` in the stored tally.** The sweep returns it, but `/alerts`
+   and the chip only see `failed`; a stored count would show whether a fault is
+   draining. Needs a schema field and codegen.
+7. **Contract test for the backend keep-list** (round 28 #5).
+8. **Expired `operatorDeviceTrust` sweep** (round 28 #6; needs an index).
+9. **Prove the cached height path on a funded send** (round 27 #1).
+10. **`heightReadsFailed` count** (round 25 #7).
+11. **Redact URLs inside RPC error bodies** (round 25 #3).
+12. **Add a `(chatId, sentAt)` composite index** (round 25 #5) — the retry path
+    still filters a chat's rows after `by_chat.take(100)`.
+13. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+14. **Operator-selectable digest cadence** (round 27 #11).
+15. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6).
+16. **Track multiple channel ids** (round 26 #12).
+17. **Show the local sweep in Settings** (round 28 #15).

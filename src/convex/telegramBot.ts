@@ -35,6 +35,8 @@ import {
   purgeSkipNote,
   shouldAlertPurgeFailures,
   purgeFailureAlert,
+  purgeFailureSummary,
+  classifyPurgeFailure,
   CHANNEL_MESSAGE_TTL_MS,
   selectPurgeable,
   type BotMessageSource,
@@ -1472,12 +1474,15 @@ export const recordBotMessage = internalMutation({
 });
 
 /**
- * Take (and forget) the oldest tracked messages at or before `cutoff`. Rows
- * leave the table in the same transaction that returns them, so a retried
- * sweep can never delete the same Telegram message twice. A failed delete is
- * counted, not retried forever: the Bot API refuses messages older than 48 h.
+ * List the oldest tracked messages at or before `cutoff` WITHOUT removing
+ * them. Rows now leave the table only after the delete attempt has a verdict
+ * (`dropTrackedMessages`), so a transient refusal can be retried instead of
+ * silently untracking a message that is still in the chat.
+ *
+ * One selection rule (`selectPurgeable`) still decides the window and both
+ * scopes for the cron sweep, `/purge` and the panel.
  */
-export const takeStaleMessages = internalMutation({
+export const listStaleMessages = internalQuery({
   args: {
     cutoff: v.number(),
     limit: v.number(),
@@ -1495,48 +1500,91 @@ export const takeStaleMessages = internalMutation({
           .query("telegramBotMessages")
           .withIndex("by_sent", (q) => q.lte("sentAt", cutoff))
           .take(limit);
-    // One selection rule (`selectPurgeable`) for the cron sweep, `/purge` and
-    // the panel: the window and both scopes are unit-tested there rather than
-    // re-derived at each call site.
-    const stale = selectPurgeable(rows, {
+    return selectPurgeable(rows, {
       cutoff,
       ...(chatId ? { chatId } : {}),
       ...(source ? { source } : {}),
     });
-    for (const row of stale) await ctx.db.delete(row._id);
-    return { rows: stale.map((row) => ({ chatId: row.chatId, messageId: row.messageId })) };
   },
 });
 
-/** Delete tracked messages in bounded batches; returns the honest tally. */
+/**
+ * Forget tracking rows whose delete has a final verdict: Telegram accepted it,
+ * or refused it permanently (`classifyPurgeFailure`). Idempotent — a row that a
+ * concurrent sweep already removed is skipped, not an error.
+ */
+export const dropTrackedMessages = internalMutation({
+  args: { ids: v.array(v.id("telegramBotMessages")) },
+  handler: async (ctx, { ids }) => {
+    let dropped = 0;
+    for (const id of ids) {
+      const row = await ctx.db.get(id);
+      if (!row) continue;
+      await ctx.db.delete(id);
+      dropped += 1;
+    }
+    return { dropped };
+  },
+});
+
+/** One source-scoped sweep result; `retrying` rows stayed tracked. */
+type PurgeResult = { deleted: number; failed: number; retrying: number };
+
+/**
+ * Delete tracked messages in bounded batches. The attempt comes FIRST: a row is
+ * dropped only once Telegram has a verdict — accepted, or refused permanently
+ * (message gone / past its 48 h delete limit). A transient refusal (missing
+ * rights, kicked bot, rate limit, 5xx, network) keeps the row tracked so the
+ * next sweep retries it. Rows attempted in this run are skipped by id, so a
+ * retry backlog cannot make the batch loop spin on the same rows.
+ */
 async function deleteTrackedMessages(
   ctx: ActionCtx,
   token: string,
   cutoff: number,
   scope: { chatId?: string; source?: BotMessageSource } = {},
-): Promise<{ deleted: number; failed: number }> {
+): Promise<PurgeResult> {
   let deleted = 0;
   let failed = 0;
+  let retrying = 0;
+  const attempted = new Set<string>();
   const limit = 100;
   for (let pass = 0; pass < 5; pass += 1) {
-    const batch = await ctx.runMutation(internal.telegramBot.takeStaleMessages, {
+    const batch = await ctx.runQuery(internal.telegramBot.listStaleMessages, {
       cutoff,
       limit,
       ...(scope.chatId ? { chatId: scope.chatId } : {}),
       ...(scope.source ? { source: scope.source } : {}),
     });
-    if (!batch.rows.length) break;
-    for (const msg of batch.rows) {
+    const rows = batch.filter((row) => !attempted.has(row._id));
+    if (!rows.length) break;
+    const settled: Array<Id<"telegramBotMessages">> = [];
+    for (const msg of rows) {
+      attempted.add(msg._id);
       const res = await tgCall(token, "deleteMessage", {
         chat_id: msg.chatId,
         message_id: msg.messageId,
       });
-      if (res.ok) deleted += 1;
-      else failed += 1;
+      if (res.ok) {
+        deleted += 1;
+        settled.push(msg._id);
+        continue;
+      }
+      failed += 1;
+      if (classifyPurgeFailure(res.description) === "permanent") settled.push(msg._id);
+      else retrying += 1;
     }
-    if (batch.rows.length < limit) break;
+    if (settled.length) {
+      try {
+        await ctx.runMutation(internal.telegramBot.dropTrackedMessages, { ids: settled });
+      } catch {
+        // The rows stay tracked; a later sweep re-drops them (a second delete
+        // of an already-gone message classifies as permanent, so it settles).
+      }
+    }
+    if (batch.length < limit) break;
   }
-  return { deleted, failed };
+  return { deleted, failed, retrying };
 }
 
 /**
@@ -1595,6 +1643,16 @@ async function alertPurgeFailures(
   current: PurgeTelemetry,
   now: number,
 ): Promise<number> {
+  // The bell entry is the channel that still works when Telegram itself is the
+  // broken one, so it is written FIRST and independently of any chat existing.
+  try {
+    await ctx.runMutation(internal.notifications.recordBotHealthAlert, {
+      title: "Message sweep failing",
+      body: purgeFailureSummary(previous, current, now),
+    });
+  } catch {
+    // Advisory only — the stamped tally stays the record of the fault.
+  }
   const chats = await ctx.runQuery(internal.telegramBot.listChats, { activeOnly: true });
   if (!chats.length) return 0;
   const text = purgeFailureAlert(previous, current, now);
@@ -1628,10 +1686,19 @@ export const purgeBotMessages = internalAction({
   args: {},
   handler: async (
     ctx,
-  ): Promise<{ ok: boolean; deleted: number; failed: number; alerted: number; skipped?: string }> => {
+  ): Promise<{
+    ok: boolean;
+    deleted: number;
+    failed: number;
+    retrying: number;
+    alerted: number;
+    skipped?: string;
+  }> => {
     const cfg = await ctx.runQuery(internal.telegramBot.getConfig, {});
     // No config row at all is not "auto-purge off" — say what is true.
-    if (!cfg) return { ok: true, deleted: 0, failed: 0, alerted: 0, skipped: "not configured" };
+    if (!cfg) {
+      return { ok: true, deleted: 0, failed: 0, retrying: 0, alerted: 0, skipped: "not configured" };
+    }
 
     const stamp = async (deleted: number, failed: number, skipped?: string): Promise<number> => {
       const at = Date.now();
@@ -1657,13 +1724,21 @@ export const purgeBotMessages = internalAction({
         ok: skipped !== "bot token not configured",
         deleted: 0,
         failed: 0,
+        retrying: 0,
         alerted: 0,
         skipped,
       };
     }
     if (!token) {
       // `purgeSkipNote` already covers this; the guard keeps the types honest.
-      return { ok: false, deleted: 0, failed: 0, alerted: 0, skipped: "bot token not configured" };
+      return {
+        ok: false,
+        deleted: 0,
+        failed: 0,
+        retrying: 0,
+        alerted: 0,
+        skipped: "bot token not configured",
+      };
     }
 
     // Two scopes, one sweep, two windows. Chat boards clear whenever auto-purge
@@ -1674,9 +1749,10 @@ export const purgeBotMessages = internalAction({
       ? await deleteTrackedMessages(ctx, token, purgeCutoff(now, CHANNEL_MESSAGE_TTL_MS), {
           source: "channel",
         })
-      : { deleted: 0, failed: 0 };
+      : { deleted: 0, failed: 0, retrying: 0 };
     const deleted = bot.deleted + channel.deleted;
     const failed = bot.failed + channel.failed;
+    const retrying = bot.retrying + channel.retrying;
     const at = await stamp(deleted, failed);
 
     // `cfg.purgeLast` was read before this sweep ran, so it IS the previous
@@ -1693,7 +1769,7 @@ export const purgeBotMessages = internalAction({
       );
     }
 
-    return { ok: true, deleted, failed, alerted };
+    return { ok: true, deleted, failed, retrying, alerted };
   },
 });
 
@@ -1707,9 +1783,12 @@ export const purgeBotMessages = internalAction({
  */
 export const purgeChatMessages = internalAction({
   args: { chatId: v.string() },
-  handler: async (ctx, { chatId }): Promise<{ ok: boolean; deleted: number; failed: number }> => {
+  handler: async (
+    ctx,
+    { chatId },
+  ): Promise<{ ok: boolean; deleted: number; failed: number; retrying: number }> => {
     const token = await resolveBotToken(ctx);
-    if (!token) return { ok: false, deleted: 0, failed: 0 };
+    if (!token) return { ok: false, deleted: 0, failed: 0, retrying: 0 };
     const res = await deleteTrackedMessages(ctx, token, Date.now(), { chatId, source: "bot" });
     return { ok: true, ...res };
   },
@@ -2214,7 +2293,12 @@ export const handleUpdate = internalAction({
           res.ok
             ? [
                 `🧹 Purged ${res.deleted} bot message${res.deleted === 1 ? "" : "s"} from this chat.`,
-                res.failed ? `${res.failed} could not be deleted (older than 48 h).` : "",
+                res.retrying
+                  ? `${res.retrying} could not be deleted right now — still tracked, the next sweep retries them.`
+                  : "",
+                res.failed - res.retrying
+                  ? `${res.failed - res.retrying} could not be deleted (already gone or past Telegram's 48 h limit).`
+                  : "",
                 "Channel posts are left alone by /purge — they follow the channel purge switch above.",
                 cfg.autoPurge
                   ? "Auto-purge stays on: anything the bot posts here is deleted after 10 minutes."

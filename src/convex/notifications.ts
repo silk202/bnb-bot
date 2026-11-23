@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { getCurrentUser } from "./users";
+import { isOperatorEmail } from "./operatorEmails";
 import {
   action,
   internalAction,
@@ -366,6 +367,57 @@ export const recordSessionAlerts = internalMutation({
         title,
         body: `${sessionLabel} · ${body}`,
         ts: Date.now(),
+        read: false,
+      });
+      inserted += 1;
+    }
+    return inserted;
+  },
+});
+
+/**
+ * In-app twin of the Telegram purge-fault alert — written for every operator
+ * user (the bell is per-user) so the fault is still visible when Telegram
+ * itself is the broken channel. Deduped to one entry per hour while the fault
+ * persists: the sweep retries every 10 minutes, and a badge climbing six times
+ * an hour would drown the signal.
+ *
+ * Kind note: the bell's kind union has no bot-health literal yet, and adding
+ * one changes the generated data model (codegen needs a deployment, which is
+ * disabled). Until then this uses `session_update`, the existing system-event
+ * bucket, and states the fault plainly in the title and body — the content is
+ * real, only the bucket is borrowed. Follow-up: add a distinct `bot_health`
+ * kind when codegen is available so the icon and dedupe key are its own.
+ */
+export const recordBotHealthAlert = internalMutation({
+  args: { title: v.string(), body: v.string() },
+  handler: async (ctx, { title, body }) => {
+    const now = Date.now();
+    const states = await ctx.db.query("terminalStates").collect();
+    const seen = new Set<string>();
+    let inserted = 0;
+    for (const state of states) {
+      if (seen.has(state.userId)) continue;
+      seen.add(state.userId);
+      const user = await ctx.db.get(state.userId);
+      const email = user?.email?.trim().toLowerCase();
+      if (!email) continue;
+      if (!(await isOperatorEmail({ db: ctx.db }, email))) continue;
+      const recent = await ctx.db
+        .query("notifications")
+        .withIndex("by_user_kind", (q) =>
+          q.eq("userId", state.userId).eq("kind", "session_update"),
+        )
+        .order("desc")
+        .take(20);
+      const already = recent.some((n) => n.title === title && now - n.ts < 60 * 60 * 1000);
+      if (already) continue;
+      await ctx.db.insert("notifications", {
+        userId: state.userId,
+        kind: "session_update",
+        title,
+        body,
+        ts: now,
         read: false,
       });
       inserted += 1;

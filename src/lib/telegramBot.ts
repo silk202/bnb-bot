@@ -36,7 +36,11 @@ export interface PurgeTelemetry {
   at: number;
   /** Messages Telegram accepted a deleteMessage for. */
   deleted: number;
-  /** Deletes Telegram refused (past its 48 h limit, already gone, …). */
+  /**
+   * Deletes Telegram refused this sweep (missing rights, rate limit, a 5xx, or
+   * a message past its 48 h delete limit). A transient refusal keeps the row
+   * tracked, so the next sweep retries it.
+   */
   failed: number;
   /** Why the sweep did nothing, when it did nothing on purpose. */
   skipped: string | null;
@@ -206,11 +210,36 @@ export function shouldAlertPurgeFailures(
 }
 
 /**
- * The fault alert for linked chats. Real numbers only — both sweeps' tallies —
- * plus the one consequence an operator needs to know: a refused row leaves the
- * tracking table, so restoring rights purges new posts but those messages stay.
+ * Telegram's verdict on a refused `deleteMessage` — and therefore on whether
+ * the tracking row survives.
+ *
+ * `permanent`: the message can never be deleted (already gone, past the 48 h
+ * delete limit, or Telegram marks the id invalid) — the row is dropped so no
+ * future sweep re-counts it. `transient`: the refusal is a condition that can
+ * heal — missing rights, a kicked bot, a rate limit, a 5xx or a network error —
+ * so the row stays tracked and the next sweep retries it. Guessing the other
+ * way either loses a live message or retries a dead one forever.
  */
-export function purgeFailureAlert(
+export function classifyPurgeFailure(description: string): "permanent" | "transient" {
+  const d = description.toLowerCase();
+  if (
+    d.includes("message to delete not found") ||
+    d.includes("message can't be deleted") ||
+    d.includes("message cannot be deleted") ||
+    d.includes("message is too old") ||
+    d.includes("message_id_invalid") ||
+    d.includes("message id is invalid")
+  ) {
+    return "permanent";
+  }
+  return "transient";
+}
+
+/**
+ * The fault's plain-text body — shared by the Telegram alert and the in-app
+ * bell entry, so both channels tell the same story from the same numbers.
+ */
+export function purgeFailureSummary(
   previous: PurgeTelemetry | null | undefined,
   current: PurgeTelemetry,
   now: number,
@@ -218,15 +247,23 @@ export function purgeFailureAlert(
   const line = (label: string, t: PurgeTelemetry) =>
     `${label}: ${fmtAgo(t.at, now)} · ${t.deleted} deleted · ${t.failed} failed`;
   return [
-    "⚠️ **Message sweep is failing**",
-    "",
     "Two sweeps in a row could not delete messages from Telegram.",
     ...(previous ? [`• ${line("Previous", previous)}`] : []),
     `• ${line("Latest", current)}`,
-    "",
     "Usual cause: the bot was removed from the chat/channel, or lost its delete/admin rights.",
-    "Restore those rights and new posts purge again; messages Telegram already refused are no longer tracked, so they stay in the chat.",
+    "Refused messages stay tracked, so the next sweep retries them once the rights are back; only messages Telegram will never accept a delete for are dropped.",
   ].join("\n");
+}
+
+/** The fault alert for linked chats: a bold header over the shared summary. */
+export function purgeFailureAlert(
+  previous: PurgeTelemetry | null | undefined,
+  current: PurgeTelemetry,
+  now: number,
+): string {
+  return ["⚠️ **Message sweep is failing**", "", purgeFailureSummary(previous, current, now)].join(
+    "\n",
+  );
 }
 
 /** Telegram inline-keyboard button shape (url vs callback). */

@@ -17,8 +17,10 @@ import { describe, expect, test } from "bun:test";
 import {
   BOT_MESSAGE_TTL_MS,
   CHANNEL_MESSAGE_TTL_MS,
+  classifyPurgeFailure,
   purgeCutoff,
   purgeFailureAlert,
+  purgeFailureSummary,
   purgeSkipNote,
   purgeTelemetryLine,
   selectPurgeable,
@@ -216,7 +218,43 @@ describe("purge failure alert — two sweeps in a row, real numbers", () => {
     const text = purgeFailureAlert(previous, current, NOW);
     expect(text).toContain("Previous: 10m ago · 1 deleted · 2 failed");
     expect(text).toContain("Latest: 1m ago · 0 deleted · 3 failed");
-    expect(text).toContain("stay in the chat");
+    expect(text).toContain("stay tracked");
     expect(purgeFailureAlert(undefined, current, NOW)).not.toContain("Previous:");
+  });
+
+  test("the bell entry and the Telegram alert share one plain-text body", () => {
+    const previous = { at: NOW - 600_000, deleted: 1, failed: 2, skipped: null };
+    const current = { at: NOW - 60_000, deleted: 0, failed: 3, skipped: null };
+    const summary = purgeFailureSummary(previous, current, NOW);
+    expect(summary).not.toContain("**");
+    expect(summary).toContain("Previous: 10m ago · 1 deleted · 2 failed");
+    expect(purgeFailureAlert(previous, current, NOW)).toContain(summary);
+  });
+});
+
+describe("classifyPurgeFailure — retry only what can heal", () => {
+  test("a message that is gone or too old can never be deleted again", () => {
+    expect(classifyPurgeFailure("Bad Request: message to delete not found")).toBe("permanent");
+    expect(classifyPurgeFailure("Bad Request: message can't be deleted for everyone")).toBe(
+      "permanent",
+    );
+    expect(classifyPurgeFailure("Bad Request: message cannot be deleted")).toBe("permanent");
+    expect(classifyPurgeFailure("Bad Request: message is too old to be deleted")).toBe(
+      "permanent",
+    );
+    expect(classifyPurgeFailure("Bad Request: MESSAGE_ID_INVALID")).toBe("permanent");
+  });
+
+  test("rights, removal, rate limits and outages stay retryable", () => {
+    expect(classifyPurgeFailure("Forbidden: bot was kicked from the group chat")).toBe(
+      "transient",
+    );
+    expect(classifyPurgeFailure("Forbidden: not enough rights to delete this message")).toBe(
+      "transient",
+    );
+    expect(classifyPurgeFailure("Bad Request: chat not found")).toBe("transient");
+    expect(classifyPurgeFailure("Too Many Requests: retry after 5")).toBe("transient");
+    expect(classifyPurgeFailure("Internal Server Error")).toBe("transient");
+    expect(classifyPurgeFailure("fetch failed")).toBe("transient");
   });
 });
