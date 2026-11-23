@@ -1804,7 +1804,7 @@ switch exists in BOTH places the operator works: the bot's `/alerts` board
 `resolveCallbackData` in the presentation layer, and the dispatcher's switch is
 now EXHAUSTIVE over `BotCommand` (`const unhandled: never = cmd` in the final
 branch) — a new command kind with no case is a typecheck failure, not a silent
-fallback. A new parity test walks every keyboard every builder can emit (38
+fallback. A new parity test walks every keyboard every builder can emit (32
 boards) and asserts each `callback_data` resolves to a kind in
 `HANDLED_COMMAND_KINDS` and stays within Telegram's 64-byte limit; it also parses
 every `/command` the help board advertises and fails on an unknown one. Added
@@ -1816,8 +1816,8 @@ the native menu matches the board.
 ### Checks
 
 - `bun run typecheck`: exit 0 (including the new `never` exhaustiveness check).
-- `bun test`: 778 pass / 0 fail across 66 files (760 → 778: +11 transport/expiry,
-  +5 redaction, +8 menu parity minus 6 rewritten assertions).
+- `bun test`: 778 pass / 0 fail across 66 files (760 → 778: +3 redaction cases,
+  +7 transport/expiry wire tests, +8 menu-parity tests).
 - `eslint` on the twelve touched files: the pre-change baseline exactly (2
   notifications, 4 dialog, 12 convex bot, 2 lib bot — all pre-existing, measured
   by linting `git show HEAD:<file>`), 0 new problems. The one new-file warning
