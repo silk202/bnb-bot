@@ -91,7 +91,7 @@ export function BotStatusChip() {
         `Linked chats: ${chats}`,
         engineLine("BNB engine", health.engineRunning),
         engineLine("SOL engine", health.solEngineRunning),
-        `Digest: ${health.digestEnabled ? "on (15 min)" : "off"}`,
+        `Digest: ${health.digestEnabled ? "on (10 min)" : "off"}`,
         "TASignal channel is separate — this chip is TAEngine only.",
       ].join("\n")
     : "Telegram Operator Bot";

@@ -1981,3 +1981,97 @@ omitted, OFF leaves the chat sweep untouched).
 12. **Track channel ids, not one channel.** `trackChannelMessage` reads
     `TELEGRAM_CHAT_ID` at send time; if alert routing ever supports more than
     one channel, the purge needs per-target ids rather than one ambient value.
+
+---
+
+## Round 27 — a late height read is shared, and the digest now fits inside the purge window (2026-11-23)
+
+Two follow-ups from round 26: cache the height probe once the slot is past the
+window, and reconcile the digest cadence with `BOT_MESSAGE_TTL_MS`.
+
+### 1. `readBlockHeight` — memoized and single-flight per endpoint
+
+Round 26 stopped paying for a height read inside the blockhash window, but a
+wait past the window still read `getBlockHeight` on every remaining pass, and
+every waiter in a burst read it independently. `readBlockHeight(rpcUrl)` now
+serves both: a reading is reused for `HEIGHT_READ_TTL_MS` (1.5 s — one poll
+gap), and concurrent callers share the in-flight request, so N positions
+closing together send ONE probe to the node instead of N.
+
+The reuse is safe in exactly one direction, and that direction is the one that
+matters: a block height only grows. A cached height already past
+`lastValidBlockHeight` is still past it (so a stale reading can never keep a
+dead transaction alive), and a reading still inside the window can only delay
+the expiry verdict by its own age — under one status pass — never invent one.
+The slot is still never used AS the height. Failures are not cached; the map is
+per endpoint with 8 entries, oldest evicted, and `maxAgeMs <= 0` forces a fresh
+read.
+
+Honest limit: inside a single waiter the poll gap already starts at
+`SIG_POLL_START_MS` (1.5 s) and doubles, so the TTL rarely skips anything for
+one caller. The win is the burst, plus short waits that probe twice in a
+millisecond (the drill's 40–50 ms paths do not, but a rejection path retried
+quickly does). Confirmation request counts per waiter are unchanged.
+
+### 2. The digest runs every 10 minutes, like the purge
+
+The digest cron was `*/15` while the purge deletes at 10 minutes, so every
+digest was deleted 5 minutes before its replacement posted — a chat with the
+digest on sat with no dashboard for a third of every cycle. The cadence is now
+`*/10`, the same window as `BOT_MESSAGE_TTL_MS`, so the sweep always deletes an
+older digest while a newer one is already in the chat. The alternative (a
+second, longer TTL for digest rows) was rejected: one constant keeps the
+invariant the constant documents — a purge never removes the only copy of a
+number — and no source-scoped TTL plumbing is needed.
+
+Because both crons sit on the same offsets, cron ordering is not guaranteed, so
+one tick can delete a digest seconds before the next one lands, and a digest
+can survive a second tick (~20 min, at most two visible) when it posted just
+after the purge ran. Both are bounded; the 5-minute hole is gone. Cost: 144
+digest runs/day instead of 96 (+48, ~0.2% of the 30k call budget), each reading
+the cached fleet-metrics doc rather than scanning tables. The panel chip and
+`/alerts` now say 10 min, not 15.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 796 pass / 0 fail across 67 files (793 → 796: +3 wire tests —
+  two concurrent waiters share one `getBlockHeight`, a fresh reading is reused
+  while `maxAgeMs: 0` re-reads, and a failed read is not cached).
+- `eslint` on the five touched files: 2 problems, both the pre-existing
+  `\_` escapes in `src/lib/telegramBot.ts` (lines 887, 1271) — the same two
+  that were there before this round, and none in the new code or the test.
+- NOT executed: the Convex deploy/cron (deployment still disabled by the
+  free-plan ceiling), any live Telegram call, and any funded devnet send — so
+  the cached-height path is pinned at the wire (two concurrent waiters, one
+  `getBlockHeight`) but not on a real cluster.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 27, brainstormed (none started)
+
+1. **Prove the cached path on a funded send** (round 26 #1). The wire test
+   pins the sharing; only the cluster can prove a real expiry verdict.
+2. **`heightReadsFailed` count** (round 25 #7, still open): a caller cannot
+   tell "still valid" from "could not check".
+3. **Redact URLs inside error bodies** (round 25 #3, still open).
+4. **Drop tracked rows older than 48 h without a send** (round 25 #4).
+5. **Add a `(chatId, sentAt)` composite index** (round 25 #5).
+6. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+7. **Refresh the Trade price cache on a cron** (round 25 #9).
+8. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+   #6).
+9. **Show purge telemetry on `/alerts`** (round 26 #10).
+10. **Track channel ids, not one channel** (round 26 #12).
+11. **Order the digest before the purge inside a tick.** Convex does not
+    guarantee cron order, so a `*/10` digest and a `*/10` purge can land either
+    way round; a distinct offset (`2-59/10`) plus a purge TTL a minute longer
+    than the cadence would make "replace, then delete" deterministic.
+12. **Let the operator choose the digest cadence** (5/10/15 min) in the panel,
+    with the purge window following it — one number, two schedules, so they can
+    never drift apart again.

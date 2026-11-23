@@ -49,11 +49,14 @@ crons.cron("trade-earn-accrual", "5 */3 * * *", internal.trade.accrueEarn, {});
 // unchanged in practice while 240 fewer runs/day leave the call budget.
 crons.cron("trade-chain-watch", "*/3 * * * *", internal.tradeAutoDetection.watchPass, {});
 
-// FlashBolt Telegram Bot — scheduled dashboard digest every 15 min: pushes
+// FlashBolt Telegram Bot — scheduled dashboard digest every 10 min: pushes
 // the real live dashboard to every paired chat when digestEnabled (plus a
 // pairing/webhook health check elsewhere). No-ops when the token is
-// unconfigured, the digest is off, or no chat is paired.
-crons.cron("telegram-bot-digest", "*/15 * * * *", internal.telegramBot.runDigest, {});
+// unconfigured, the digest is off, or no chat is paired. The 10-minute
+// cadence matches BOT_MESSAGE_TTL_MS, so the sweep always deletes the older
+// digest AFTER the next one has replaced it — a chat that leaves digests on
+// never sits in a gap where the dashboard it was reading is gone.
+crons.cron("telegram-bot-digest", "*/10 * * * *", internal.telegramBot.runDigest, {});
 
 // Copier/sniper signal poller — continuously refreshes the shared
 // copierSignals feed from the watched Telegram channels so the SOL FlashBolt
@@ -70,6 +73,7 @@ crons.cron(
 // the bot itself posted (chat boards, digests, trade alerts) and the channel
 // posts once they are older than BOT_MESSAGE_TTL_MS (10 min), so a linked chat
 // always shows the last ten minutes instead of an unbounded scrollback. The
+// digest cron above runs on the same 10-minute window for that reason; the
 // sweep is bounded and batched, removes rows as it goes (no double deletes),
 // and no-ops when the operator turns auto-purge off on /alerts. This is also
 // what keeps the bot's own message volume from feeding DB I/O forever.

@@ -11,9 +11,11 @@
  * the node actually sends, so a future refactor that drops `.value` fails here
  * instead of in production.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   fetchTokenBalanceRaw,
+  readBlockHeight,
+  resetHeightCache,
   solRpcCall,
   waitForSigConfirm,
 } from "../solana-live-execution";
@@ -37,6 +39,12 @@ const sentAt: number[] = [];
 let answer: (method: string, params: unknown[]) => unknown = () => null;
 /** Non-JSON / non-2xx replies: a proxy error page, a rate-limited 429. */
 let respondWith: ((method: string) => Response | null) | null = null;
+
+// The height cache is module state on purpose (a burst of waiters shares one
+// reading), so every test starts from a cold one.
+beforeEach(() => {
+  resetHeightCache();
+});
 
 beforeAll(() => {
   server = Bun.serve({
@@ -291,6 +299,58 @@ describe("waitForSigConfirm — a dead blockhash fails at the expiry", () => {
     expect(out.expired).toBe(true);
     expect(requests.map((r) => r.method)).toContain("getBlockHeight");
     respondWith = null;
+  });
+});
+
+describe("readBlockHeight — one late read serves the whole burst", () => {
+  test("two waiters on the same endpoint share one getBlockHeight", async () => {
+    answer = (method) =>
+      method === "getBlockHeight"
+        ? 1_000_042
+        : { context: { slot: 1_000_500 }, value: [null] };
+    requests.length = 0;
+
+    const [a, b] = await Promise.all([
+      waitForSigConfirm(SIG, rpcUrl, 60_000, { lastValidBlockHeight: 1_000_000 }),
+      waitForSigConfirm(SIG, rpcUrl, 60_000, { lastValidBlockHeight: 1_000_000 }),
+    ]);
+
+    expect(a.expired).toBe(true);
+    expect(b.expired).toBe(true);
+    // Both are past the window and both need the height — one request, not two.
+    expect(requests.filter((r) => r.method === "getBlockHeight")).toHaveLength(1);
+    expect(requests).toHaveLength(3);
+  });
+
+  test("a fresh reading is reused and an expired one is read again", async () => {
+    answer = () => 1_000_042;
+    requests.length = 0;
+
+    await expect(readBlockHeight(rpcUrl)).resolves.toBe(1_000_042);
+    await expect(readBlockHeight(rpcUrl)).resolves.toBe(1_000_042);
+    expect(requests).toHaveLength(1);
+
+    // maxAgeMs 0 means "never reuse", so the caller gets a fresh answer.
+    await expect(readBlockHeight(rpcUrl, 0)).resolves.toBe(1_000_042);
+    expect(requests).toHaveLength(2);
+  });
+
+  test("a failed height read is not cached", async () => {
+    respondWith = (method) =>
+      method === "getBlockHeight"
+        ? new Response("upstream down", {
+            status: 503,
+            headers: { "content-type": "text/plain" },
+          })
+        : null;
+    requests.length = 0;
+
+    await expect(readBlockHeight(rpcUrl)).rejects.toThrow();
+
+    respondWith = null;
+    answer = () => 1_000_042;
+    await expect(readBlockHeight(rpcUrl)).resolves.toBe(1_000_042);
+    expect(requests).toHaveLength(2);
   });
 });
 

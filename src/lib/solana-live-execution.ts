@@ -460,6 +460,69 @@ export function blockhashExpired(blockHeight: number, lastValidBlockHeight: numb
   );
 }
 
+/**
+ * How long one `getBlockHeight` answer stays usable for the expiry check.
+ * Short on purpose: block height moves ~2.5 blocks a second, so a reading may
+ * only delay the verdict that the window is over, never cause it wrongly.
+ */
+export const HEIGHT_READ_TTL_MS = 1_500;
+
+interface HeightReading {
+  height: number;
+  at: number;
+}
+
+/** Last reading per endpoint, oldest evicted — a handful of endpoints at most. */
+const heightReadings = new Map<string, HeightReading>();
+/** Reads in flight, so a burst of waiters shares one request instead of N. */
+const heightReads = new Map<string, Promise<number>>();
+const HEIGHT_CACHE_ENTRIES = 8;
+
+/** Forget cached heights. Tests drive many scenarios through one endpoint. */
+export function resetHeightCache(): void {
+  heightReadings.clear();
+  heightReads.clear();
+}
+
+/**
+ * `getBlockHeight`, memoized for `maxAgeMs` and single-flight per endpoint.
+ *
+ * The expiry check is the only consumer and a height only grows: a cached
+ * reading that is already past `lastValidBlockHeight` is still past it, while a
+ * reading still inside the window can only delay the verdict by its own age —
+ * at most `HEIGHT_READ_TTL_MS`, well under one `getSignatureStatuses` pass. It
+ * never revives a dead transaction and never makes a live one look expired.
+ *
+ * What this saves is the burst: every waiter used to read the height itself, so
+ * N positions closing together sent N probes to the same node for the same
+ * number. Now they share one. `maxAgeMs <= 0` forces a fresh read.
+ */
+export async function readBlockHeight(
+  rpcUrl: string,
+  maxAgeMs: number = HEIGHT_READ_TTL_MS,
+): Promise<number> {
+  const cached = heightReadings.get(rpcUrl);
+  if (cached && maxAgeMs > 0 && Date.now() - cached.at <= maxAgeMs) return cached.height;
+  const pending = heightReads.get(rpcUrl);
+  if (pending) return pending;
+  const read = postRpc<number>(rpcUrl, "getBlockHeight", [{ commitment: "confirmed" }])
+    .then((height) => {
+      if (Number.isFinite(height)) {
+        if (heightReadings.size >= HEIGHT_CACHE_ENTRIES && !heightReadings.has(rpcUrl)) {
+          const oldest = heightReadings.keys().next().value;
+          if (oldest !== undefined) heightReadings.delete(oldest);
+        }
+        heightReadings.set(rpcUrl, { height, at: Date.now() });
+      }
+      return height;
+    })
+    .finally(() => {
+      heightReads.delete(rpcUrl);
+    });
+  heightReads.set(rpcUrl, read);
+  return read;
+}
+
 export interface SigConfirmOpts {
   /**
    * The blockhash expiry the network itself published for this tx (Jupiter's
@@ -538,9 +601,10 @@ export async function waitForSigConfirm(
       const insideWindow = slot !== null && slot <= opts.lastValidBlockHeight;
       if (!insideWindow) {
         try {
-          const height = await postRpc<number>(rpcUrl, "getBlockHeight", [
-            { commitment: "confirmed" },
-          ]);
+          // A cached reading within `HEIGHT_READ_TTL_MS` is enough here: it is
+          // at most one poll gap old, and it can only be stale in the direction
+          // that delays "expired", never in the one that invents it.
+          const height = await readBlockHeight(rpcUrl);
           if (blockhashExpired(height, opts.lastValidBlockHeight)) {
             return {
               confirmed: false,

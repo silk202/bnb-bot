@@ -55,8 +55,9 @@ export interface BotConfig {
 
 /**
  * How long a bot/channel message lives before the purge sweep deletes it.
- * Ten minutes on purpose: the digest and the channel session board refresh
- * inside that window, so a purge never removes the only copy of a number.
+ * Ten minutes on purpose: the digest cron and the channel session board both
+ * run on the same window, so the sweep deletes a number only AFTER its
+ * replacement has been posted — a purge never leaves the chat with nothing.
  */
 export const BOT_MESSAGE_TTL_MS = 10 * 60 * 1000;
 
@@ -1199,7 +1200,7 @@ export function alertsMessage(
       "🔔 **Alerts & notifications**",
       "",
       `• Trade-alert mirror: ${cfg.alertFanout ? "✅ ON — successful trades ping this chat" : "❌ OFF"}`,
-      `• Dashboard digest: ${cfg.digestEnabled ? "✅ ON — periodic dashboard push" : "❌ OFF"}`,
+      `• Dashboard digest: ${cfg.digestEnabled ? "✅ ON — dashboard push every 10 min" : "❌ OFF"}`,
       `• Sounds: ${cfg.soundAlerts ? "🔔 ON" : "🔇 OFF"}`,
       `• This chat: ${chat.silent ? "🔇 muted" : "🔔 normal"}`,
       `• Auto-purge (bot chats): ${cfg.autoPurge ? "🧹 ON — bot messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
