@@ -10,7 +10,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { BOT_MESSAGE_TTL_MS } from "../telegramBot";
+import { BOT_MESSAGE_TTL_MS, CHANNEL_MESSAGE_TTL_MS } from "../telegramBot";
 
 const SOURCE = readFileSync(new URL("../../convex/crons.ts", import.meta.url), "utf8");
 
@@ -54,6 +54,24 @@ describe("Telegram cron tick ordering — replace, then delete", () => {
     for (const purgeMinute of minuteField(cronSpec("telegram-bot-purge"))) {
       expect(digest.has(purgeMinute - 1)).toBe(true);
     }
+  });
+
+  test("every channel sweep leaves a session board inside the channel window", () => {
+    // `session-signal` posts the channel board every 15 minutes while the purge
+    // fires every 10. With one 10-minute window for both, a sweep at :11 deleted
+    // the :00 board 11 minutes old and the next board only landed at :15 — a
+    // five-minute hole in the channel every cycle. The channel window must cover
+    // the age of the newest board at every sweep minute.
+    const sweeps = minuteField(cronSpec("telegram-bot-purge"));
+    const boards = minuteField(cronSpec("session-signal"));
+    expect(boards).toEqual([0, 15, 30, 45]);
+    for (const sweep of sweeps) {
+      const newestBoardAgeMin = Math.min(...boards.map((b) => (sweep - b + 60) % 60));
+      expect(newestBoardAgeMin * 60_000).toBeLessThanOrEqual(CHANNEL_MESSAGE_TTL_MS);
+    }
+    // A 10-minute channel window fails the check above at :11 and :41; pin the
+    // margin so the constant cannot be quietly pulled back to the chat window.
+    expect(CHANNEL_MESSAGE_TTL_MS).toBeGreaterThan(BOT_MESSAGE_TTL_MS);
   });
 
   test("the digest the purge deletes is older than the TTL, the one it keeps is not", () => {

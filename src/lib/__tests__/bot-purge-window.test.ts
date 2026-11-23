@@ -16,9 +16,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   BOT_MESSAGE_TTL_MS,
+  CHANNEL_MESSAGE_TTL_MS,
   purgeCutoff,
+  purgeFailureAlert,
+  purgeSkipNote,
   purgeTelemetryLine,
   selectPurgeable,
+  shouldAlertPurgeFailures,
   type TrackedMessageLite,
 } from "../telegramBot";
 
@@ -133,5 +137,86 @@ describe("purgeTelemetryLine — the sweep reports honestly", () => {
     expect(
       purgeTelemetryLine({ at: NOW - 60_000, deleted: 0, failed: 0, skipped: "auto-purge off" }, NOW),
     ).toBe("1m ago — skipped (auto-purge off)");
+  });
+
+  test("a stand-down note never hides a real tally", () => {
+    // Round 28 stamped the channel scope being off as a skipped sweep, so an
+    // operator with the channel off saw "skipped" and lost the chat sweep's
+    // counts. Counts now stay in front; the note is only appended.
+    expect(
+      purgeTelemetryLine({ at: NOW - 60_000, deleted: 4, failed: 0, skipped: "channel purge off" }, NOW),
+    ).toBe("1m ago · 4 deleted · channel purge off");
+  });
+});
+
+describe("CHANNEL_MESSAGE_TTL_MS — the channel window covers one board cycle", () => {
+  test("channel posts outlive chat posts", () => {
+    expect(CHANNEL_MESSAGE_TTL_MS).toBeGreaterThan(BOT_MESSAGE_TTL_MS);
+  });
+
+  test("a 12-minute-old channel post outlives the 10-minute chat window", () => {
+    const rows = [
+      msg({ chatId: "-100123", source: "channel", sentAt: NOW - 12 * 60_000 }),
+    ];
+    // The chat window would already delete it; the channel window keeps it,
+    // which is what stops the 15-minute session board blanking the channel.
+    expect(selectPurgeable(rows, { cutoff: purgeCutoff(NOW) })).toHaveLength(1);
+    expect(
+      selectPurgeable(rows, { cutoff: purgeCutoff(NOW, CHANNEL_MESSAGE_TTL_MS) }),
+    ).toHaveLength(0);
+  });
+
+  test("a channel post past the channel window is due", () => {
+    const rows = [
+      msg({ chatId: "-100123", source: "channel", sentAt: NOW - CHANNEL_MESSAGE_TTL_MS }),
+    ];
+    expect(
+      selectPurgeable(rows, { cutoff: purgeCutoff(NOW, CHANNEL_MESSAGE_TTL_MS) }),
+    ).toHaveLength(1);
+  });
+});
+
+describe("purgeSkipNote — a scope being off is not a skipped sweep", () => {
+  test("only a full stand-down is a skip", () => {
+    expect(purgeSkipNote({ autoPurge: false, tokenConfigured: true })).toBe("auto-purge off");
+    expect(purgeSkipNote({ autoPurge: true, tokenConfigured: false })).toBe(
+      "bot token not configured",
+    );
+    expect(purgeSkipNote({ autoPurge: true, tokenConfigured: true })).toBeNull();
+  });
+
+  test("the channel switch being off leaves a real chat sweep behind", () => {
+    // The reason this function accepts `channelPurge` at all: it must ignore it.
+    expect(
+      purgeSkipNote({ autoPurge: true, tokenConfigured: true, channelPurge: false }),
+    ).toBeNull();
+  });
+});
+
+describe("purge failure alert — two sweeps in a row, real numbers", () => {
+  test("one failing sweep is not yet an alert", () => {
+    expect(shouldAlertPurgeFailures(undefined, 2)).toBe(false);
+    expect(
+      shouldAlertPurgeFailures({ at: NOW - 600_000, deleted: 3, failed: 0, skipped: null }, 2),
+    ).toBe(false);
+  });
+
+  test("a second consecutive failing sweep alerts, a clean one clears it", () => {
+    const previous = { at: NOW - 600_000, deleted: 1, failed: 2, skipped: null };
+    expect(shouldAlertPurgeFailures(previous, 3)).toBe(true);
+    expect(shouldAlertPurgeFailures(previous, 0)).toBe(false);
+    expect(shouldAlertPurgeFailures({ at: NOW, deleted: 0, failed: 0, skipped: "auto-purge off" }, 3)).toBe(
+      false,
+    );
+  });
+
+  test("the alert carries both tallies and the honest consequence", () => {
+    const previous = { at: NOW - 600_000, deleted: 1, failed: 2, skipped: null };
+    const current = { at: NOW - 60_000, deleted: 0, failed: 3, skipped: null };
+    const text = purgeFailureAlert(previous, current, NOW);
+    expect(text).toContain("Previous: 10m ago · 1 deleted · 2 failed");
+    expect(text).toContain("Latest: 1m ago · 0 deleted · 3 failed");
+    expect(text).toContain("stay in the chat");
+    expect(purgeFailureAlert(undefined, current, NOW)).not.toContain("Previous:");
   });
 });

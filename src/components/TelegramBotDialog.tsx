@@ -51,7 +51,7 @@ type BotStatus = {
   alertFanout: boolean;
   soundAlerts: boolean;
   autoPairOnStart?: boolean;
-  /** Auto-purge: tracked bot/channel messages older than 10 min are deleted. */
+  /** Auto-purge: tracked bot messages after 10 min; channel posts after 15 min. */
   autoPurge?: boolean;
   channelPurge?: boolean;
   /** Last purge sweep's tally — null until the cron has reported one. */
@@ -773,10 +773,10 @@ export function TelegramBotDialog({
             <div className="min-w-0">
               <div className="text-sm font-semibold">Auto-purge messages</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">
-                ON: every message the bot posts (boards, digests, trade alerts) and every
-                channel post is deleted after 10 minutes, so a linked chat shows the last
-                ten minutes instead of an unbounded scrollback. The sweep runs every 10
-                minutes; /purge in the chat clears it immediately. OFF keeps everything.
+                ON: every board, digest and trade alert the bot posts to a chat is deleted
+                after 10 minutes, so a linked chat shows the last ten minutes instead of an
+                unbounded scrollback. The sweep runs every 10 minutes; /purge in the chat
+                clears it immediately. OFF keeps everything. The channel has its own switch.
               </div>
               {/* The sweep's own honest tally — the same line `/alerts` shows. */}
               <div className="mt-1 text-[10px] text-muted-foreground/80">
@@ -807,9 +807,10 @@ export function TelegramBotDialog({
             <div className="min-w-0">
               <div className="text-sm font-semibold">Purge channel posts</div>
               <div className="mt-0.5 text-[11px] text-muted-foreground">
-                ON: trade and signal posts to the channel are deleted after 10 minutes by the same
-                sweep. OFF: the channel keeps its history while linked chats still clear. Kept
-                separate on purpose — /purge in a chat never deletes channel posts.
+                ON: trade and signal posts to the channel are deleted after 15 minutes by the same
+                sweep — one full session-board cycle, so the channel never loses its board before
+                the next one lands. OFF: the channel keeps its history while linked chats still
+                clear. Kept separate on purpose — /purge in a chat never deletes channel posts.
               </div>
             </div>
             <Switch
@@ -819,7 +820,7 @@ export function TelegramBotDialog({
                   .then(() =>
                     toast.success(
                       checked
-                        ? "Channel purge on — posts are deleted after 10 minutes"
+                        ? "Channel purge on — posts are deleted after 15 minutes"
                         : "Channel purge off — channel posts stay",
                     )
                   )

@@ -60,8 +60,9 @@ export interface BotConfig {
   autoPurge: boolean;
   /**
    * Channel purge — its own scope, ON by default because the channel is a
-   * feed, not a record: channel posts older than `BOT_MESSAGE_TTL_MS` are
-   * deleted by the same every-10-minutes sweep. Off leaves the channel alone
+   * feed, not a record: channel posts older than `CHANNEL_MESSAGE_TTL_MS`
+   * (15 min, one session-board cycle) are deleted by the same
+   * every-10-minutes sweep. Off leaves the channel alone
    * while chat boards keep purging; `/purge` in a chat never touches channel
    * posts in either position.
    */
@@ -75,12 +76,26 @@ export interface BotConfig {
 }
 
 /**
- * How long a bot/channel message lives before the purge sweep deletes it.
- * Ten minutes on purpose: the digest cron and the channel session board both
- * run on the same window, so the sweep deletes a number only AFTER its
- * replacement has been posted — a purge never leaves the chat with nothing.
+ * How long a bot post (chat board, digest, trade alert) lives before the purge
+ * sweep deletes it. Ten minutes on purpose: the digest cron runs on the same
+ * window, so the sweep deletes a number only AFTER its replacement has been
+ * posted — a purge never leaves a chat with nothing.
  */
 export const BOT_MESSAGE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * How long a CHANNEL post lives. Deliberately longer than
+ * `BOT_MESSAGE_TTL_MS`, because the channel's own producer runs on a different
+ * clock: `session-signal` posts the live session board every 15 minutes
+ * (crons.ts), so the 10-minute window deleted each board about five minutes
+ * before its replacement and left the channel empty for ~5 minutes of every
+ * cycle. One full producer cycle (15 min) keeps a board in the channel until a
+ * newer one has landed — the 10-minute sweep quantisation means a board is
+ * actually removed 11–21 minutes after it posted, never while it is the only
+ * board. Chat boards keep the 10-minute window: a chat is a scrollback, the
+ * channel is a feed with a slower tick.
+ */
+export const CHANNEL_MESSAGE_TTL_MS = 15 * 60 * 1000;
 
 /** Which surface a tracked message came from. */
 export type BotMessageSource = "bot" | "channel";
@@ -142,9 +157,76 @@ export function purgeTelemetryLine(
     return "not reported yet — the sweep runs every 10 min";
   }
   const when = fmtAgo(telemetry.at, now);
-  if (telemetry.skipped) return `${when} — skipped (${telemetry.skipped})`;
   const failed = telemetry.failed > 0 ? ` · ${telemetry.failed} failed` : "";
+  // A skipped note is a stand-down, not a replacement for a tally: if a sweep
+  // did delete anything, the counts stay in front and the note is appended. A
+  // partial sweep must never render as though nothing ran (round 28's
+  // "channel purge off" hid real deleted/failed counts this way).
+  if (telemetry.skipped) {
+    if (telemetry.deleted === 0 && telemetry.failed === 0) {
+      return `${when} — skipped (${telemetry.skipped})`;
+    }
+    return `${when} · ${telemetry.deleted} deleted${failed} · ${telemetry.skipped}`;
+  }
   return `${when} · ${telemetry.deleted} deleted${failed}`;
+}
+
+/**
+ * Why a sweep stood down COMPLETELY, or null when it had work to do.
+ *
+ * Blind to `channelPurge` on purpose. Turning the channel scope off leaves the
+ * chat sweep running with work of its own; round 28 reported that sweep as
+ * "skipped (channel purge off)" and dropped its real tally. The switch state is
+ * a config value the boards already show; `skipped` is reserved for sweeps that
+ * attempted nothing at all. `channelPurge` is accepted so a caller can hand
+ * over the whole switch set and this rule still refuses to call it a skip.
+ */
+export function purgeSkipNote(input: {
+  autoPurge: boolean;
+  tokenConfigured: boolean;
+  channelPurge?: boolean;
+}): string | null {
+  if (!input.autoPurge) return "auto-purge off";
+  if (!input.tokenConfigured) return "bot token not configured";
+  return null;
+}
+
+/**
+ * Two sweeps in a row that could not delete anything Telegram should have
+ * accepted are a fault, not a blip: the bot was removed from the chat/channel
+ * or lost its delete/admin rights. One failing sweep can be a transient 5xx;
+ * the SECOND means the next one will fail the same way.
+ */
+export function shouldAlertPurgeFailures(
+  previous: PurgeTelemetry | null | undefined,
+  failed: number,
+): boolean {
+  if (!(failed > 0)) return false;
+  return (previous?.failed ?? 0) > 0;
+}
+
+/**
+ * The fault alert for linked chats. Real numbers only — both sweeps' tallies —
+ * plus the one consequence an operator needs to know: a refused row leaves the
+ * tracking table, so restoring rights purges new posts but those messages stay.
+ */
+export function purgeFailureAlert(
+  previous: PurgeTelemetry | null | undefined,
+  current: PurgeTelemetry,
+  now: number,
+): string {
+  const line = (label: string, t: PurgeTelemetry) =>
+    `${label}: ${fmtAgo(t.at, now)} · ${t.deleted} deleted · ${t.failed} failed`;
+  return [
+    "⚠️ **Message sweep is failing**",
+    "",
+    "Two sweeps in a row could not delete messages from Telegram.",
+    ...(previous ? [`• ${line("Previous", previous)}`] : []),
+    `• ${line("Latest", current)}`,
+    "",
+    "Usual cause: the bot was removed from the chat/channel, or lost its delete/admin rights.",
+    "Restore those rights and new posts purge again; messages Telegram already refused are no longer tracked, so they stay in the chat.",
+  ].join("\n");
 }
 
 /** Telegram inline-keyboard button shape (url vs callback). */
@@ -1248,7 +1330,7 @@ export function alertsMessage(
       `• Sounds: ${cfg.soundAlerts ? "🔔 ON" : "🔇 OFF"}`,
       `• This chat: ${chat.silent ? "🔇 muted" : "🔔 normal"}`,
       `• Auto-purge (bot chats): ${cfg.autoPurge ? "🧹 ON — bot messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
-      `• Auto-purge (channel): ${channelPurge ? "🧹 ON — channel posts older than 10 min are deleted" : "❌ OFF — channel posts stay"}`,
+      `• Auto-purge (channel): ${channelPurge ? "🧹 ON — channel posts older than 15 min are deleted" : "❌ OFF — channel posts stay"}`,
       `• Last sweep: ${purgeTelemetryLine(cfg.purgeLast, now)}`,
     ].join("\n"),
     keyboard: [

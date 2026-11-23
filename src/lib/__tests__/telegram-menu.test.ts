@@ -368,7 +368,7 @@ describe("alerts board — auto-purge is visible and toggleable", () => {
       { silent: false },
     );
     // Omitted means ON, the same `!== false` default the table uses.
-    expect(on.text).toContain("channel posts older than 10 min are deleted");
+    expect(on.text).toContain("channel posts older than 15 min are deleted");
     expect(on.keyboard.flat().find((b) => b.callback_data === "set:channel_off")).toBeDefined();
 
     const off = alertsMessage(

@@ -32,6 +32,10 @@ import {
   parseBotCommand,
   resolveCallbackData,
   purgeCutoff,
+  purgeSkipNote,
+  shouldAlertPurgeFailures,
+  purgeFailureAlert,
+  CHANNEL_MESSAGE_TTL_MS,
   selectPurgeable,
   type BotMessageSource,
   startMessage,
@@ -724,6 +728,8 @@ export const getBotHealth = query({
         webhookCheckedAt: number | null;
         linkedChats: number;
         digestEnabled: boolean;
+        /** Channel purge scope — its own switch; the tally covers both scopes. */
+        channelPurge: boolean;
         /** Last purge sweep's tally — null until one has reported. */
         purgeLast: PurgeTelemetry | null;
         engineRunning: boolean | null;
@@ -761,6 +767,7 @@ export const getBotHealth = query({
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       linkedChats: chats.filter((c) => !c.blocked).length,
       digestEnabled: row?.digestEnabled ?? true,
+      channelPurge: row?.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row) ?? null,
       engineRunning: state?.botRunning ?? null,
       solEngineRunning: state ? state.solBotRunning !== false : null,
@@ -799,7 +806,7 @@ export const getBotStatus = query({
     autoPairOnStart: boolean;
     /** Auto-purge — tracked bot messages older than 10 min are deleted. */
     autoPurge: boolean;
-    /** Channel purge — its own switch; channel posts older than 10 min go too. */
+    /** Channel purge — its own switch; channel posts older than 15 min go too. */
     channelPurge: boolean;
     /** Last purge sweep's tally (stamped by the every-10-minute cron) — null
         until one has reported, never a fabricated "0 deleted". */
@@ -1435,9 +1442,12 @@ export const linkChat = internalMutation({
 //
 // Every message the bot posts (chat boards, digests, trade alerts) and every
 // post to the configured CHANNEL is recorded with its real Telegram message id,
-// then deleted by `purgeBotMessages` once it is older than
-// `BOT_MESSAGE_TTL_MS` (10 min). That keeps a chat that gets a board every few
-// minutes readable: it shows the last ten minutes, not an unbounded scrollback.
+// then deleted by `purgeBotMessages` once it is older than its window: 10 min
+// for chat posts (`BOT_MESSAGE_TTL_MS`), 15 min for channel posts
+// (`CHANNEL_MESSAGE_TTL_MS`) — the channel's session board posts every 15, so a
+// 10-minute window blanked it for five minutes each cycle. That keeps a chat
+// that gets a board every few minutes readable: it shows the last ten minutes,
+// not an unbounded scrollback.
 // Chat boards and channel posts are separate SCOPES: `autoPurge` clears chats,
 // `channelPurge` clears the channel, and `/purge` in a chat only ever selects
 // `source: "bot"`. The sweep is bounded, batched and idempotent.
@@ -1572,25 +1582,62 @@ export const stampPurgeRun = internalMutation({
 });
 
 /**
+ * Ping every linked chat when two sweeps in a row could not delete. Best-effort
+ * by construction: an undeliverable alert must never turn a sweep into a
+ * failure. The alert repeats while the fault persists (the sweep's own
+ * 10-minute cadence, same as the digest) and stops on the first clean sweep.
+ */
+async function alertPurgeFailures(
+  ctx: ActionCtx,
+  token: string,
+  cfg: BotConfig,
+  previous: PurgeTelemetry | null,
+  current: PurgeTelemetry,
+  now: number,
+): Promise<number> {
+  const chats = await ctx.runQuery(internal.telegramBot.listChats, { activeOnly: true });
+  if (!chats.length) return 0;
+  const text = purgeFailureAlert(previous, current, now);
+  let sent = 0;
+  for (const chat of chats) {
+    try {
+      const res = await sendPayload(ctx, token, chat.chatId, text, null, disableNotification(chat, cfg));
+      if (res.ok) sent += 1;
+    } catch {
+      // Advisory only — the stamped tally stays the record of the fault.
+    }
+  }
+  return sent;
+}
+
+/**
  * The every-10-minutes sweep (cron `telegram-bot-purge`): deletes tracked bot
- * and channel messages older than the TTL. No-ops when auto-purge is off, so
- * turning it off has no side effects on content that is already posted.
+ * posts older than `BOT_MESSAGE_TTL_MS` and channel posts older than
+ * `CHANNEL_MESSAGE_TTL_MS`. No-ops when auto-purge is off, so turning it off
+ * has no side effects on content that is already posted.
  *
  * Every outcome is stamped, including the ones that delete nothing: `/alerts`
  * then shows whether the sweep is running, what it removed, and why it stood
  * down — the difference between "nothing to delete" and "never ran".
+ *
+ * `skipped` is reserved for a sweep that attempted NOTHING. A scope switch that
+ * is off (channel purge) is not a skip: the chat scope still ran and its tally
+ * must survive into the stamp.
  */
 export const purgeBotMessages = internalAction({
   args: {},
-  handler: async (ctx): Promise<{ ok: boolean; deleted: number; failed: number; skipped?: string }> => {
+  handler: async (
+    ctx,
+  ): Promise<{ ok: boolean; deleted: number; failed: number; alerted: number; skipped?: string }> => {
     const cfg = await ctx.runQuery(internal.telegramBot.getConfig, {});
     // No config row at all is not "auto-purge off" — say what is true.
-    if (!cfg) return { ok: true, deleted: 0, failed: 0, skipped: "not configured" };
+    if (!cfg) return { ok: true, deleted: 0, failed: 0, alerted: 0, skipped: "not configured" };
 
-    const stamp = async (deleted: number, failed: number, skipped?: string): Promise<void> => {
+    const stamp = async (deleted: number, failed: number, skipped?: string): Promise<number> => {
+      const at = Date.now();
       try {
         await ctx.runMutation(internal.telegramBot.stampPurgeRun, {
-          at: Date.now(),
+          at,
           deleted,
           failed,
           ...(skipped ? { skipped } : {}),
@@ -1598,35 +1645,55 @@ export const purgeBotMessages = internalAction({
       } catch {
         // Telemetry only — never fail a sweep because its tally did not land.
       }
+      return at;
     };
 
-    if (!cfg.autoPurge) {
-      await stamp(0, 0, "auto-purge off");
-      return { ok: true, deleted: 0, failed: 0, skipped: "auto-purge off" };
+    const now = Date.now();
+    const token = cfg.autoPurge ? await resolveBotToken(ctx) : null;
+    const skipped = purgeSkipNote({ autoPurge: cfg.autoPurge, tokenConfigured: token !== null });
+    if (skipped) {
+      await stamp(0, 0, skipped);
+      return {
+        ok: skipped !== "bot token not configured",
+        deleted: 0,
+        failed: 0,
+        alerted: 0,
+        skipped,
+      };
     }
-    const token = await resolveBotToken(ctx);
     if (!token) {
-      await stamp(0, 0, "bot token not configured");
-      return { ok: false, deleted: 0, failed: 0, skipped: "bot token not configured" };
+      // `purgeSkipNote` already covers this; the guard keeps the types honest.
+      return { ok: false, deleted: 0, failed: 0, alerted: 0, skipped: "bot token not configured" };
     }
-    const cutoff = purgeCutoff(Date.now());
-    // Two scopes, one sweep. Chat boards clear whenever auto-purge is on;
-    // channel posts are the channel's own feed and follow `channelPurge` — a
-    // chat setting can never erase the channel, and vice versa.
-    const bot = await deleteTrackedMessages(ctx, token, cutoff, { source: "bot" });
+
+    // Two scopes, one sweep, two windows. Chat boards clear whenever auto-purge
+    // is on; channel posts follow `channelPurge` and outlive the chat window,
+    // because the channel's session board only posts every 15 minutes.
+    const bot = await deleteTrackedMessages(ctx, token, purgeCutoff(now), { source: "bot" });
     const channel = cfg.channelPurge
-      ? await deleteTrackedMessages(ctx, token, cutoff, { source: "channel" })
+      ? await deleteTrackedMessages(ctx, token, purgeCutoff(now, CHANNEL_MESSAGE_TTL_MS), {
+          source: "channel",
+        })
       : { deleted: 0, failed: 0 };
     const deleted = bot.deleted + channel.deleted;
     const failed = bot.failed + channel.failed;
-    const skipped = cfg.channelPurge ? undefined : "channel purge off";
-    await stamp(deleted, failed, skipped);
-    return {
-      ok: true,
-      deleted,
-      failed,
-      ...(skipped ? { skipped } : {}),
-    };
+    const at = await stamp(deleted, failed);
+
+    // `cfg.purgeLast` was read before this sweep ran, so it IS the previous
+    // tally — a two-in-a-row fault needs no extra stored state.
+    let alerted = 0;
+    if (shouldAlertPurgeFailures(cfg.purgeLast, failed)) {
+      alerted = await alertPurgeFailures(
+        ctx,
+        token,
+        cfg,
+        cfg.purgeLast ?? null,
+        { at, deleted, failed, skipped: null },
+        at,
+      );
+    }
+
+    return { ok: true, deleted, failed, alerted };
   },
 });
 

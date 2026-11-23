@@ -2216,3 +2216,121 @@ only force a refetch.
 15. **Show the local sweep in Settings.** `runLocalRetention` already returns
     {at, removed, remaining}; a one-line data-health row would make the app-side
     purge as inspectable as the bot's.
+
+---
+
+## Round 29 — the tally stops lying, the channel keeps its board, and a failing sweep speaks up (2026-11-23)
+
+Three follow-ups from round 28: fix the tally a scope switch was hiding, close
+the channel's session-board hole, and alert when two sweeps in a row fail.
+
+### 1. The tally reports the work, not a switch
+
+Round 28 stamped `skipped: "channel purge off"` whenever the channel scope was
+off — even though the chat sweep still ran and may have deleted a dozen
+messages. `purgeTelemetryLine` then rendered `skipped (channel purge off)` and
+dropped the real `deleted`/`failed` counts. The operator saw a stand-down where
+a sweep had done work.
+
+- `purgeSkipNote({ autoPurge, tokenConfigured, channelPurge? })` now owns the
+  rule: only `auto-purge off` and `bot token not configured` are full
+  stand-downs. It accepts `channelPurge` and deliberately ignores it, so the
+  regression is pinned by an executable contract, not a comment.
+- `purgeBotMessages` stamps counts with no skip note when the channel scope is
+  off; the switch itself is already shown by `/alerts`, the dialog and the chip
+  (`getBotHealth` now carries `channelPurge`).
+- `purgeTelemetryLine` was also made additive: if a skip note ever arrives with
+  real counts (a row written by the older code, a future partial reason), the
+  counts render in front and the note is appended — a tally is never hidden by
+  a label.
+
+### 2. The channel window covers one session-board cycle
+
+`session-signal` posts the channel board every 15 minutes (`*/15`), while the
+channel sweep deleted channel posts at 10 minutes. At the :11 and :41 sweeps a
+board 11 minutes old was deleted and the next board only landed at :15/:45 — a
+~5-minute hole in the channel every cycle.
+
+`CHANNEL_MESSAGE_TTL_MS` is now 15 minutes, used only for `source: "channel"`;
+chat posts keep `BOT_MESSAGE_TTL_MS` (10 min). Chosen over moving the board to
+`*/10` because it costs zero extra Telegram sends or cron runs on a deployment
+that is already disabled by its free-plan ceiling, and over "post on the digest
+tick" for the same reason. Sweep quantisation means a board is actually removed
+11–21 minutes after it posted, always with a newer board already in the
+channel.
+
+`cron-ordering.test.ts` now reads the real cron specs and asserts the invariant
+that matters: at every purge minute, the newest session board is younger than
+the channel window. The same check fails with the old 10-minute window, so the
+hole cannot come back silently.
+
+### 3. Two failing sweeps in a row alert the operator
+
+A single failed delete can be a transient 5xx. The same failure in the next
+sweep is a fault — the bot was removed from the chat/channel or lost its delete
+rights. `purgeBotMessages` now compares this sweep's `failed` with the tally it
+read at the top (`cfg.purgeLast`, i.e. the previous sweep), so the streak needs
+no new stored state, and sends `purgeFailureAlert` to every linked chat when
+both are non-zero. Both real tallies are in the message, plus the honest
+consequence: Telegram-refused messages leave the tracking table, so they stay
+in the chat even after rights are restored. The alert repeats while the fault
+lasts (the sweep's own 10-minute cadence) and stops on the first clean sweep; it
+is best-effort, so an undeliverable alert never turns a sweep into a failure.
+
+### 4. What this round does NOT fix
+
+A failed `deleteMessage` still drops its tracking row, so a transient failure
+loses that message from future sweeps. That is why the alert promises only that
+NEW posts purge again. Retrying transient failures (attempt first, then drop the
+row only on success or a permanent refusal) is follow-up #1 below, not a silent
+change here.
+
+### Checks
+
+- `bun run typecheck`: exit 0.
+- `bun test`: 825 pass / 0 fail across 69 files (815 → +10: three channel-window
+  cases, two skip-note cases, three alert cases, one additive-tally case, one
+  cron invariant).
+- `eslint` on the eight touched files: 18 problems, exactly the pre-existing
+  baseline (4 dialog, 12 convex bot unused imports, 2 `\_` escapes) — none in
+  the new code or tests.
+- NOT executed: the Convex deploy (deployment still disabled by the free-plan
+  ceiling), so both windows, the tally change and the alert are code-only; no
+  live Telegram send, and no funded devnet send. The new dialog/chip copy was
+  not viewed in a browser.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 29, brainstormed (none started)
+
+1. **Retry transient delete failures.** Attempt `deleteMessage` BEFORE dropping
+   the row; drop it only when Telegram accepts or refuses permanently
+   ("message to delete not found", "too old"). Today one network blip
+   permanently untracks a live message. This is the largest correctness gap in
+   the sweep.
+2. **Prove the window, tally and alert on a live deployment** (round 28 #2).
+   Unit tests pin the arithmetic; only a deploy shows the stamps and a real
+   failure alert.
+3. **Record the alert in-app too.** The failure alert depends on Telegram being
+   able to reach the operator; the same condition also belongs in the app's
+   notification bell, which works even when the bot is the thing that is broken.
+4. **Keep a short sweep history, not just the last one** (round 28 #4).
+   Last-only cannot show "the sweep stopped running six hours ago".
+5. **Contract test for the backend keep-list** (round 28 #5).
+6. **Expired `operatorDeviceTrust` sweep** (round 28 #6; still needs an index).
+7. **Prove the cached height path on a funded send** (round 27 #1).
+8. **`heightReadsFailed` count** (round 25 #7).
+9. **Redact URLs inside RPC error bodies** (round 25 #3).
+10. **Add a `(chatId, sentAt)` composite index** (round 25 #5).
+11. **Rebroadcast signed bytes after ~3 misses** (round 24 #4).
+12. **Operator-selectable digest cadence** (round 27 #11): the purge offset must
+    be derived from it, and the channel window from `session-signal`'s cadence.
+13. **Move the inline keyboards in `handleUpdate` into lib builders** (round 25
+    #6).
+14. **Track multiple channel ids, not one env id** (round 26 #12).
+15. **Show the local sweep in Settings** (round 28 #15).

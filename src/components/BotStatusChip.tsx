@@ -36,6 +36,7 @@ export function BotStatusChip() {
         webhookCheckedAt?: number | null;
         linkedChats?: number;
         digestEnabled?: boolean;
+        channelPurge?: boolean;
         purgeLast?: { at: number; deleted: number; failed: number; skipped: string | null } | null;
         engineRunning?: boolean | null;
         solEngineRunning?: boolean | null;
@@ -98,6 +99,7 @@ export function BotStatusChip() {
         engineLine("BNB engine", health.engineRunning),
         engineLine("SOL engine", health.solEngineRunning),
         `Digest: ${health.digestEnabled ? "on (10 min)" : "off"}`,
+        `Channel purge: ${health.channelPurge === false ? "off" : "on (15 min)"}`,
         `Purge: ${purgeTelemetryLine(health.purgeLast, now)}`,
         "TASignal channel is separate — this chip is TAEngine only.",
       ].join("\n")
