@@ -20,6 +20,7 @@ import {
   BOT_MESSAGE_TTL_MS,
   CHANNEL_MESSAGE_TTL_MS,
   classifyPurgeFailure,
+  purgeAbandonmentKey,
   purgeAbandonmentNotice,
   PURGE_ALERT_CAP,
   PURGE_ALERT_REPEAT_MS,
@@ -492,6 +493,16 @@ describe("abandoned rows — a number becomes names", () => {
     expect(line).toContain("no reason recorded");
   });
 
+  test("the chat is named when the pairing still knows it", () => {
+    const line = abandonedRowLine(stuck({ chatLabel: "Alpha Group" }), NOW);
+    expect(line).toContain('chat "Alpha Group" `42`');
+  });
+
+  test("an unnamed chat keeps its id — never a blank name", () => {
+    expect(abandonedRowLine(stuck({ chatLabel: null }), NOW)).toContain("chat `42`");
+    expect(abandonedRowLine(stuck({ chatLabel: "   " }), NOW)).toContain("chat `42`");
+  });
+
   test("the list is bounded and its truncation counts the standing total", () => {
     const rows = Array.from({ length: 5 }, (_, i) => stuck({ messageId: i + 1 }));
     const lines = abandonedListLines(rows, NOW, { limit: 3, total: 8 });
@@ -517,6 +528,7 @@ describe("purgeAbandonmentNotice — the gap the fault alert leaves", () => {
           sentAt: NOW - 60_000,
           attempts: PURGE_RETRY_CAP,
           abandonedReason: "exhausted",
+          chatLabel: "Alpha Group",
         },
         {
           chatId: "-1009",
@@ -532,6 +544,7 @@ describe("purgeAbandonmentNotice — the gap the fault alert leaves", () => {
     expect(body).toContain("2 tracked messages have just left the automatic retry");
     expect(body).toContain("message 7");
     expect(body).toContain("message 8");
+    expect(body).toContain('chat "Alpha Group" `42`');
     expect(body).toContain("/purge can still delete them by hand");
     expect(body).toContain("/alerts lists them until then");
   });
@@ -554,6 +567,28 @@ describe("purgeAbandonmentNotice — the gap the fault alert leaves", () => {
     expect(body).toContain("1 tracked message has just left");
     expect(body).toContain("/purge can still delete it by hand");
     expect(body).not.toContain("…and");
+  });
+
+  test("the notice key is the batch, not the title and not the clock", () => {
+    const a = { chatId: "42", messageId: 7, source: "bot" as const };
+    const b = { chatId: "42", messageId: 8, source: "bot" as const };
+    const rows = [
+      { ...a, sentAt: NOW, attempts: PURGE_RETRY_CAP, abandonedReason: "exhausted" as const },
+      { ...b, sentAt: NOW, attempts: PURGE_RETRY_CAP, abandonedReason: "exhausted" as const },
+    ];
+    // Same batch, any order → one key.
+    expect(purgeAbandonmentKey(rows)).toBe(purgeAbandonmentKey([...rows].reverse()));
+    // Re-announcing the same batch cannot duplicate the bell.
+    expect(purgeAbandonmentKey(rows)).toBe(purgeAbandonmentKey(rows));
+    // A different batch inside the same hour is a different fact.
+    expect(purgeAbandonmentKey([rows[0]])).not.toBe(purgeAbandonmentKey(rows));
+    expect(purgeAbandonmentKey([rows[0]])).not.toBe(
+      purgeAbandonmentKey([{ ...rows[0], messageId: 9 }]),
+    );
+    // A channel row never collides with the same id in a chat.
+    expect(purgeAbandonmentKey([rows[0]])).not.toBe(
+      purgeAbandonmentKey([{ ...rows[0], source: "channel" }]),
+    );
   });
 
   test("a large batch is listed in full up to the limit and counted after it", () => {

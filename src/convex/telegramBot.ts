@@ -39,6 +39,7 @@ import {
   purgeFailureSummary,
   classifyPurgeFailure,
   abandonedListLines,
+  purgeAbandonmentKey,
   purgeAbandonmentNotice,
   type AbandonedMessageLite,
   type AbandonedReason,
@@ -159,6 +160,21 @@ export const readStoredToken = internalQuery({
  * honest zero only when the sweep itself did report (at is present), and no
  * row at all yields `undefined` = "not reported yet".
  */
+/**
+ * The human name a listing shows for a paired chat: its title, else its
+ * `@username`, else null. Kept separate from the row so a channel (which is
+ * never paired as a chat) honestly falls back to its id.
+ */
+function chatDisplayName(chat: {
+  title?: string | null;
+  username?: string | null;
+}): string | null {
+  const title = chat.title?.trim();
+  if (title) return title;
+  const username = chat.username?.trim();
+  return username ? `@${username}` : null;
+}
+
 function purgeTelemetryFrom(row: Doc<"telegramBotConfig"> | null): PurgeTelemetry | undefined {
   if (!row || row.purgeLastAt === undefined) return undefined;
   return {
@@ -748,6 +764,10 @@ export const getBotHealth = query({
         /** Alerts the current fault has sent (0 when none is outstanding); at
             PURGE_ALERT_CAP the sweep is silent and the UI explains why. */
         purgeAlertsSent: number;
+        /** Rows the sweeps have stopped retrying, right now (live, not stamped). */
+        abandonedTotal: number;
+        /** The first few of those rows, named — the tooltip's listing. */
+        abandonedRows: AbandonedMessageLite[];
         engineRunning: boolean | null;
         /** Independent SOL engine switch — its own start/stop state. */
         solEngineRunning: boolean | null;
@@ -776,6 +796,14 @@ export const getBotHealth = query({
       : null;
     const chats = recognized ? await ctx.db.query("telegramBotChats").collect() : [];
     const state = recognized ? await ctx.runQuery(internal.terminal.botGetState, {}) : null;
+    // Live rows, not the last stamp: the chip must name a row the moment a
+    // sweep abandons it, not ten minutes later when the tally lands.
+    const abandonedRows = recognized
+      ? await ctx.runQuery(internal.telegramBot.listAbandonedMessages, { limit: 3 })
+      : [];
+    const abandonedTotal = recognized
+      ? await ctx.runQuery(internal.telegramBot.countAbandonedMessages, {})
+      : 0;
     return {
       recognized,
       tokenConfigured: row?.webhookSecret !== undefined,
@@ -786,6 +814,8 @@ export const getBotHealth = query({
       channelPurge: row?.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row) ?? null,
       purgeAlertsSent: row?.purgeAlertsSent ?? 0,
+      abandonedTotal,
+      abandonedRows,
       engineRunning: state?.botRunning ?? null,
       solEngineRunning: state ? state.solBotRunning !== false : null,
       botUsername: row?.botUsername ?? null,
@@ -831,6 +861,9 @@ export const getBotStatus = query({
     /** Alerts the current fault has sent; at PURGE_ALERT_CAP the sweep has gone
         quiet on purpose and the dialog says so next to the tally. */
     purgeAlertsSent: number;
+    /** Rows the sweeps have stopped retrying, live — the dialog's listing. */
+    abandonedTotal: number;
+    abandonedRows: AbandonedMessageLite[];
     webhookOk: boolean | null;
     webhookCheckedAt: number | null;
     /** Cached @username — stamped by autoConnectBot and the webhook self-heal cron
@@ -876,6 +909,14 @@ export const getBotStatus = query({
     // Real engine state — the dialog's START/STOP reflects the SAME switch
     // the bot and the terminal use (not a local guess).
     const state = recognized ? await ctx.runQuery(internal.terminal.botGetState, {}) : null;
+    // The same live listing the chip gets, so the panel and the bot's /alerts
+    // never disagree about which rows are stuck.
+    const abandonedRows = recognized
+      ? await ctx.runQuery(internal.telegramBot.listAbandonedMessages, { limit: 5 })
+      : [];
+    const abandonedTotal = recognized
+      ? await ctx.runQuery(internal.telegramBot.countAbandonedMessages, {})
+      : 0;
     return {
       recognized,
       digestEnabled: row?.digestEnabled ?? true,
@@ -886,6 +927,8 @@ export const getBotStatus = query({
       channelPurge: row?.channelPurge !== false,
       purgeLast: purgeTelemetryFrom(row) ?? null,
       purgeAlertsSent: row?.purgeAlertsSent ?? 0,
+      abandonedTotal,
+      abandonedRows,
       webhookOk: row?.webhookOk ?? null,
       webhookCheckedAt: row?.webhookCheckedAt ?? null,
       botUsername: row?.botUsername ?? null,
@@ -1628,25 +1671,57 @@ export const listAbandonedMessages = internalQuery({
       .withIndex("by_abandoned", (q) => q.eq("abandoned", true))
       .order("asc")
       .take(chatId === undefined ? limit : 1000);
-    return rows
+    const matched = rows
       .filter(
         (row) =>
           (chatId === undefined || row.chatId === chatId) &&
           (source === undefined || row.source === source),
       )
-      .slice(0, limit)
-      .map(
-        (row): AbandonedMessageLite => ({
-          chatId: row.chatId,
-          messageId: row.messageId,
-          source: row.source,
-          sentAt: row.sentAt,
-          attempts: row.attempts ?? 0,
-          // Never defaulted: a row with no stored reason says so rather than
-          // claiming its budget was spent.
-          abandonedReason: row.abandonedReason ?? null,
-        }),
-      );
+      .slice(0, limit);
+    // Name the chat once per listing instead of once per row: the pairing table
+    // is small, and a deleted group simply has no entry (the line keeps its id).
+    const labels = matched.length
+      ? new Map(
+          (await ctx.db.query("telegramBotChats").collect()).map((chat) => [
+            chat.chatId,
+            chatDisplayName(chat),
+          ]),
+        )
+      : new Map<string, string | null>();
+    return matched.map(
+      (row): AbandonedMessageLite => ({
+        chatId: row.chatId,
+        messageId: row.messageId,
+        source: row.source,
+        sentAt: row.sentAt,
+        attempts: row.attempts ?? 0,
+        // Never defaulted: a row with no stored reason says so rather than
+        // claiming its budget was spent.
+        abandonedReason: row.abandonedReason ?? null,
+        chatLabel: labels.get(row.chatId) ?? null,
+      }),
+    );
+  },
+});
+
+/**
+ * Resolve the display name for a handful of chats — the action-side twin of
+ * `listAbandonedMessages`' inline label map, for rows THIS sweep just marked
+ * (which were never read through the listing). Bounded by the caller's ids; a
+ * channel id simply resolves to null.
+ */
+export const chatLabels = internalQuery({
+  args: { chatIds: v.array(v.string()) },
+  handler: async (ctx, { chatIds }) => {
+    const wanted = new Set(chatIds);
+    const labels: Record<string, string | null> = {};
+    if (!wanted.size) return labels;
+    const rows = await ctx.db.query("telegramBotChats").collect();
+    for (const chat of rows) {
+      if (!wanted.has(chat.chatId)) continue;
+      labels[chat.chatId] = chatDisplayName(chat);
+    }
+    return labels;
   },
 });
 
@@ -1813,6 +1888,20 @@ async function deleteTrackedMessages(
       }
     }
     if (batch.length < limit) break;
+  }
+  // Name the chats THIS sweep abandoned. A listing resolves labels from the
+  // pairing table; these rows never travelled through the listing (they were
+  // just marked), so the notice would otherwise show a bare numeric id.
+  if (newlyAbandoned.length) {
+    try {
+      const labels = await ctx.runQuery(internal.telegramBot.chatLabels, {
+        chatIds: [...new Set(newlyAbandoned.map((row) => row.chatId))],
+      });
+      for (const row of newlyAbandoned) row.chatLabel = labels[row.chatId] ?? null;
+    } catch {
+      // Naming is cosmetic: the id still identifies the chat, so the rows are
+      // still listed and recovered exactly as before.
+    }
   }
   // Standing backlog in scope, not just this sweep's new marks: the operator
   // should see "3 abandoned" on every tally until the rows leave, not once.
@@ -2110,6 +2199,9 @@ export const purgeBotMessages = internalAction({
       try {
         await ctx.runMutation(internal.notifications.recordBotHealthAlert, {
           title: "Messages no longer retried",
+          // Batch identity, not the title: two batches inside an hour are two
+          // facts, and only the second one used to be swallowed.
+          dedupeKey: purgeAbandonmentKey(newlyAbandoned),
           body: purgeAbandonmentNotice({
             total: newlyAbandoned.length,
             rows: newlyAbandoned,

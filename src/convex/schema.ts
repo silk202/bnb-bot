@@ -289,6 +289,10 @@ const schema = defineSchema(
       ts: v.number(),
       read: v.boolean(),
       chainKey: v.optional(v.string()),
+      // Explicit dedupe identity for writers that must tell two same-titled
+      // events apart (the abandonment notice carries its batch's row ids).
+      // Absent on every other notification, which keeps the title + 1 h rule.
+      dedupeKey: v.optional(v.string()),
     })
       .index("by_user", ["userId"])
       // Bounded bell reads: newest-N feed and unread-only count without

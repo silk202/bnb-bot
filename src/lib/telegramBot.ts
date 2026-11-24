@@ -193,6 +193,12 @@ export interface AbandonedMessageLite {
   sentAt: number;
   attempts?: number;
   abandonedReason?: AbandonedReason | null;
+  /**
+   * The paired chat's title (or `@username`) when the deployment still knows
+   * it. Absent for a deleted group, for a channel (never paired as a chat), or
+   * for a row listed before the label was resolved — the id is always there.
+   */
+  chatLabel?: string | null;
 }
 
 /** Cutoff for a sweep at `now`: rows at or before it are due for deletion. */
@@ -532,6 +538,11 @@ export function purgeFailureAlert(
  */
 export function abandonedRowLine(row: AbandonedMessageLite, now: number): string {
   const where = row.source === "channel" ? "channel" : "chat";
+  // The name is what the operator recognizes; the id is what they can act on.
+  // Both, when the pairing still knows the name — never a bare id if a title
+  // exists, and never an invented one if it does not.
+  const label = row.chatLabel?.trim();
+  const named = label ? `${where} "${label}"` : where;
   const attempts = row.attempts ?? 0;
   const why =
     row.abandonedReason === "hopeless"
@@ -539,7 +550,7 @@ export function abandonedRowLine(row: AbandonedMessageLite, now: number): string
       : row.abandonedReason === "exhausted" || attempts > 0
         ? `${attempts}/${PURGE_RETRY_CAP} attempts`
         : "no reason recorded";
-  return `• ${where} \`${row.chatId}\` · message ${row.messageId} · ${why} · ${fmtAgo(row.sentAt, now)}`;
+  return `• ${named} \`${row.chatId}\` · message ${row.messageId} · ${why} · ${fmtAgo(row.sentAt, now)}`;
 }
 
 /**
@@ -560,6 +571,32 @@ export function abandonedListLines(
   const rest = total - shown.length;
   if (rest > 0) lines.push(`• …and ${rest} more`);
   return lines;
+}
+
+/**
+ * A stable key for ONE abandonment batch, so the bell can tell batches apart.
+ *
+ * The old dedupe was title + one hour, which silently swallowed a second
+ * batch inside the hour. The key is derived from the rows themselves
+ * (source + chat + message, sorted), so:
+ *  - the same batch always produces the same key (a retry cannot duplicate it),
+ *  - a different batch can never collide with it, however close in time,
+ *  - row order does not change the key.
+ *
+ * FNV-1a over the joined ids keeps it short; the count stays in the key so a
+ * truncated hash collision could not also merge two different batch sizes.
+ */
+export function purgeAbandonmentKey(rows: readonly AbandonedMessageLite[]): string {
+  const ids = rows
+    .map((row) => `${row.source}:${row.chatId}:${row.messageId}`)
+    .sort()
+    .join("|");
+  let hash = 2166136261;
+  for (let i = 0; i < ids.length; i += 1) {
+    hash ^= ids.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `abandon:${rows.length}:${hash.toString(36)}`;
 }
 
 /**

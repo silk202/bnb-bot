@@ -385,10 +385,20 @@ export const recordSessionAlerts = internalMutation({
  * Own kind: `bot_health` (round 33). It is a distinct bucket so the bell's
  * icon and its dedupe key are the fault's own — an hourly bot-health entry can
  * never suppress, or be suppressed by, a session update.
+ *
+ * `dedupeKey` is for events that are one-off plus same-titled. When supplied,
+ * it REPLACES the title + 1 h rule (it never falls back to it): two abandoned
+ * batches inside an hour are two different facts, not a repeat of one. Without
+ * it, the hourly title dedupe still throttles a persisting fault.
  */
 export const recordBotHealthAlert = internalMutation({
-  args: { title: v.string(), body: v.string() },
-  handler: async (ctx, { title, body }) => {
+  args: {
+    title: v.string(),
+    body: v.string(),
+    /** Batch identity — dedupes on itself, not on the title or the clock. */
+    dedupeKey: v.optional(v.string()),
+  },
+  handler: async (ctx, { title, body, dedupeKey }) => {
     const now = Date.now();
     const states = await ctx.db.query("terminalStates").collect();
     const seen = new Set<string>();
@@ -407,7 +417,10 @@ export const recordBotHealthAlert = internalMutation({
         )
         .order("desc")
         .take(20);
-      const already = recent.some((n) => n.title === title && now - n.ts < 60 * 60 * 1000);
+      const key = dedupeKey?.trim();
+      const already = key
+        ? recent.some((n) => n.dedupeKey === key)
+        : recent.some((n) => n.title === title && now - n.ts < 60 * 60 * 1000);
       if (already) continue;
       await ctx.db.insert("notifications", {
         userId: state.userId,
@@ -416,6 +429,7 @@ export const recordBotHealthAlert = internalMutation({
         body,
         ts: now,
         read: false,
+        ...(key ? { dedupeKey: key } : {}),
       });
       inserted += 1;
     }

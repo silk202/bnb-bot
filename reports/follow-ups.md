@@ -3120,3 +3120,111 @@ silently retired a message from the automatic sweep.
 23. **Show the local sweep in Settings.**
 24. **Note in `retention.ts` that abandoned rows are covered by the 48 h sweep**
     (round 35 #19), so the two sweeps never grow separate rules.
+
+## Round 37 — name the chats, key the notice, show it in the panel (2026-11-24)
+
+Round 36's follow-ups #2–#4. The abandoned rows had ids but no names, the
+announcement was deduped by title so a second batch inside the hour vanished,
+and the only place the rows could be read was Telegram itself.
+
+### 1. The notice is deduped per batch, not per hour
+
+- `notifications.dedupeKey` stores an explicit identity for writers whose
+events are one-off but share a title.
+- `purgeAbandonmentKey(rows)` derives it from the batch itself: FNV-1a over
+  sorted `source:chatId:messageId` ids, prefixed with the row count. The same
+  batch always keys the same (a retry cannot duplicate the bell), a different
+  batch never collides (however close in time), and row order does not matter.
+- `recordBotHealthAlert` takes an optional `dedupeKey`. When present it
+  REPLACES the title + 1 h rule instead of falling back to it — the hourly rule
+  is right for a persisting sweep fault and wrong for two distinct batches.
+  Without a key the fault alert keeps its hourly throttle unchanged.
+- `purgeBotMessages` passes the batch key with the notice. A second batch ten
+  minutes after the first now rings; re-announcing the first still cannot.
+
+### 2. The chats are named, not only numbered
+
+- `AbandonedMessageLite.chatLabel` carries the paired chat's title (else its
+  `@username`) when the deployment still knows it. `chatDisplayName` is the one
+  place that decides title → `@username` → null.
+- `listAbandonedMessages` resolves labels once per listing from the small
+  `telegramBotChats` table, so every surface (the bot's `/alerts`, `/purge`'s
+  receipt, the app panel) shows `chat "Alpha Group" (42)` instead of a bare id.
+- Rows this sweep JUST abandoned never travelled through a listing, so
+  `deleteTrackedMessages` resolves their labels through a new bounded
+  `chatLabels` query before the notice is built. Naming is best-effort: a
+  failure leaves the id in place, and the rows are still listed and recoverable.
+- A channel is not a paired chat and a deleted group has no pairing row left;
+  both fall back to the id rather than an invented name.
+
+### 3. The app panel shows the stuck rows
+
+- `getBotHealth` (chip) and `getBotStatus` (dialog) now return
+  `abandonedTotal` plus `abandonedRows`, read LIVE from `by_abandoned` at query
+  time — not the stamped tally, which is up to ten minutes stale and only a
+  number.
+- `BotStatusChip`'s tooltip lists up to three rows under the purge line, with
+  `…and N more` computed from the standing total.
+- `TelegramBotDialog`'s Auto-purge card shows an amber block under "Last
+  sweep": the standing count, up to five named rows, and how to recover them
+  (`/purge` in the chat). The same `abandonedListLines` renders here and in
+  Telegram, so the two can never disagree about a row.
+
+### Checks
+
+- `./node_modules/.bin/tsc -b --noEmit`: exit 0, including the new schema
+  field, the optional `dedupeKey` argument, the label plumbing through
+  `listAbandonedMessages`/`chatLabels`, and both widened status DTOs.
+- `bun test`: 853 pass / 0 fail across 69 files (850 → +3: a named row, the
+  id fallback for an unnamed/whitespace label, and the batch-key properties
+  plus the notice's named row).
+- `eslint` on the seven touched files: 20 pre-existing problems (the same 14
+  plus 2 in `notifications.ts` and 1 in the dialog), none on a changed line.
+- NOT executed: `convex deploy` (free-plan ceiling), so `notifications.dedupeKey`
+  is not in a live schema, no batch-keyed notice has been written, and neither
+  the dialog block nor the chip tooltip has rendered against a live deployment.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 37, brainstormed (none started)
+
+1. **Prove this end to end on a live deployment**: two batches inside one hour
+   must both reach the bell, each row must carry its chat's title, and the panel
+   must list the same rows `/alerts` does.
+2. **Channel names.** A channel is never in `telegramBotChats`, so its rows
+   still show only the id. The configured channel id/title could be stamped on
+   the config row.
+3. **Show the abandoned count in the chip's label**, not only its tooltip.
+4. **Refresh the chip's `now`** — it is captured once per mount, so a row's
+   "2h ago" ages only when the component remounts.
+5. **Label lookup for a deleted group** from Telegram (`getChat`) before giving
+   up on a name — bounded to one call per hopeless batch.
+6. **Clear `abandoned` when a chat re-pairs** (round 36 #5), so restored
+   chats return to the automatic sweep instead of waiting for `/purge`.
+7. **`/purge` for the channel** (round 36 #6).
+8. **Store the last failure description** on the row (round 36 #7).
+9. **Delete one message by id** (round 36 #8).
+10. **Per-chat abandoned counts** on `/alerts` (round 36 #9).
+11. **A cap on `bot_health` dedupe reads** — the key check walks 20 rows; a
+    batch key older than 20 notices could in principle be re-inserted, though a
+    row cannot be newly abandoned twice.
+12. **Fold `newlyAbandoned` into a short sweep history** (round 35 #4).
+13. **Escalate once instead of only stopping** (round 32 #6).
+14. **Show `retrying` in the chip's label** (round 36 #12).
+15. **Contract test for the backend keep-list.**
+16. **Expired `operatorDeviceTrust` sweep.**
+17. **Prove the cached height path on a funded send.**
+18. **`heightReadsFailed` count** for the height cache.
+19. **Redact URLs inside RPC error bodies.**
+20. **A `(chatId, sentAt)` composite index** for chat-scoped windows.
+21. **Rebroadcast signed bytes after ~3 misses.**
+22. **Operator-selectable digest cadence.**
+23. **Move the inline keyboards in `handleUpdate` into lib builders.**
+24. **Track multiple channel ids.**
+25. **Show the local sweep in Settings.**
+26. **Note abandoned-row coverage in `retention.ts`** (round 35 #19).

@@ -20,7 +20,12 @@ import { api } from "@/convex/_generated/api";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { TelegramBotDialog } from "@/components/TelegramBotDialog";
 import { formatExpiry, getDeviceToken } from "@/lib/gate";
-import { purgeAlertPauseNote, purgeTelemetryLine } from "@/lib/telegramBot";
+import {
+  abandonedListLines,
+  purgeAlertPauseNote,
+  purgeTelemetryLine,
+  type AbandonedMessageLite,
+} from "@/lib/telegramBot";
 import { Bot } from "lucide-react";
 import { useState } from "react";
 
@@ -46,6 +51,9 @@ export function BotStatusChip() {
         } | null;
         /** Alerts sent for the current fault; at the cap, alerting is paused. */
         purgeAlertsSent?: number;
+        /** Rows no sweep will retry, live — named under the tally in the tooltip. */
+        abandonedTotal?: number;
+        abandonedRows?: AbandonedMessageLite[];
         engineRunning?: boolean | null;
         solEngineRunning?: boolean | null;
         botUsername?: string | null;
@@ -109,6 +117,15 @@ export function BotStatusChip() {
         `Digest: ${health.digestEnabled ? "on (10 min)" : "off"}`,
         `Channel purge: ${health.channelPurge === false ? "off" : "on (15 min)"}`,
         `Purge: ${purgeTelemetryLine(health.purgeLast, now)}${purgeAlertPauseNote(health.purgeAlertsSent)}`,
+        ...((health.abandonedTotal ?? 0) > 0
+          ? [
+              `Stuck rows (${health.abandonedTotal}) — sweeps skip them, /purge still deletes them:`,
+              ...abandonedListLines(health.abandonedRows ?? [], now, {
+                limit: 3,
+                total: health.abandonedTotal,
+              }),
+            ]
+          : []),
         "TASignal channel is separate — this chip is TAEngine only.",
       ].join("\n")
     : "Telegram Operator Bot";

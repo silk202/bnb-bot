@@ -43,7 +43,12 @@ import { useLocation, useNavigate } from "react-router";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { formatExpiry, getDeviceToken, setDeviceToken } from "@/lib/gate";
-import { purgeAlertPauseNote, purgeTelemetryLine } from "@/lib/telegramBot";
+import {
+  abandonedListLines,
+  purgeAlertPauseNote,
+  purgeTelemetryLine,
+  type AbandonedMessageLite,
+} from "@/lib/telegramBot";
 
 type BotStatus = {
   recognized: boolean;
@@ -64,6 +69,9 @@ type BotStatus = {
   } | null;
   /** Alerts sent for the current fault; at the cap, alerting is paused. */
   purgeAlertsSent?: number;
+  /** Rows no sweep will retry, live — listed under the sweep line. */
+  abandonedTotal?: number;
+  abandonedRows?: AbandonedMessageLite[];
   webhookOk?: boolean | null;
   webhookCheckedAt?: number | null;
   botUsername: string | null;
@@ -791,6 +799,27 @@ export function TelegramBotDialog({
                 Last sweep: {purgeTelemetryLine(status?.purgeLast, now)}
                 {purgeAlertPauseNote(status?.purgeAlertsSent)}
               </div>
+              {/* The stuck rows by name, not just a number in the tally: a
+                  deleted group is fixed differently from a spent budget. */}
+              {(status?.abandonedTotal ?? 0) > 0 && (
+                <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10px]">
+                  <div className="font-semibold text-amber-500">
+                    {status?.abandonedTotal} message
+                    {(status?.abandonedTotal ?? 0) === 1 ? "" : "s"} past the
+                    automatic retry
+                  </div>
+                  <pre className="mt-1 whitespace-pre-wrap break-all font-mono leading-4 text-muted-foreground">
+                    {abandonedListLines(status?.abandonedRows ?? [], now, {
+                      limit: 5,
+                      total: status?.abandonedTotal ?? 0,
+                    }).join("\n")}
+                  </pre>
+                  <div className="mt-1 text-muted-foreground">
+                    Sweeps skip them; /purge in the chat still deletes them by
+                    hand.
+                  </div>
+                </div>
+              )}
             </div>
             <Switch
               checked={status?.autoPurge !== false}
