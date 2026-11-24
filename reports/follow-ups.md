@@ -3228,3 +3228,85 @@ events are one-off but share a title.
 24. **Track multiple channel ids.**
 25. **Show the local sweep in Settings.**
 26. **Note abandoned-row coverage in `retention.ts`** (round 35 #19).
+
+## Round 38 — the four migration tasks, measured for real (2026-11-24)
+
+No code change this round. The task guard and the release gate were run with
+no skips and no `--fix`, and their actual verdicts are recorded here so the
+next session does not have to guess.
+
+### `bun run check:tasks` — the four migration tasks
+
+- 1. `.env.local` VITE_CONVEX_URL: PASS (it had been re-quoted by a secret
+  sync; the guard normalized it to https://pastel-pelican-634.convex.cloud).
+- 2. dev + prod deploy keys: PASS (both `convex export` exit 0).
+- 3. overlay files + zips stamped https://flexible-frog-776.convex.site: PASS.
+- 4a. required env vars present on dev and prod: PASS.
+- 4b. `JWT_PRIVATE_KEY` armored, 1703 bytes on both: PASS (decryption intact).
+- 4c. `gate:operatorStatus` seeded:true — FAIL on dev and prod: the query
+  endpoint is unreachable because Convex is answering function calls with
+  "You have exceeded the free plan limits, so your deployments have been
+  disabled."
+- 4d. real operator sign-in — FAIL for the same provider-side reason, before
+  the probe could reach credentials or the login action.
+
+Data reads are NOT affected: 7a/7b/7c passed (one operatorConfig per side, all
+13 dev + 12 prod users have exactly one authAccount, dev not behind prod).
+The cap disables function serving, not the database.
+
+This is not a code defect and cannot be repaired with a deploy key: the
+provider decides it, and the documented remedy is a plan upgrade (Free has
+hard caps; Starter/Professional keep serving under metered overage) or waiting
+for the usage window to reset. `convex login`/dashboard access is unavailable
+in this workspace by design, so the upgrade is the account owner's action.
+The guard's `--fix` was deliberately NOT run: 4b is already correct, and
+`--fix` would also re-record the protected-deployment baseline (see below).
+
+### `bun run verify` — the release gate
+
+- 1/6 typecheck, 2/6 tests, 3/6 deploy-config parity, 4/6 host-header parity,
+  5/6 overlay artifacts: PASS (853 tests, 0 fail).
+- 6/6 live-path drill: FAIL — `reports/drill-latest.txt` is 563 h old (limit
+  24 h) and the recorded combined verdict is 0/2. The gate names the exact
+  funding it needs:
+  - BSC testnet 0x329513F68b697e83a769800A45fB84C568B47901
+  - Solana devnet CY8im5qWAzuD1oD3LnYuJsuAeUPrT1M6agudhJ93vN4K
+  Both need a human faucet claim; the public Solana RPC `requestAirdrop` path
+  already returns HTTP 410 here, and no funded deployer key exists.
+
+### Protected deployment — a real change, left visible
+
+`shiny-bulldog-311` is healthy (build stamp + seeded operator respond), but its
+build stamp is now `20261123T234400Z-ab2c2501a060` while `.task-baseline`
+records `20261113T212057Z-50da370bf26a` (recorded 2026-11-15). Something
+deployed to it on 2026-11-23 at 23:44 UTC. Nothing in this chat deployed there;
+the baseline was NOT rewritten, because re-recording it would turn a real write
+to a protected deployment into a green check. That needs a human answer: if
+that deploy was intended, re-record with `bun run check:tasks --fix`; if not,
+the stamp itself is the evidence of who/when to investigate.
+
+### Still blocked (unchanged, and now measured)
+
+1. Convex serving is off on both deployments (free-plan cap) — owner upgrades
+   or waits for the window; then 4c/4d can pass and the round 36–37 backend work
+   can finally be deployed and proved live.
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval; not touched.
+4. `bun run verify` needs the fresh 2/2 drill, which needs the two testnet
+   addresses funded by a human.
+
+### Follow-ups — round 38, brainstormed (none started)
+
+1. **Make 4c report the provider's own error**, not `unreachable`: the body
+   already names the plan ceiling, and the guard's generic word hides the one
+   fact the operator needs.
+2. **Fail 4c/4d as BLOCKED rather than FAIL** when the error is the plan
+   ceiling, so a billing outage is not indistinguishable from broken code.
+3. **Record the guard's verdicts to a report file** (it currently prints to
+   stdout only), so "it passed last week" has a timestamp.
+4. **Answer the protected-deployment stamp question** before the next `--fix`
+   run; the baseline is the only memory of the previous state.
+5. **A faucet-free drill path?** None that is honest: the drill's point is a
+   real funded transaction, so it stays gated on human funding.
+6. **Check dev serving too in the guard's preview step** — the preview can be
+   green while the dev deployment it talks to is disabled.
