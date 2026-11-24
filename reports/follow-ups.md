@@ -3616,3 +3616,26 @@ compiler). Cheap, no new hard-coded version, and it fails on a hollow download.
 Note the shape of this round: each run was red in the assertion and green in every
 install step, so the pin is right and the check was wrong twice. Both failures
 were reported with their measured line rather than guessed at.
+
+### Third run (45399227553, commit `070b11a`): the Solana job is green
+
+Every step of `solana-program` succeeded — the first green run of that job:
+
+| Step | Result |
+|---|---|
+| 7 Install cargo-build-sbf 4.5.0 (default platform-tools v1.57) | success |
+| 8 Install SBF platform-tools v1.57 | success |
+| 9 Install Anchor CLI 0.31.1 | success |
+| 10 Assert the pinned toolchain | success |
+| 11 Build the program (SBF v1) | success |
+| 12 Regenerate the IDL and fail on drift | success |
+| 13 Clippy (program crate, warnings are errors) | success |
+| 14 Tests (LiteSVM + IDL conformance) | success |
+| 15 Preflight (CI mode, read-only) | success |
+
+`verify` and `deploy-convex` succeeded too, and `deploy-convex`'s log shows the
+dry run resolving `flexible-frog-776` before `✔ Deployed Convex functions to
+https://flexible-frog-776.convex.cloud`. The only red job is `task-guard`, and
+only because its two secrets do not exist yet (`##[error]task guard did not run:
+missing secret(s): CONVEX_DEPLOY_KEY_1 CONVEX_DEPLOY_KEY_2 …`). That is follow-up
+1, an owner action, not a code defect.
