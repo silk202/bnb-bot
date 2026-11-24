@@ -177,6 +177,24 @@ export interface TrackedMessageLite {
   attempts?: number;
 }
 
+/**
+ * Why the automatic sweep stopped retrying a row. Stored WITH the row, because
+ * the two reasons call for different operator action: `hopeless` means the chat
+ * itself is unreachable (fix the chat, then `/purge`), `exhausted` means the
+ * retry budget is spent on a chat that still answers.
+ */
+export type AbandonedReason = "exhausted" | "hopeless";
+
+/** One abandoned row as a listing shows it: which chat, which message, why. */
+export interface AbandonedMessageLite {
+  chatId: string;
+  messageId: number;
+  source: BotMessageSource;
+  sentAt: number;
+  attempts?: number;
+  abandonedReason?: AbandonedReason | null;
+}
+
 /** Cutoff for a sweep at `now`: rows at or before it are due for deletion. */
 export function purgeCutoff(now: number, ttlMs: number = BOT_MESSAGE_TTL_MS): number {
   return now - ttlMs;
@@ -498,6 +516,77 @@ export function purgeFailureAlert(
       ? "⚠️ **Message sweep still failing**"
       : "⚠️ **Message sweep is failing**";
   return [header, "", purgeFailureSummary(previous, current, now, alert)].join("\n");
+}
+
+/**
+ * One line naming a row the automatic sweep has given up on: which chat, which
+ * message, why, and how old it is.
+ *
+ * The tally says "3 abandoned"; without this the operator cannot tell whether
+ * those three sit in the chat in front of them or in a group that no longer
+ * exists — the difference between a Monday morning and a wasted half hour.
+ *
+ * A missing reason is stated, never guessed: rows abandoned before the reason
+ * was stored still show their attempt count, and "no reason recorded" is the
+ * honest answer for one with neither.
+ */
+export function abandonedRowLine(row: AbandonedMessageLite, now: number): string {
+  const where = row.source === "channel" ? "channel" : "chat";
+  const attempts = row.attempts ?? 0;
+  const why =
+    row.abandonedReason === "hopeless"
+      ? "chat unreachable"
+      : row.abandonedReason === "exhausted" || attempts > 0
+        ? `${attempts}/${PURGE_RETRY_CAP} attempts`
+        : "no reason recorded";
+  return `• ${where} \`${row.chatId}\` · message ${row.messageId} · ${why} · ${fmtAgo(row.sentAt, now)}`;
+}
+
+/**
+ * The bounded list itself. `limit` keeps a board readable, and `total` (the
+ * standing abandoned count) makes the truncation truthful: the query caps how
+ * many rows it returns, so "…and 2 more" is computed from the count, never from
+ * how many rows happened to travel.
+ */
+export function abandonedListLines(
+  rows: readonly AbandonedMessageLite[],
+  now: number,
+  opts: { limit?: number; total?: number } = {},
+): string[] {
+  const limit = opts.limit ?? 5;
+  const shown = rows.slice(0, limit);
+  const lines = shown.map((row) => abandonedRowLine(row, now));
+  const total = Math.max(opts.total ?? rows.length, shown.length);
+  const rest = total - shown.length;
+  if (rest > 0) lines.push(`• …and ${rest} more`);
+  return lines;
+}
+
+/**
+ * The one-time announcement that rows have been abandoned — the gap the fault
+ * alert leaves.
+ *
+ * Abandonment only happens on a sweep that also failed, but a SINGLE failing
+ * sweep after a clean one is a blip by design and alerts nobody. On exactly
+ * that sweep a row can leave the automatic selection for good, and the only
+ * trace is a number in a tally somebody has to go looking for. This is the push
+ * for that case.
+ *
+ * Sent through the bell (`bot_health`), not to every chat: the fault channel
+ * means "the sweep is broken", this means "these messages are now your job".
+ */
+export function purgeAbandonmentNotice(input: {
+  total: number;
+  rows: readonly AbandonedMessageLite[];
+  now: number;
+}): string {
+  const n = input.total;
+  const one = n === 1;
+  return [
+    `${n} tracked message${one ? "" : "s"} ${one ? "has" : "have"} just left the automatic retry: the budget is spent, or Telegram reports the chat cannot be reached.`,
+    ...abandonedListLines(input.rows, input.now, { limit: 10, total: n }),
+    `${one ? "It stays" : "They stay"} tracked, so /purge can still delete ${one ? "it" : "them"} by hand once the chat is back; /alerts lists ${one ? "it" : "them"} until then.`,
+  ].join("\n");
 }
 
 /** Telegram inline-keyboard button shape (url vs callback). */
@@ -1606,11 +1695,16 @@ export function alertsMessage(
     purgeLast?: PurgeTelemetry;
     /** Alerts the current fault has sent — at the cap the board says so. */
     purgeAlertsSent?: number;
+    /** Rows the sweeps have stopped retrying, already bounded by the query. */
+    abandonedRows?: readonly AbandonedMessageLite[];
   },
   chat: Pick<BotChat, "silent">,
   now: number = Date.now(),
 ): { text: string; keyboard: TgKeyboard } {
   const channelPurge = cfg.channelPurge !== false;
+  // The standing count, not `abandonedRows.length`: the query caps the rows it
+  // returns, so the number and the list can legitimately differ.
+  const abandonedTotal = cfg.purgeLast?.abandoned ?? 0;
   return {
     text: [
       "🔔 **Alerts & notifications**",
@@ -1622,6 +1716,16 @@ export function alertsMessage(
       `• Auto-purge (bot chats): ${cfg.autoPurge ? "🧹 ON — bot messages older than 10 min are deleted" : "❌ OFF — every message stays"}`,
       `• Auto-purge (channel): ${channelPurge ? "🧹 ON — channel posts older than 15 min are deleted" : "❌ OFF — channel posts stay"}`,
       `• Last sweep: ${purgeTelemetryLine(cfg.purgeLast, now)}${purgeAlertPauseNote(cfg.purgeAlertsSent)}`,
+      ...(abandonedTotal > 0
+        ? [
+            "",
+            `⚠️ **${abandonedTotal} message${abandonedTotal === 1 ? "" : "s"} past the automatic retry** — sweeps skip ${abandonedTotal === 1 ? "it" : "them"}, /purge still deletes ${abandonedTotal === 1 ? "it" : "them"} by hand:`,
+            ...abandonedListLines(cfg.abandonedRows ?? [], now, {
+              limit: 5,
+              total: abandonedTotal,
+            }),
+          ]
+        : []),
     ].join("\n"),
     keyboard: [
       [

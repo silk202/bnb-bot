@@ -3001,3 +3001,121 @@ manual run just tried them.
     the retention sweep already does this by age; a comment in `retention.ts`
     noting that abandoned rows are covered by it would keep the two sweeps from
     growing separate rules.
+
+## Round 36 — name the abandoned rows, announce them once (2026-11-24)
+
+Round 35's own follow-ups. Keeping abandoned rows made `/purge` able to reach
+them, but the operator could only see a number: "3 abandoned" with no chat, no
+message id and no reason. And a row could become abandoned on a sweep that
+alerted nobody — abandonment needs a failing delete, while two failing sweeps in
+a row are what fire the fault alert, so one failed sweep after a clean one
+silently retired a message from the automatic sweep.
+
+### 1. The abandoned rows are listed, with ids and a reason
+
+- `telegramBotMessages.abandonedReason` stores the verdict that abandoned the
+  row: `exhausted` (the 36-attempt budget is spent on a chat that still answers)
+  or `hopeless` (`chat not found` / invalid peer — fix the chat first). The two
+  call for different operator action, so the row keeps which one it was.
+- `markTrackedAbandoned` now takes the reason and writes both fields.
+- New `listAbandonedMessages` query reads `by_abandoned` in send-time order,
+  bounded (5 for a board, 10 for a notice; a chat-scoped read filters after a
+  1,000-row index walk because one chat's rows are not contiguous in that
+  index). A missing reason is returned as `null`, never defaulted to
+  `exhausted` — the listing prints "no reason recorded" instead of guessing.
+- `/alerts` grows a section under the tally: the standing count, one line per
+  row (`chat \`-100123456789\` · message 77 · chat unreachable · 2h ago`), and
+  `…and N more` computed from the standing count, not from how many rows the
+  query happened to return. `/purge`'s reply lists the rows STILL stuck in that
+  chat after its attempt — a deleted row is gone from the list, so the receipt
+  never claims work that this run just finished.
+- `abandonedRowLine`, `abandonedListLines` and `purgeAbandonmentNotice` live in
+  `src/lib/telegramBot.ts`, so the wording is unit-tested without a Convex
+  runtime and the board and the notice can never disagree about a row.
+
+### 2. One notice per newly abandoned batch, through the bell
+
+- `deleteTrackedMessages` returns `newlyAbandoned` (rows THIS run marked, with
+  chat/message/attempts/reason) alongside the standing `abandoned` count. The
+  attempt that spent the budget is the one counted, so the line reads
+  `36/36 attempts`.
+- `purgeBotMessages` sends one `bot_health` bell entry, titled "Messages no
+  longer retried", when `newlyAbandoned` is non-empty AND the fault alert did
+  not fire this sweep. That is exactly the gap: the fault alert already says
+  rows stopped being retried, so announcing twice at the same moment would be
+  noise; the case that needed closing is the quiet one.
+- The bell, not every linked chat: the fault channel means "the sweep is
+  broken", this means "these messages are now your job". The body names the
+  batch, lists up to ten rows and points at `/purge` and `/alerts`.
+- The notice is advisory: a failed insert leaves the rows tracked and listed,
+  and the sweep's outcome is unchanged. Two batches inside an hour collapse into
+  one bell entry because `recordBotHealthAlert` dedupes on title + 1 h — the
+  second batch is still visible on `/alerts`, and the dedupe is named as a
+  follow-up rather than papered over.
+
+### Checks
+
+- `./node_modules/.bin/tsc -b --noEmit`: exit 0, including the new schema field,
+  the two-argument `markTrackedAbandoned`, the new query's projected return type
+  and the widened `PurgeResult`.
+- `bun test`: 850 pass / 0 fail across 69 files (842 → +8: line wording for
+  exhausted/hopeless/missing reason, list bounding and truncation from the
+  standing total, singular/plural notice copy, and the ten-row notice cap).
+- `eslint` on the four touched files: the same 14 pre-existing problems, none on
+  a changed line.
+- NOT executed: `convex deploy` (free-plan ceiling), so `abandonedReason` is not
+  in a live schema, `listAbandonedMessages` has never run against a real table,
+  and no bell entry has been inserted. The `/alerts` and `/purge` copy has not
+  been rendered in Telegram.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 36, brainstormed (none started)
+
+1. **Prove this end to end on a live deployment**: a deleted-group row must be
+   listed with its id and `chat unreachable`, the bell must get exactly one
+   notice, `/alerts` must show it under the tally, and `/purge` must clear it
+   after the chat is restored — then the row must leave the list.
+2. **Show the stuck rows in the app panel**, not only in Telegram. The dialog
+   and the chip tooltip render the tally today; the listing needs a query on the
+   operator API plus the rows in the status DTO.
+3. **Name the chat, not just its id.** `telegramBotChats` already stores
+   `title`/`username`; the listing prints a raw `chatId` the operator has to
+   match by eye.
+4. **Make the notice dedupe explicit.** The bell dedupes on title + 1 h, so a
+   second abandoned batch inside the hour is silent. A dedupe key carrying the
+   batch's row ids (or the count in the title) would keep both.
+5. **Retry after a fix.** Re-adding the bot or re-pairing the chat does not
+   clear `abandoned`; only a manual `/purge` does. Clearing it on a successful
+   pair/link would put those rows back in the automatic sweep.
+6. **`/purge` for the channel.** Abandoned channel rows are listed but have no
+   manual recovery path at all — `/purge` is deliberately chat-scoped.
+7. **Store the last failure description** on the row, so a listing can say
+   `chat not found` rather than the verdict it implies.
+8. **Delete one message by id** (`/purge <messageId>`) — re-attempting the whole
+   chat is the only manual lever today, and a 100-row chat costs 100 calls.
+9. **Per-chat abandoned counts** on `/alerts`: which chat holds the backlog is
+   the first question the summary raises.
+10. **Fold `newlyAbandoned` into a short sweep history** (round 35 #4) — a
+    last-only tally cannot show "abandoned six hours ago".
+11. **Escalate once instead of only stopping** (round 32 #6).
+12. **Show `retrying` in the chip's label**, not only its tooltip.
+13. **Contract test for the backend keep-list** (env vars/secrets the deploy
+    must preserve).
+14. **Expired `operatorDeviceTrust` sweep** (needs an index).
+15. **Prove the cached height path on a funded send.**
+16. **`heightReadsFailed` count** for the height cache.
+17. **Redact URLs inside RPC error bodies** before they reach a log.
+18. **A `(chatId, sentAt)` composite index** for chat-scoped windows.
+19. **Rebroadcast signed bytes after ~3 misses.**
+20. **Operator-selectable digest cadence.**
+21. **Move the inline keyboards in `handleUpdate` into lib builders.**
+22. **Track multiple channel ids.**
+23. **Show the local sweep in Settings.**
+24. **Note in `retention.ts` that abandoned rows are covered by the 48 h sweep**
+    (round 35 #19), so the two sweeps never grow separate rules.

@@ -873,6 +873,9 @@ const schema = defineSchema(
       // still in the chat) so /purge can still delete it by hand; the 48 h
       // tracking-row retention eventually removes it otherwise.
       abandoned: v.optional(v.boolean()),
+      // Which verdict abandoned it. A listing says "chat unreachable" or
+      // "36/36 attempts", so the operator knows whether to fix the chat first.
+      abandonedReason: v.optional(v.union(v.literal("exhausted"), v.literal("hopeless"))),
     })
       .index("by_sent", ["sentAt"])
       .index("by_chat", ["chatId"])

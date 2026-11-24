@@ -15,9 +15,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  abandonedListLines,
+  abandonedRowLine,
   BOT_MESSAGE_TTL_MS,
   CHANNEL_MESSAGE_TTL_MS,
   classifyPurgeFailure,
+  purgeAbandonmentNotice,
   PURGE_ALERT_CAP,
   PURGE_ALERT_REPEAT_MS,
   PURGE_RETRY_CAP,
@@ -452,5 +455,118 @@ describe("classifyPurgeFailure — retry only what can heal", () => {
     expect(classifyPurgeFailure("Forbidden: bot was kicked from the group chat")).toBe(
       "transient",
     );
+  });
+});
+
+describe("abandoned rows — a number becomes names", () => {
+  const stuck = (over: Partial<Parameters<typeof abandonedRowLine>[0]> = {}) => ({
+    chatId: "42",
+    messageId: 7,
+    source: "bot" as const,
+    sentAt: NOW - 2 * 60 * 60 * 1000,
+    attempts: PURGE_RETRY_CAP,
+    abandonedReason: "exhausted" as const,
+    ...over,
+  });
+
+  test("a spent budget is named with the chat, the message and the count", () => {
+    const line = abandonedRowLine(stuck(), NOW);
+    expect(line).toContain("chat `42`");
+    expect(line).toContain("message 7");
+    expect(line).toContain(`${PURGE_RETRY_CAP}/${PURGE_RETRY_CAP} attempts`);
+    expect(line).toContain("2h ago");
+  });
+
+  test("a hopeless row says the chat is unreachable, not that attempts ran out", () => {
+    const line = abandonedRowLine(
+      stuck({ source: "channel", chatId: "-100123", attempts: 1, abandonedReason: "hopeless" }),
+      NOW,
+    );
+    expect(line).toContain("channel `-100123`");
+    expect(line).toContain("chat unreachable");
+    expect(line).not.toContain("attempts");
+  });
+
+  test("a missing reason is stated, never invented", () => {
+    const line = abandonedRowLine(stuck({ abandonedReason: null, attempts: 0 }), NOW);
+    expect(line).toContain("no reason recorded");
+  });
+
+  test("the list is bounded and its truncation counts the standing total", () => {
+    const rows = Array.from({ length: 5 }, (_, i) => stuck({ messageId: i + 1 }));
+    const lines = abandonedListLines(rows, NOW, { limit: 3, total: 8 });
+    expect(lines).toHaveLength(4);
+    expect(lines[3]).toBe("• …and 5 more");
+    expect(abandonedListLines(rows, NOW, { limit: 10, total: 5 })).toHaveLength(5);
+  });
+
+  test("no abandoned rows is no section at all", () => {
+    expect(abandonedListLines([], NOW)).toEqual([]);
+  });
+});
+
+describe("purgeAbandonmentNotice — the gap the fault alert leaves", () => {
+  test("it names the batch, lists the rows and says how to recover them", () => {
+    const body = purgeAbandonmentNotice({
+      total: 2,
+      rows: [
+        {
+          chatId: "42",
+          messageId: 7,
+          source: "bot",
+          sentAt: NOW - 60_000,
+          attempts: PURGE_RETRY_CAP,
+          abandonedReason: "exhausted",
+        },
+        {
+          chatId: "-1009",
+          messageId: 8,
+          source: "channel",
+          sentAt: NOW - 60_000,
+          attempts: 1,
+          abandonedReason: "hopeless",
+        },
+      ],
+      now: NOW,
+    });
+    expect(body).toContain("2 tracked messages have just left the automatic retry");
+    expect(body).toContain("message 7");
+    expect(body).toContain("message 8");
+    expect(body).toContain("/purge can still delete them by hand");
+    expect(body).toContain("/alerts lists them until then");
+  });
+
+  test("one row is written in the singular", () => {
+    const body = purgeAbandonmentNotice({
+      total: 1,
+      rows: [
+        {
+          chatId: "42",
+          messageId: 7,
+          source: "bot",
+          sentAt: NOW - 60_000,
+          attempts: PURGE_RETRY_CAP,
+          abandonedReason: "exhausted",
+        },
+      ],
+      now: NOW,
+    });
+    expect(body).toContain("1 tracked message has just left");
+    expect(body).toContain("/purge can still delete it by hand");
+    expect(body).not.toContain("…and");
+  });
+
+  test("a large batch is listed in full up to the limit and counted after it", () => {
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      chatId: "42",
+      messageId: i + 1,
+      source: "bot" as const,
+      sentAt: NOW - 60_000,
+      attempts: PURGE_RETRY_CAP,
+      abandonedReason: "exhausted" as const,
+    }));
+    const body = purgeAbandonmentNotice({ total: 12, rows, now: NOW });
+    expect(body).toContain("message 10");
+    expect(body).toContain("• …and 2 more");
   });
 });
