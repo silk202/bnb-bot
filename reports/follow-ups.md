@@ -3024,7 +3024,8 @@ silently retired a message from the automatic sweep.
   index). A missing reason is returned as `null`, never defaulted to
   `exhausted` — the listing prints "no reason recorded" instead of guessing.
 - `/alerts` grows a section under the tally: the standing count, one line per
-  row (`chat \`-100123456789\` · message 77 · chat unreachable · 2h ago`), and
+  row (chat id, message id, why, how long it has been stuck — e.g.
+  `chat -100123456789 · message 77 · chat unreachable · 2h ago`), and
   `…and N more` computed from the standing count, not from how many rows the
   query happened to return. `/purge`'s reply lists the rows STILL stuck in that
   chat after its attempt — a deleted row is gone from the list, so the receipt
