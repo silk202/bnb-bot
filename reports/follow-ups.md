@@ -2889,3 +2889,115 @@ on an older stamp reads 0.
     #6).
 17. **Track multiple channel ids** (round 26 #12).
 18. **Show the local sweep in Settings** (round 28 #15).
+
+## Round 35 — keep abandoned rows, split hopeless refusals (2026-11-23)
+
+Round 34 dropped a row once its retry budget was spent. That was a bookkeeping
+choice with a content consequence: the message is still in the chat, and once
+the row was gone `/purge` could never find it again. Round 34 even named the
+gap in its own follow-up list ("make abandonment recoverable by hand"). This
+round reverses the drop and splits the errors that made the budget necessary.
+
+### 1. Abandoned rows are KEPT and marked, not dropped
+
+`telegramBotMessages.abandoned: true` means "the automatic sweep has stopped
+retrying this row". The row, and therefore the message id, stays in the table
+until one of three things happens: a later `/purge` deletes the message, the
+48 h tracking-row retention removes the bookkeeping, or the message is deleted
+some other way.
+
+- The automatic sweep excludes abandoned rows from its selection
+  (`includeAbandoned` is false by default). They are still tracked but sit at
+  the head of the `by_sent` order; leaving them selectable would let a deleted
+  group's backlog starve newer messages out of the sweep's 100-row window until
+  the retention sweep.
+- `/purge` passes `includeAbandoned: true`. Clearing a fixed chat by hand is the
+  whole reason to keep the row; a successful manual delete drops it like any
+  other.
+- Manual attempts still pass `countAttempts: false`, so an impatient operator
+  cannot spend a row's automatic budget.
+- `abandoned` is a standing count, not "marked this sweep": it is read from the
+  new `by_abandoned` index (`["abandoned", "sentAt"]`), bounded at 1,000 rows,
+  so a clean sweep reads no tracked messages at all and the tally keeps saying
+  "3 abandoned" until they are gone. The filter that hides them from the sweep
+  uses `q.neq(field, true)`; Convex's ordering places `undefined` below every
+  value, so rows predating the field are included.
+
+### 2. Hopeless refusals no longer spend six hours of calls
+
+`classifyPurgeFailure` now returns three verdicts instead of two:
+
+- `permanent` (unchanged): message gone, too old, invalid id → row dropped.
+- `hopeless` (new): `chat not found`, `peer_id_invalid`, `chat_id_invalid` →
+  the sweep abandons the row on the first refusal. Waiting cannot make a
+  deleted group answer, so 36 attempts were 36 wasted calls; the row is kept, so
+  `/purge` still reaches it if the chat comes back.
+- `transient` (unchanged): rights, 429, 5xx, network — and a kicked bot, because
+  re-adding it makes the same deletes work again. Full 36-attempt budget.
+
+The tally segment is now `· 3 abandoned` (the "(retry cap)" note was no longer
+true for the hopeless half), the fault body says abandoned rows are "no longer
+retried automatically … /purge can still try them by hand", and `/purge`'s own
+reply adds how many rows in that chat are past the automatic budget and that the
+manual run just tried them.
+
+### Checks
+
+- Dependencies had to be reinstalled after the workspace restore
+  (`bun install --frozen-lockfile`, lockfile untouched); the first typecheck
+  failure was missing modules and a version-mismatched `tsc`, not this change.
+- `./node_modules/.bin/tsc -b --noEmit`: exit 0, including the new index, the
+  three-way verdict and the `includeAbandoned` arg.
+- `bun test`: 842 pass / 0 fail across 69 files (841 → +1: hopeless vs
+  transient verdicts; the tally and summary expectations were updated).
+- `eslint` on the four touched files: same 14 pre-existing problems, none on
+  changed lines.
+- NOT executed: `convex deploy` (free-plan ceiling). So the `by_abandoned` index
+  is not built, no row has been marked in a real table, and the `neq` filter's
+  runtime behaviour rests on Convex's documented `undefined` ordering, not on an
+  observed sweep. `countAbandonedMessages` has never been called.
+
+### Still blocked (unchanged)
+
+1. Convex `flexible-frog-776` stays disabled (free-plan ceiling).
+2. FlashboltSolana is not deployed to devnet (no funded deployer, no go-ahead).
+3. Mainnet awaits the independent audit plus explicit approval.
+4. `bun run verify` still needs a fresh 2/2 drill (one human faucet claim).
+
+### Follow-ups — round 35, brainstormed (none started)
+
+1. **Prove this on a live deployment**: a deleted-group row must be marked
+   abandoned on its first sweep, disappear from the automatic selection, keep
+   counting in the tally, and still be deletable by `/purge` after the chat is
+   restored. Also confirms the `neq` filter and the new index against real data.
+2. **Surface the abandoned rows themselves.** The tally counts them but nothing
+   names the chat/message, so "3 abandoned" is clear only in aggregate. An
+   `/alerts` line or an "abandoned" list with chat id + message id is the
+   missing half of manual recovery.
+3. **Announce abandonment once.** A row can become abandoned between two clean
+   sweeps, when no alert fires (the automatic tally shows it, but nothing pushes
+   it). One notification per newly abandoned batch, through the existing
+   `bot_health` kind, would close that gap without re-alerting hourly.
+4. **Keep a short sweep history** — last-only cannot show "the sweep stopped
+   running six hours ago".
+5. **Escalate once instead of only stopping** — the cap and its note end the
+   noise, but an unfixed fault is still unfixed.
+6. **Make the bell's dedupe explicit** so a title change cannot reset it.
+7. **Show `retrying` in the chip's label**, not only its tooltip.
+8. **Contract test for the backend keep-list** (env vars/secrets the deploy
+   must preserve).
+9. **Expired `operatorDeviceTrust` sweep** (needs an index).
+10. **Prove the cached height path on a funded send.**
+11. **`heightReadsFailed` count** for the height cache.
+12. **Redact URLs inside RPC error bodies** before they reach a log.
+13. **A `(chatId, sentAt)` composite index** for chat-scoped windows — the chat
+    query still takes every row before applying the cutoff.
+14. **Rebroadcast signed bytes after ~3 misses.**
+15. **Operator-selectable digest cadence.**
+16. **Move the inline keyboards in `handleUpdate` into lib builders.**
+17. **Track multiple channel ids.**
+18. **Show the local sweep in Settings.**
+19. **Drop abandoned rows once Telegram's own 48 h delete window has passed** —
+    the retention sweep already does this by age; a comment in `retention.ts`
+    noting that abandoned rows are covered by it would keep the two sweeps from
+    growing separate rules.

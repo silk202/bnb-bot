@@ -838,9 +838,9 @@ const schema = defineSchema(
       // the next sweep (a transient refusal: rights, kicked bot, 429, 5xx,
       // network). Absent on a tally stamped before round 31 = 0.
       purgeLastRetrying: v.optional(v.number()),
-      // Rows dropped this sweep because they used up PURGE_RETRY_CAP transient
-      // attempts. They are not deleted and never will be, so the tally names
-      // them instead of letting `failed - retrying` imply a permanent refusal.
+      // Rows in scope the automatic sweep has stopped retrying (budget spent or
+      // hopeless chat). A STANDING count: the tally names them until the rows
+      // leave, instead of letting `failed - retrying` imply a permanent refusal.
       purgeLastAbandoned: v.optional(v.number()),
       purgeLastSkipped: v.optional(v.string()),
       // When a sweep-fault alert was last sent, so a persisting fault repeats
@@ -868,9 +868,17 @@ const schema = defineSchema(
       // Transient refusals counted against PURGE_RETRY_CAP. Absent = 0, so the
       // rows already tracked when the budget landed simply start at zero.
       attempts: v.optional(v.number()),
+      // The automatic sweep has stopped retrying this row: the budget is spent,
+      // or Telegram called the chat hopeless. The row is KEPT (the message is
+      // still in the chat) so /purge can still delete it by hand; the 48 h
+      // tracking-row retention eventually removes it otherwise.
+      abandoned: v.optional(v.boolean()),
     })
       .index("by_sent", ["sentAt"])
-      .index("by_chat", ["chatId"]),
+      .index("by_chat", ["chatId"])
+      // Counting the standing abandoned backlog without a table scan: this
+      // walks only the marked rows instead of every tracked message.
+      .index("by_abandoned", ["abandoned", "sentAt"]),
 
     // Server-issued device trust (v2.5): after a REAL server-side
     // verification (guest access code or operator email OTP) the server mints

@@ -45,17 +45,19 @@ export interface PurgeTelemetry {
   /**
    * The part of `failed` whose row SURVIVED the sweep: a transient refusal
    * (rights, kicked bot, 429, 5xx, network) keeps the message tracked, so the
-   * next sweep attempts it again. `failed - retrying - abandoned` were settled
-   * for good (already gone, past Telegram's 48 h limit). Optional because a
+   * next sweep attempts it again. `failed - retrying` were settled for good
+   * (already gone, past Telegram's 48 h limit). Optional because a
    * tally stamped before round 31 has no such field — absent reads as 0, never
    * as "everything is retrying".
    */
   retrying?: number;
   /**
-   * Rows dropped this sweep because they used up `PURGE_RETRY_CAP` transient
-   * attempts. They are no longer retried, so they stay in the chat — the honest
-   * alternative to either retrying a dead row for 48 h or silently forgetting
-   * it. Absent on a tally stamped before round 34 = 0.
+   * Tracked messages the automatic sweep has stopped retrying: their
+   * `PURGE_RETRY_CAP` budget is spent, or Telegram called the chat hopeless
+   * (`chat not found`). They are NOT deleted — `/purge` can still try them, and
+   * the 48 h retention sweep eventually removes the bookkeeping row. This is a
+   * standing count, so it stays visible until the row leaves. Absent on a tally
+   * stamped before round 35 = 0.
    */
   abandoned?: number;
   /** Why the sweep did nothing, when it did nothing on purpose. */
@@ -143,10 +145,14 @@ export const CHANNEL_MESSAGE_TTL_MS = 15 * 60 * 1000;
  * 288 identical failures for a message no delete will ever reach.
  *
  * 36 attempts is six hours of 10-minute sweeps: long enough for rights, rate
- * limits and maintenance to come back, short enough that a dead row stops
- * costing calls and stops inflating the retry backlog. The row is then dropped
- * and counted `abandoned` — the operator sees that the message will stay, which
- * is the truth, instead of a `retrying` count that never drains.
+ * limits and maintenance to come back.
+ *
+ * When the budget is spent the row is NOT dropped. It is marked `abandoned`,
+ * which stops the automatic sweep from spending calls on it while keeping the
+ * message in `/purge`'s reach: a repaired chat can be cleared by hand, and the
+ * tally keeps counting the row until it is deleted or the 48 h retention sweep
+ * removes the bookkeeping. Dropping it would have turned a bookkeeping decision
+ * into a permanently lost message — the wrong trade for a few saved calls.
  *
  * `/purge` attempts do NOT count: an explicit operator retry spends the
  * operator's action, not the row's automatic budget.
@@ -225,12 +231,10 @@ export function purgeTelemetryLine(
   // Telegram will never accept again is settled, not a retry backlog.
   const retrying =
     (telemetry.retrying ?? 0) > 0 ? ` · ${telemetry.retrying} retrying` : "";
-  // Rows that used up their retry budget are neither deleted nor coming back.
-  // Naming the cap keeps "abandoned" from reading as a random loss.
+  // Still tracked but no longer retried automatically: neither deleted nor a
+  // retry backlog, so it gets its own segment instead of inflating `failed`.
   const abandoned =
-    (telemetry.abandoned ?? 0) > 0
-      ? ` · ${telemetry.abandoned} abandoned (retry cap)`
-      : "";
+    (telemetry.abandoned ?? 0) > 0 ? ` · ${telemetry.abandoned} abandoned` : "";
   // A skipped note is a stand-down, not a replacement for a tally: if a sweep
   // did delete anything, the counts stay in front and the note is appended. A
   // partial sweep must never render as though nothing ran (round 28's
@@ -394,12 +398,17 @@ export function purgeAlertPlan(input: {
  *
  * `permanent`: the message can never be deleted (already gone, past the 48 h
  * delete limit, or Telegram marks the id invalid) — the row is dropped so no
- * future sweep re-counts it. `transient`: the refusal is a condition that can
- * heal — missing rights, a kicked bot, a rate limit, a 5xx or a network error —
- * so the row stays tracked and the next sweep retries it. Guessing the other
- * way either loses a live message or retries a dead one forever.
+ * future sweep re-counts it. `hopeless`: the refusal names a chat the bot
+ * cannot reach at all (`chat not found`, an invalid peer id) — waiting cannot
+ * heal that, so the row is abandoned at once instead of spending six hours of
+ * calls. `transient`: the refusal is a condition that CAN heal — missing
+ * rights, a kicked bot (re-adding restores it), a rate limit, a 5xx or a
+ * network error — so the row keeps its retry budget. Guessing the other way
+ * either loses a live message or retries a dead one forever.
  */
-export function classifyPurgeFailure(description: string): "permanent" | "transient" {
+export function classifyPurgeFailure(
+  description: string,
+): "permanent" | "hopeless" | "transient" {
   const d = description.toLowerCase();
   if (
     d.includes("message to delete not found") ||
@@ -410,6 +419,16 @@ export function classifyPurgeFailure(description: string): "permanent" | "transi
     d.includes("message id is invalid")
   ) {
     return "permanent";
+  }
+  // The chat itself is unreachable, not the message. No number of sweeps makes
+  // a deleted group answer, and the row stays tracked so /purge can still
+  // clear it if the chat comes back.
+  if (
+    d.includes("chat not found") ||
+    d.includes("peer_id_invalid") ||
+    d.includes("chat_id_invalid")
+  ) {
+    return "hopeless";
   }
   return "transient";
 }
@@ -456,7 +475,7 @@ export function purgeFailureSummary(
       : "Refused messages stay tracked, so the next sweep retries them once the rights are back; only messages Telegram will never accept a delete for are dropped.",
     ...(abandoned > 0
       ? [
-          `${abandoned} message${abandoned === 1 ? "" : "s"} used up the ${PURGE_RETRY_CAP}-attempt retry cap and ${abandoned === 1 ? "is" : "are"} no longer tracked — the sweep will not try again, so ${abandoned === 1 ? "it stays" : "they stay"} in the chat.`,
+          `${abandoned} message${abandoned === 1 ? "" : "s"} ${abandoned === 1 ? "is" : "are"} no longer retried automatically — the retry budget is spent, or Telegram reports the chat is gone. ${abandoned === 1 ? "It stays" : "They stay"} tracked, so /purge can still try ${abandoned === 1 ? "it" : "them"} by hand.`,
         ]
       : []),
     ...(last

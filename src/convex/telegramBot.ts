@@ -1496,6 +1496,11 @@ export const recordBotMessage = internalMutation({
  *
  * One selection rule (`selectPurgeable`) still decides the window and both
  * scopes for the cron sweep, `/purge` and the panel.
+ *
+ * Abandoned rows (`attempts` spent, or a hopeless chat) are excluded by
+ * default. They are still tracked, but they sit at the head of `by_sent` and
+ * would starve newer messages out of the sweep's 100-row window until the 48 h
+ * retention sweep. `/purge` passes `includeAbandoned` to reach them by hand.
  */
 export const listStaleMessages = internalQuery({
   args: {
@@ -1504,17 +1509,21 @@ export const listStaleMessages = internalQuery({
     chatId: v.optional(v.string()),
     /** One surface only — `/purge` in a chat must never select channel rows. */
     source: v.optional(v.union(v.literal("bot"), v.literal("channel"))),
+    /** Manual recovery: include rows the automatic sweep has stopped retrying. */
+    includeAbandoned: v.optional(v.boolean()),
   },
-  handler: async (ctx, { cutoff, limit, chatId, source }) => {
-    const rows = chatId
-      ? await ctx.db
+  handler: async (ctx, { cutoff, limit, chatId, source, includeAbandoned }) => {
+    const select = chatId
+      ? ctx.db
           .query("telegramBotMessages")
           .withIndex("by_chat", (q) => q.eq("chatId", chatId))
-          .take(limit)
-      : await ctx.db
+      : ctx.db
           .query("telegramBotMessages")
-          .withIndex("by_sent", (q) => q.lte("sentAt", cutoff))
-          .take(limit);
+          .withIndex("by_sent", (q) => q.lte("sentAt", cutoff));
+    const rows = await (includeAbandoned
+      ? select
+      : select.filter((q) => q.neq(q.field("abandoned"), true))
+    ).take(limit);
     return selectPurgeable(rows, {
       cutoff,
       ...(chatId ? { chatId } : {}),
@@ -1544,6 +1553,50 @@ export const bumpTrackedAttempts = internalMutation({
 });
 
 /**
+ * Stop the automatic sweep from retrying these rows WITHOUT dropping them: the
+ * message is still in the chat, so `/purge` must still find it. Idempotent — a
+ * row already marked is simply re-patched.
+ */
+export const markTrackedAbandoned = internalMutation({
+  args: { ids: v.array(v.id("telegramBotMessages")) },
+  handler: async (ctx, { ids }) => {
+    let marked = 0;
+    for (const id of ids) {
+      const row = await ctx.db.get(id);
+      if (!row) continue;
+      if (row.abandoned !== true) await ctx.db.patch(id, { abandoned: true });
+      marked += 1;
+    }
+    return { marked };
+  },
+});
+
+/**
+ * Count the rows in scope the automatic sweep has stopped retrying. Uses the
+ * `by_abandoned` index so a clean sweep reads no tracked messages at all, and
+ * a bounded `take`: the table is capped by the 48 h tracking-row retention and
+ * 1,000 is far above any real backlog. Reports a floor, never an invented
+ * exact number.
+ */
+export const countAbandonedMessages = internalQuery({
+  args: {
+    chatId: v.optional(v.string()),
+    source: v.optional(v.union(v.literal("bot"), v.literal("channel"))),
+  },
+  handler: async (ctx, { chatId, source }) => {
+    const rows = await ctx.db
+      .query("telegramBotMessages")
+      .withIndex("by_abandoned", (q) => q.eq("abandoned", true))
+      .take(1000);
+    return rows.filter(
+      (row) =>
+        (chatId === undefined || row.chatId === chatId) &&
+        (source === undefined || row.source === source),
+    ).length;
+  },
+});
+
+/**
  * Forget tracking rows whose delete has a final verdict: Telegram accepted it,
  * or refused it permanently (`classifyPurgeFailure`). Idempotent — a row that a
  * concurrent sweep already removed is skipped, not an error.
@@ -1567,7 +1620,7 @@ type PurgeResult = {
   deleted: number;
   failed: number;
   retrying: number;
-  /** Rows dropped after using up PURGE_RETRY_CAP transient attempts. */
+  /** Rows in scope the automatic sweep has stopped retrying (still tracked). */
   abandoned: number;
 };
 
@@ -1576,28 +1629,29 @@ type PurgeResult = {
  * dropped only once Telegram has a verdict — accepted, or refused permanently
  * (message gone / past its 48 h delete limit). A transient refusal (missing
  * rights, kicked bot, rate limit, 5xx, network) keeps the row tracked so the
- * next sweep retries it, and counts one attempt against `PURGE_RETRY_CAP`;
- * past that budget the row is dropped and reported `abandoned` rather than
- * retried until the 48 h retention backstop. Rows attempted in this run are
- * skipped by id, so a retry backlog cannot make the batch loop spin on the
- * same rows.
+ * next sweep retries it, and counts one attempt against `PURGE_RETRY_CAP`.
+ * Past that budget — or on the first hopeless refusal (`chat not found`) — the
+ * row is marked `abandoned`: the automatic sweep stops spending calls on it,
+ * but it stays tracked so `/purge` can still clear the message by hand. Rows
+ * attempted in this run are skipped by id, so a retry backlog cannot make the
+ * batch loop spin on the same rows.
  *
  * `countAttempts: false` is for `/purge`: an explicit operator retry must not
  * spend a row's AUTOMATIC budget, or a few impatient taps could abandon a
- * message a healed sweep would have deleted.
+ * message a healed sweep would have deleted. It also includes abandoned rows,
+ * which is the point of keeping them.
  */
 async function deleteTrackedMessages(
   ctx: ActionCtx,
   token: string,
   cutoff: number,
   scope: { chatId?: string; source?: BotMessageSource } = {},
-  opts: { countAttempts?: boolean } = {},
+  opts: { countAttempts?: boolean; includeAbandoned?: boolean } = {},
 ): Promise<PurgeResult> {
   const countAttempts = opts.countAttempts !== false;
   let deleted = 0;
   let failed = 0;
   let retrying = 0;
-  let abandoned = 0;
   const attempted = new Set<string>();
   const limit = 100;
   for (let pass = 0; pass < 5; pass += 1) {
@@ -1606,11 +1660,13 @@ async function deleteTrackedMessages(
       limit,
       ...(scope.chatId ? { chatId: scope.chatId } : {}),
       ...(scope.source ? { source: scope.source } : {}),
+      ...(opts.includeAbandoned ? { includeAbandoned: true } : {}),
     });
     const rows = batch.filter((row) => !attempted.has(row._id));
     if (!rows.length) break;
     const settled: Array<Id<"telegramBotMessages">> = [];
     const bumped: Array<Id<"telegramBotMessages">> = [];
+    const toAbandon: Array<Id<"telegramBotMessages">> = [];
     for (const msg of rows) {
       attempted.add(msg._id);
       const res = await tgCall(token, "deleteMessage", {
@@ -1623,20 +1679,25 @@ async function deleteTrackedMessages(
         continue;
       }
       failed += 1;
-      if (classifyPurgeFailure(res.description) === "permanent") {
+      const kind = classifyPurgeFailure(res.description);
+      if (kind === "permanent") {
         settled.push(msg._id);
         continue;
       }
-      // Transient: retry, but only within the row's budget. Past the cap the
-      // row is dropped and counted `abandoned` — retrying a dead chat forever
-      // is the state the budget exists to end.
+      if (!countAttempts) {
+        retrying += 1;
+        continue;
+      }
+      // Retry only while waiting can plausibly help. A hopeless chat costs the
+      // whole remaining budget at once, and a spent budget ends the automatic
+      // attempts. Either way the row is KEPT and marked abandoned: the message
+      // is still in the chat, so a manual /purge must be able to reach it.
       const attempts = (msg.attempts ?? 0) + 1;
-      if (countAttempts && purgeRetryExhausted(attempts)) {
-        abandoned += 1;
-        settled.push(msg._id);
+      if (kind === "hopeless" || purgeRetryExhausted(attempts)) {
+        toAbandon.push(msg._id);
       } else {
         retrying += 1;
-        if (countAttempts) bumped.push(msg._id);
+        bumped.push(msg._id);
       }
     }
     if (settled.length) {
@@ -1655,8 +1716,22 @@ async function deleteTrackedMessages(
         // budget on the next sweep. It never hides a delete that happened.
       }
     }
+    if (toAbandon.length) {
+      try {
+        await ctx.runMutation(internal.telegramBot.markTrackedAbandoned, { ids: toAbandon });
+      } catch {
+        // The row keeps its budget and is retried next sweep; the message is
+        // not lost, which is the failure mode this design refuses to have.
+      }
+    }
     if (batch.length < limit) break;
   }
+  // Standing backlog in scope, not just this sweep's new marks: the operator
+  // should see "3 abandoned" on every tally until the rows leave, not once.
+  const abandoned = await ctx.runQuery(internal.telegramBot.countAbandonedMessages, {
+    ...(scope.chatId ? { chatId: scope.chatId } : {}),
+    ...(scope.source ? { source: scope.source } : {}),
+  });
   return { deleted, failed, retrying, abandoned };
 }
 
@@ -1947,13 +2022,15 @@ export const purgeChatMessages = internalAction({
   }> => {
     const token = await resolveBotToken(ctx);
     if (!token) return { ok: false, deleted: 0, failed: 0, retrying: 0, abandoned: 0 };
-    // Manual retries do not spend the row's automatic retry budget.
+    // Manual retries neither spend the row's automatic budget nor skip the rows
+    // it has stopped retrying — clearing those by hand is the point of keeping
+    // them tracked.
     const res = await deleteTrackedMessages(
       ctx,
       token,
       Date.now(),
       { chatId, source: "bot" },
-      { countAttempts: false },
+      { countAttempts: false, includeAbandoned: true },
     );
     return { ok: true, ...res };
   },
@@ -2461,8 +2538,11 @@ export const handleUpdate = internalAction({
                 res.retrying
                   ? `${res.retrying} could not be deleted right now — still tracked, the next sweep retries them.`
                   : "",
-                res.failed - res.retrying - res.abandoned
-                  ? `${res.failed - res.retrying - res.abandoned} could not be deleted (already gone or past Telegram's 48 h limit).`
+                res.failed - res.retrying
+                  ? `${res.failed - res.retrying} could not be deleted (already gone or past Telegram's 48 h limit).`
+                  : "",
+                res.abandoned
+                  ? `${res.abandoned} message${res.abandoned === 1 ? "" : "s"} in this chat ${res.abandoned === 1 ? "is" : "are"} past the automatic retry budget — sweeps skip ${res.abandoned === 1 ? "it" : "them"}, but /purge tried ${res.abandoned === 1 ? "it" : "them"} just now.`
                   : "",
                 "Channel posts are left alone by /purge — they follow the channel purge switch above.",
                 cfg.autoPurge

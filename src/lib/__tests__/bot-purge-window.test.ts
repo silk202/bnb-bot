@@ -381,7 +381,7 @@ describe("purge retry budget — a dead row stops costing calls", () => {
     );
     expect(line).toContain("4 failed");
     expect(line).toContain("1 retrying");
-    expect(line).toContain(`3 abandoned (retry cap)`);
+    expect(line).toContain("3 abandoned");
   });
 
   test("the fault body states the consequence of abandonment", () => {
@@ -394,7 +394,10 @@ describe("purge retry budget — a dead row stops costing calls", () => {
       skipped: null,
     };
     expect(purgeFailureSummary(undefined, current, NOW)).toContain(
-      `3 messages used up the ${PURGE_RETRY_CAP}-attempt retry cap`,
+      "3 messages are no longer retried automatically",
+    );
+    expect(purgeFailureSummary(undefined, current, NOW)).toContain(
+      "/purge can still try them by hand",
     );
   });
 });
@@ -434,9 +437,20 @@ describe("classifyPurgeFailure — retry only what can heal", () => {
     expect(classifyPurgeFailure("Forbidden: not enough rights to delete this message")).toBe(
       "transient",
     );
-    expect(classifyPurgeFailure("Bad Request: chat not found")).toBe("transient");
     expect(classifyPurgeFailure("Too Many Requests: retry after 5")).toBe("transient");
     expect(classifyPurgeFailure("Internal Server Error")).toBe("transient");
     expect(classifyPurgeFailure("fetch failed")).toBe("transient");
+  });
+
+  test("an unreachable chat is hopeless, not retryable", () => {
+    // No number of sweeps makes a deleted group answer, so these spend the
+    // budget at once (the row is kept for /purge).
+    expect(classifyPurgeFailure("Bad Request: chat not found")).toBe("hopeless");
+    expect(classifyPurgeFailure("Bad Request: PEER_ID_INVALID")).toBe("hopeless");
+    expect(classifyPurgeFailure("Bad Request: chat_id_invalid")).toBe("hopeless");
+    // A kicked bot is different: re-adding it makes the deletes work again.
+    expect(classifyPurgeFailure("Forbidden: bot was kicked from the group chat")).toBe(
+      "transient",
+    );
   });
 });
