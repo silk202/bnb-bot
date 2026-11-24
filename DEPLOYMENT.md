@@ -132,8 +132,12 @@ platform-injected `VITE_VLY_APP_ID` / `VITE_VLY_MONITORING_URL`.
    `bunx convex deploy` — uploads functions, schema, crons and HTTP actions.
    Generate its deploy key in dashboard → that deployment → **Settings →
    Deploy keys** and store it as CI `CONVEX_DEPLOY_KEY`. *A key from another
-   deployment silently deploys to that other deployment* — confirm with
-   `bunx convex logs --history 1`, whose header prints the deployment URL.
+   deployment silently deploys to that other deployment*, which is why the CI
+   job now resolves the key's target with `bunx convex deploy --dry-run` and
+   fails unless it names the production deployment (override with the
+   `CONVEX_PROD_SLUG` repository variable if production moves). Outside CI,
+   confirm by hand with `bunx convex logs --history 1`, whose header prints the
+   deployment URL.
 3. **Auth keys** — `npx @convex-dev/auth --prod` writes `JWT_PRIVATE_KEY` and
    `JWKS` to the production deployment.
 4. **Everything else**, one call per variable:
@@ -326,7 +330,8 @@ Every push to `main` updates all deployment surfaces at once:
 
 | Surface | How it auto-updates |
 |---|---|
-| **Convex backend** (functions, crons, schema) | `.github/workflows/ci.yml` runs `bunx convex deploy` after the gates pass — requires the `CONVEX_DEPLOY_KEY` secret (Project settings → prod deployment key). Without the secret the step is skipped with a notice, never red. |
+| **Convex backend** (functions, crons, schema) | `.github/workflows/ci.yml` runs `bunx convex deploy` after the gates pass — requires the `CONVEX_DEPLOY_KEY` environment secret (the production deployment's deploy key). Green means deployed: an absent secret fails the job with an annotation naming it, and the key's target is asserted with `--dry-run` before anything is uploaded. |
+| **Operator guard** (`bun run check:tasks`) | The `task-guard` job runs the 4 migration + 3 deployment checks on every push to `main` (and on manual dispatch), using the `CONVEX_DEPLOY_KEY_1` / `CONVEX_DEPLOY_KEY_2` repository secrets. Exit 1 is red; exit 2 (provider blocked a check, nothing proved false) is surfaced as an error annotation without failing; the run log is uploaded as the `task-guard-<sha>` artifact. |
 | **Vercel / Netlify / Cloudflare Pages / Render** | Native git integration — connect the repo once in each dashboard; each platform reads the committed zero-config files (`vercel.json`, `netlify.toml`, `wrangler.toml`, `render.yaml`), runs `bun run build` and publishes `dist`. |
 | **Overlay (BNB + SOL)** | Rebuilt from `src/lib/overlay-script.ts` / `sol-overlay-script.ts` inside **every** build (`bun run build` = tsc → overlay → vite), so the zips served at `/overlay/` can never drift from the app. The version-sync test fails CI if the consts and `package.json` disagree. |
 | **Downloads / desktop packages** | CI uploads `public/overlay/*.zip` + `*.user.js` as a per-commit artifact (`overlay-<sha>`, kept 30 days); the in-app Downloads page keeps serving the committed artifacts. |
@@ -336,7 +341,7 @@ Every push to `main` updates all deployment surfaces at once:
 One-time setup:
 
 1. Push the repo to GitHub, then in each host's dashboard: *Import git repository* and keep the committed build settings (no dashboard-side build config needed).
-2. Repo → Settings → Secrets and variables → Actions: add `CONVEX_DEPLOY_KEY` (backend auto-deploy — it must be the deploy key generated on your **production** deployment; a dev key deploys to dev) and the repository variable `VITE_CONVEX_URL` = `https://<prod-deployment>.convex.cloud` (the deployment the frontend build targets — with no value the build publishes the *Backend not configured* screen).
+2. Repo → Settings → Environments → `CONVEX_DEPLOY_KEY` → Secrets: add `CONVEX_DEPLOY_KEY` (backend auto-deploy — it must be the deploy key generated on your **production** deployment; a dev key deploys to dev, and the job's `--dry-run` target assertion fails rather than letting that happen silently). In Settings → Secrets and variables → Actions add `CONVEX_DEPLOY_KEY_1` (development) and `CONVEX_DEPLOY_KEY_2` (production) for the `task-guard` job, plus the repository variable `VITE_CONVEX_URL` = `https://<prod-deployment>.convex.cloud` (the deployment the frontend build targets — with no value the build publishes the *Backend not configured* screen).
 3. Backend secrets (JWKS, JWT_PRIVATE_KEY, SITE_URL, bot tokens) are set once per Convex deployment via the Keys/API keys tab — they never live in git (`.env*` is gitignored except `.env.example`).
 
 Version releases — one command keeps every surface in lockstep:

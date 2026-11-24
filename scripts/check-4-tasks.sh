@@ -36,6 +36,9 @@
 #                                          decrypted stored credentials
 #   SKIP_LOGIN=1                           skip the live sign-in (4d) — each run
 #                                          spends one of the 5/minute slots
+#   SKIP_BUILD_TARGET=1                    skip check 1 — it inspects the local
+#                                          .env.local, which CI never has (CI
+#                                          passes the deploy keys as secrets)
 #   PREVIEW_URL=""  or SKIP_PREVIEW=1      skip check 5
 #   PROTECTED_URL                          deployment that must stay untouched
 #   PROTECTED_BASELINE                     baseline file (default .task-baseline)
@@ -61,6 +64,15 @@ fi
 FIX=0
 [ "${1:-}" = "--fix" ] && FIX=1
 
+# The Convex CLI retries (and effectively hangs) against a deployment the
+# provider has disabled, so every CLI call gets a hard ceiling. Measured
+# 2026-11-24: `convex data` against the plan-capped prod deployment blocked past
+# 4 minutes with no output, which would eat a CI job's whole timeout.
+CLI_TIMEOUT="${CLI_TIMEOUT:-20}"
+# A full export downloads a zip and is slower than a table read; a timeout there
+# is not a rejected key either (a bad key fails immediately with a message).
+EXPORT_TIMEOUT="${EXPORT_TIMEOUT:-120}"
+
 CONVEX_BIN="./node_modules/.bin/convex"
 [ -x "$CONVEX_BIN" ] || { echo "FAIL  dependencies missing — run: bun install"; exit 1; }
 # The guard deliberately owns no URL rule of its own: it calls the app's module
@@ -82,13 +94,14 @@ PROTECTED_BASELINE="${PROTECTED_BASELINE:-.task-baseline}"
 
 FAIL=0
 BLOCKED=0
+PROVIDER_BLOCKED=0
 pass() { printf 'PASS    %s\n' "$1"; }
 fail() { printf 'FAIL    %s\n' "$1"; FAIL=$((FAIL + 1)); }
 info() { printf '        %s\n' "$1"; }
 # A provider-side outage or plan ceiling is not a code verdict. Counting it
 # separately keeps a billing window from reading as a broken migration, while
 # still never printing green for something that was not proved.
-blocked() { printf 'BLOCKED %s\n' "$1"; BLOCKED=$((BLOCKED + 1)); }
+blocked() { printf 'BLOCKED %s\n' "$1"; BLOCKED=$((BLOCKED + 1)); PROVIDER_BLOCKED=1; }
 
 site_of() { [ "$1" = "dev" ] && echo "$DEV_SITE" || echo "$PROD_SITE"; }
 key_of()  { [ "$1" = "dev" ] && echo "$DEV_KEY" || echo "$PROD_KEY"; }
@@ -118,6 +131,13 @@ echo "run log: ${TASK_REPORT:-stdout only}"
 echo
 
 # ── 1. build target ────────────────────────────────────────────────────────
+# Check 1 is a developer-machine invariant: it inspects the untracked
+# .env.local, which a runner never has. CI sets SKIP_BUILD_TARGET=1 so the other
+# six checks run there and this one says so instead of failing on a file that is
+# intentionally absent.
+if [ "${SKIP_BUILD_TARGET:-0}" = "1" ]; then
+  info "1. build-target check skipped (SKIP_BUILD_TARGET=1 — .env.local is a developer-machine file)"
+else
 # Cosmetic drift (a secret sync writing `' url'`) is repaired in place even
 # without --fix: the sanitized value is provably the intended deployment, and
 # leaving the file broken only guarantees the next failure. A genuinely
@@ -155,6 +175,7 @@ PY
 else
   fail "1. .env.local VITE_CONVEX_URL is '${clean_url:-unset}' (expected '$EXPECTED_URL')"
 fi
+fi
 
 # ── 2. deploy keys ─────────────────────────────────────────────────────────
 for env_name in dev prod; do
@@ -163,10 +184,18 @@ for env_name in dev prod; do
     fail "2. ${env_name} deploy key missing from .env.local"
     continue
   fi
-  CONVEX_DEPLOY_KEY="$key" "$CONVEX_BIN" export --path "/tmp/fbt-${env_name}.zip" >/dev/null 2>&1
+  CONVEX_DEPLOY_KEY="$key" timeout "$EXPORT_TIMEOUT" "$CONVEX_BIN" export --path "/tmp/fbt-${env_name}.zip" >/dev/null 2>&1
   rc=$?
   rm -f "/tmp/fbt-${env_name}.zip"
-  if [ $rc -eq 0 ]; then pass "2. ${env_name} deploy key accepted (export exit 0)"; else fail "2. ${env_name} deploy key rejected (export exit ${rc})"; fi
+  if [ $rc -eq 0 ]; then
+    pass "2. ${env_name} deploy key accepted (export exit 0)"
+  elif [ $rc -eq 124 ]; then
+    # Not a rejection: a wrong key is refused in seconds with a message. The
+    # export is simply slow (or the deployment is disabled by the provider).
+    blocked "2. ${env_name} deploy key check inconclusive — export timed out after ${EXPORT_TIMEOUT}s (not a rejection)"
+  else
+    fail "2. ${env_name} deploy key rejected (export exit ${rc})"
+  fi
 done
 
 # ── 3. overlay stamp ───────────────────────────────────────────────────────
@@ -408,7 +437,7 @@ fi
 CLI_LIMIT=100
 count_docs() {
   local key="$1" table="$2" raw pl
-  raw="$(CONVEX_DEPLOY_KEY="$key" "$CONVEX_BIN" data "$table" --limit "$CLI_LIMIT" 2>/dev/null)"
+  raw="$(CONVEX_DEPLOY_KEY="$key" timeout "$CLI_TIMEOUT" "$CONVEX_BIN" data "$table" --limit "$CLI_LIMIT" 2>/dev/null)"
   if printf '%s' "$raw" | grep -q 'There are no documents'; then echo 0; return; fi
   if [ -z "$raw" ]; then echo -1; return; fi
   pl="$(printf '%s' "$raw" | grep -c ' | ')"
@@ -419,8 +448,18 @@ count_docs() {
 # ids, so counting occurrences of a user id in the accounts dump is precise).
 # Ids print quoted (`"jx7e9h53…"`) under a header and a `---|----|---` separator
 # line, so match the quoted first field and drop everything else.
-user_ids() { CONVEX_DEPLOY_KEY="$1" "$CONVEX_BIN" data users --limit "$CLI_LIMIT" 2>/dev/null | grep -oE '^"[a-z0-9]{20,40}"' | tr -d '"'; }
-accounts_dump() { CONVEX_DEPLOY_KEY="$1" "$CONVEX_BIN" data authAccounts --limit "$CLI_LIMIT" 2>/dev/null | tail -n +2; }
+user_ids() { CONVEX_DEPLOY_KEY="$1" timeout "$CLI_TIMEOUT" "$CONVEX_BIN" data users --limit "$CLI_LIMIT" 2>/dev/null | grep -oE '^"[a-z0-9]{20,40}"' | tr -d '"'; }
+accounts_dump() { CONVEX_DEPLOY_KEY="$1" timeout "$CLI_TIMEOUT" "$CONVEX_BIN" data authAccounts --limit "$CLI_LIMIT" 2>/dev/null | tail -n +2; }
+# A read that timed out or returned nothing proves nothing either way. When the
+# provider is already known to be blocking serving, that is BLOCKED; otherwise it
+# is a genuine failure to read the data.
+unreadable() {
+  if [ "$PROVIDER_BLOCKED" = "1" ]; then
+    blocked "$1 — not readable while the provider blocks serving"
+  else
+    fail "$1"
+  fi
+}
 
 if [ -z "$DEV_KEY" ] || [ -z "$PROD_KEY" ]; then
   fail "7. parity needs both deploy keys"
@@ -430,7 +469,7 @@ else
   d_a=$(count_docs "$DEV_KEY" authAccounts);      p_a=$(count_docs "$PROD_KEY" authAccounts)
 
   if [ "$d_oc" = "-1" ] || [ "$p_oc" = "-1" ]; then
-    fail "7a. operatorConfig unreadable (dev ${d_oc}, prod ${p_oc})"
+    unreadable "7a. operatorConfig unreadable (dev ${d_oc}, prod ${p_oc})"
   elif [ "$d_oc" = "1" ] && [ "$p_oc" = "1" ]; then
     pass "7a. operatorConfig present once on each side (dev ${d_oc}, prod ${p_oc})"
   else
@@ -443,7 +482,7 @@ else
     side="${pair%%:*}"; key="${pair#*:}"
     dump="$(accounts_dump "$key")"
     ids="$(user_ids "$key")"
-    if [ -z "$ids" ]; then fail "7b. ${side} users unreadable"; orphan_total=-1; continue; fi
+    if [ -z "$ids" ]; then unreadable "7b. ${side} users unreadable"; orphan_total=-1; continue; fi
     missing=0; dup=0
     while IFS= read -r id; do
       [ -z "$id" ] && continue
@@ -462,7 +501,7 @@ else
   done
 
   if [ "$d_u" = "-1" ] || [ "$p_u" = "-1" ]; then
-    fail "7c. users unreadable (dev ${d_u}, prod ${p_u})"
+    unreadable "7c. users unreadable (dev ${d_u}, prod ${p_u})"
   elif [ "$d_u" -ge "$p_u" ] 2>/dev/null; then
     pass "7c. dev not behind prod on users (dev ${d_u}, prod ${p_u})"
     [ "$d_u" -ne "$p_u" ] && info "drift is expected: the published preview writes anonymous users to dev"

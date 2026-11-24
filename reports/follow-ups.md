@@ -3414,3 +3414,138 @@ the same build; a divergence stays a FAIL (partial rollout or a restore).
    while dev returned the full sentence for the same condition.
 7. **Cap `.task-baseline` history lines** (last ~10) so the committed file stays
    readable as platform rollouts accumulate.
+## Round 40 — the CI job that was always red, and a guard that now runs by itself
+
+Started from round 39's three CI follow-ups. Everything below is measured, not
+assumed: the deploy key was read from the workflow's own run log, and the Solana
+failure was read from the failing step's output.
+
+### What the deploy key actually targets
+
+- `gh secret list` (repo) and `gh variable list` (repo) are **empty**. The only
+  credential is the environment secret `CONVEX_DEPLOY_KEY`
+  (environment created 2026-11-22T16:00:53Z), which `deploy-convex` declares.
+- Run 45386001019's deploy step printed
+  `▌ [Production] Ola:taengine:production (prod) … https://flexible-frog-776.convex.cloud`
+  and `✔ Deployed Convex functions to https://flexible-frog-776.convex.cloud`.
+  So the key in the environment secret is the **production** deployment's key.
+- `convex deploy --dry-run` reproduces that same target line and uploads nothing,
+  which is what makes the target assertable from CI.
+
+### Why `solana-program` was red on every push
+
+Run 45386001019, step "Assert the pinned toolchain":
+
+```
+cargo-build-sbf 4.6.0
+Default platform-tools: v1.58
+Default Rust: 1.95.0
+::error::cargo-build-sbf is not on platform-tools v1.57, the SBF compiler this job pins
+```
+
+The job installed `cargo install cargo-build-sbf --locked` — **no version** — so it
+took whatever was newest (4.6.0) while the assertion still required v1.57. The
+crate sources settle which release is the right pin:
+
+| crate | `DEFAULT_PLATFORM_TOOLS_VERSION` |
+|---|---|
+| `cargo-build-sbf` 4.5.0 | `"v1.57"` (`src/toolchain.rs:24`) |
+| `cargo-build-sbf` 4.6.0 | `"v1.58"` |
+
+4.5.0 is both the newest release whose default is v1.57 and the release that
+accepts the flags the build step already uses (`--tools-version`, `--arch v1`),
+so the pin is 4.5.0 — a version, not "latest".
+
+### Changes
+
+1. **Solana job pinned and asserted against what the build uses**
+   (`.github/workflows/ci.yml`): `cargo install cargo-build-sbf --version 4.5.0
+   --locked`; the assertion now checks (a) the installed crate is 4.5.0, (b) its
+   declared default is platform-tools v1.57, and (c) the directory the build
+   actually compiles with — `~/.cache/solana/v1.57/platform-tools/version.md`,
+   the same one `--tools-version v1.57` names — exists and reports v1.57. A crate
+   bump that moves the default now fails by name at the top of the job instead of
+   inside a 20-minute compile.
+2. **`deploy-convex` fails closed and asserts its target.** The old "Check deploy
+   key" step turned an absent secret into a green job with a notice. Now an absent
+   secret is `::error::` + exit 1, and `bunx convex deploy --dry-run` resolves the
+   key to its deployment first: anything other than `flexible-frog-776` fails
+   before a byte is uploaded (override via the `CONVEX_PROD_SLUG` repository
+   variable if production ever moves). The deploy step writes the deployed target
+   into the job summary, so green now means "deployed to that deployment".
+3. **New `task-guard` job** (push to `main` + `workflow_dispatch`,
+   `needs: verify`): passes `CONVEX_DEPLOY_KEY_1` / `_2` as secrets, sets
+   `SKIP_BUILD_TARGET=1` (check 1 inspects the untracked `.env.local`, which a
+   runner never has), runs `bun run check:tasks`, and keeps the verdicts apart —
+   exit 0 green, exit 2 surfaced as an error annotation **without** failing the
+   job, exit 1 red. The run log uploads as `task-guard-<sha>`. A missing secret
+   fails the job with an annotation naming the two secrets and where to add them,
+   because a guard that cannot run must not look like a guard that passed.
+4. **The guard no longer hangs** (`scripts/check-4-tasks.sh`). Measured: with
+   function serving disabled, `convex data` against prod blocked past four minutes
+   with no output. Every CLI call now has a ceiling (`CLI_TIMEOUT=20`, export
+   `EXPORT_TIMEOUT=120`); a data read that times out is BLOCKED when the provider
+   is already known to block serving (`unreadable()`), otherwise FAIL; an export
+   timeout is BLOCKED (inconclusive) rather than "key rejected", which is a
+   verdict a wrong key would produce in seconds with a message.
+5. **Docs corrected** (`DEPLOYMENT.md`): the deploy key is an *environment* secret,
+   green means deployed (no "skipped with a notice, never red"), the target is
+   asserted, and the `task-guard` job and its two secrets are listed.
+
+### Measured after the change
+
+- `python3 -c yaml.safe_load` on `ci.yml`: parses; jobs are `verify`,
+  `solana-program`, `deploy-convex`, `task-guard`; the pin reads
+  `cargo install cargo-build-sbf --version 4.5.0 --locked`.
+- `bash -n scripts/check-4-tasks.sh`: clean.
+- `SKIP_BUILD_TARGET=1 SKIP_LOGIN=1 bun run check:tasks`: **exit 2 in 28 s** —
+  check 1 "skipped", 2 (dev+prod), 3, 4a/4b (dev+prod), 5, 6, 7a/7b/7c PASS;
+  4c dev, 4c prod, 5b BLOCKED with the provider's own sentences (5 blocked last
+  round, 3 now — prod's `Server Error` is unchanged, dev's plan ceiling is
+  unchanged). This is the exact path CI takes.
+- Not proved here: the workflow has not run yet (the fix is in this push). The
+  Solana job needs a full runner to prove 4.5.0 installs and compiles, and
+  `task-guard` will stay red until the two secrets exist.
+
+### State of the wiring, honestly
+
+- `CONVEX_DEPLOY_KEY_1` / `CONVEX_DEPLOY_KEY_2` do not exist yet — their values
+  live only in the untracked `.env.local`, which this work must not read or copy.
+  Until the owner adds them at Settings → Secrets and variables → Actions, every
+  push to `main` is red at `task-guard` with an annotation naming exactly those
+  two secrets. That is the intended failure: it cannot silently pass.
+- `vars.VITE_CONVEX_URL` is also unset, so the `verify` job's production build
+  has no backend URL. That is a pre-existing gap this round did not change (the
+  guard's check 1 is skipped in CI for the same reason), and it is follow-up 2.
+
+### Follow-ups — round 40, brainstormed (none started)
+
+1. **Add `CONVEX_DEPLOY_KEY_1` / `CONVEX_DEPLOY_KEY_2`** (owner action; dev key and
+   prod key from dashboard → deployment → Settings → Deploy keys). Until then the
+   guard job is red by design.
+2. **Set the `VITE_CONVEX_URL` repository variable** to the production deployment
+   URL. Measured empty today, so the CI build publishes the *Backend not
+   configured* screen and the overlay artifacts it uploads are unstamped.
+3. **Keep a short history of guard runs** (round 39 #5): each run overwrites
+   `reports/task-guard-latest.txt`; the CI artifact preserves 30 per push, but a
+   local ring at `reports/task-guard/YYYYMMDDTHHMMSSZ.txt` would survive hand runs.
+4. **Retry once before calling a bare `Server Error` BLOCKED** (round 39 #6): prod
+   has returned nothing but `[Request ID: …] Server Error` for hours while dev
+   returned the full plan sentence for the same condition.
+5. **Cap `.task-baseline` history lines** (round 39 #7) at ~10.
+6. **A CI run that advances `.task-baseline` loses the advance**: check 6 rewrites
+   the file in the runner checkout on a fleet rollout and nothing commits it, so
+   the next run repeats the "reference advanced" message. Either commit it from a
+   bot push or keep the file developer-owned and say so in check 6.
+7. **Guard `--json` mode** so a dashboard or the Telegram alert path can read the
+   verdict without parsing text (`{fail, blocked, checks:[{id, verdict, detail}]}`).
+8. **Schedule the guard** (nightly cron) — plan ceilings and rollout drift happen
+   between pushes, and a push-only guard reports them late.
+9. **Ask the provider about the dev plan ceiling** (`pastel-pelican-634`: "You
+   have exceeded the free plan limits") — 3 checks stay BLOCKED until it lifts or
+   the plan changes; nothing in the code can fix it.
+10. **SBPF v3 migration** (unchanged from round 39): needs litesvm ≥ 0.18
+    (solana-* 4.x, MSRV 1.97.1); the harness is anchor-lang 0.31.1 / solana-sdk
+    2.2 / litesvm 0.7. A dependency migration, not a flag flip.
+11. **Assert the deploy target for PR/preview builds too** — today only `main`
+    pushes deploy, so a key that is mis-scoped for previews is untested.

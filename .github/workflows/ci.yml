@@ -4,11 +4,16 @@
 #      zips/userscript as a downloadable artifact.
 #   2. The Convex backend deploys automatically from the CONVEX_DEPLOY_KEY
 #      environment secret (Settings → Environments → CONVEX_DEPLOY_KEY), which
-#      the `deploy-convex` job declares as its environment.
+#      the `deploy-convex` job declares as its environment. That job resolves
+#      the key's target with a dry run first and refuses to deploy anywhere but
+#      the production deployment.
 #   3. The `solana-program` job builds the Anchor program (Solana SBF), proves
 #      the tracked IDL still matches the source, runs clippy and the LiteSVM +
 #      IDL conformance tests. It never deploys and never needs a keypair.
-#   4. Vercel / Netlify / Cloudflare Pages / Render each auto-build from the
+#   4. The `task-guard` job runs `bun run check:tasks` (the 4 migration + 3
+#      deployment checks) against the real dev/prod deployments, so the guard
+#      proves something on every push instead of only when a human remembers.
+#   5. Vercel / Netlify / Cloudflare Pages / Render each auto-build from the
 #      same push via their native git integration — their zero-config build
 #      settings live in vercel.json / netlify.toml / wrangler.toml /
 #      render.yaml (all run `bun run build`, which includes the overlay
@@ -83,6 +88,10 @@ jobs:
   #     ships cargo-build-sbf 4.5.0.
   #   * platform-tools v1.57 (Rust 1.95) — pinned on its own, so the SBF
   #     compiler cannot drift with the channel.
+  #   * cargo-build-sbf 4.5.0 from crates.io, pinned to the exact version. An
+  #     unpinned `cargo install cargo-build-sbf` takes whatever is newest, and
+  #     4.6.0 defaults to platform-tools v1.58 — a silent compiler move under a
+  #     job that still pins v1.57.
   #   * The SBF v1 arch is required because LiteSVM 0.7 rejects the Agave
   #     default (v3) with `Instruction(InvalidAccountData)`. Its spelling is
   #     not stable across cargo-build-sbf builds (`sbfv1` on the runner,
@@ -135,8 +144,14 @@ jobs:
         # ~/.cargo/bin win for every later step.
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Install cargo-build-sbf (matches platform-tools v1.57)
-        run: cargo install cargo-build-sbf --locked
+      # Exact version, not "newest": `cargo install cargo-build-sbf` without
+      # --version installs 4.6.0+, whose DEFAULT_PLATFORM_TOOLS_VERSION is v1.58.
+      # That is how this job went red: the compiler moved to v1.58 while the job
+      # below still pinned v1.57. The crate source is the ground truth —
+      # cargo-build-sbf 4.5.0/src/toolchain.rs declares
+      # DEFAULT_PLATFORM_TOOLS_VERSION = "v1.57"; 4.6.0 declares v1.58.
+      - name: Install cargo-build-sbf 4.5.0 (default platform-tools v1.57)
+        run: cargo install cargo-build-sbf --version 4.5.0 --locked
 
       - name: Install SBF platform-tools v1.57
         # cargo-build-sbf resolves the release through the GitHub API, which
@@ -176,7 +191,16 @@ jobs:
       # tree. Printing the versions made that a 20-minute failure inside the
       # build; the pinned versions are asserted here instead, at the top.
       - name: Assert the pinned toolchain
+        # Two facts, both about what the build actually uses: the crate version
+        # that was installed, and the platform-tools directory the build step
+        # names with --tools-version. The binary's own default is checked too, so
+        # a crate bump that moves the default fails here by name instead of
+        # twenty minutes later inside the compile.
         run: |
+          PINNED_CRATE=4.5.0
+          PINNED_TOOLS=v1.57
+          TOOLS_MD="$HOME/.cache/solana/$PINNED_TOOLS/platform-tools/version.md"
+
           rustc --version && cargo --version
           OUT="$("$HOME/.cargo/bin/cargo-build-sbf" --version)"
           echo "$OUT"
@@ -187,8 +211,21 @@ jobs:
             echo "::error::cargo-build-sbf on PATH is not the crates.io build in ~/.cargo/bin"
             exit 1
           fi
-          if ! printf '%s\n' "$OUT" | grep -qF "platform-tools v1.57"; then
-            echo "::error::cargo-build-sbf is not on platform-tools v1.57, the SBF compiler this job pins"
+          if ! printf '%s\n' "$OUT" | grep -qF "$PINNED_CRATE"; then
+            echo "::error::cargo-build-sbf is not the pinned crates.io $PINNED_CRATE build (an unpinned install drifts to a newer default platform-tools)"
+            exit 1
+          fi
+          if ! printf '%s\n' "$OUT" | grep -qF "platform-tools $PINNED_TOOLS"; then
+            echo "::error::cargo-build-sbf $PINNED_CRATE declares a platform-tools default other than $PINNED_TOOLS — the pin and this assertion disagree"
+            exit 1
+          fi
+          if [ ! -f "$TOOLS_MD" ]; then
+            echo "::error::platform-tools $PINNED_TOOLS is not installed at $TOOLS_MD (the build passes --tools-version $PINNED_TOOLS)"
+            exit 1
+          fi
+          head -3 "$TOOLS_MD"
+          if ! grep -qF "$PINNED_TOOLS" "$TOOLS_MD"; then
+            echo "::error::$TOOLS_MD does not report $PINNED_TOOLS"
             exit 1
           fi
 
@@ -253,8 +290,7 @@ jobs:
     # The deploy key lives in the `CONVEX_DEPLOY_KEY` ENVIRONMENT (Settings →
     # Environments). A job only sees an environment's secrets when it declares
     # that environment, so without this line `secrets.CONVEX_DEPLOY_KEY`
-    # resolves to an empty string and the deploy below is skipped while the job
-    # still reports success.
+    # resolves to an empty string and the deploy below is skipped.
     environment: CONVEX_DEPLOY_KEY
     steps:
       - uses: actions/checkout@v4
@@ -266,20 +302,125 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Check deploy key
+      # Green has to mean "deployed to the production deployment". Two ways
+      # that used to be untrue: an absent secret turned this job green with a
+      # notice, and `convex deploy` targets whatever deployment the key names —
+      # a key generated on another deployment deploys this code there silently.
+      # `--dry-run` resolves the key and prints the target without uploading
+      # anything, so the target is asserted before the real deploy. Measured on
+      # 2026-11-24: the environment key targets flexible-frog-776 (production).
+      # If production ever moves, set the CONVEX_PROD_SLUG repository variable
+      # rather than deleting this check.
+      - name: Assert the deploy key targets production
         id: key
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          EXPECTED_SLUG: ${{ vars.CONVEX_PROD_SLUG || 'flexible-frog-776' }}
         run: |
-          if [ -n "$CONVEX_DEPLOY_KEY" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::CONVEX_DEPLOY_KEY secret not configured - skipping backend deploy"
+          if [ -z "$CONVEX_DEPLOY_KEY" ]; then
+            echo "::error::CONVEX_DEPLOY_KEY is not set for the CONVEX_DEPLOY_KEY environment, so no backend was deployed. Add the production deployment's deploy key (dashboard → that deployment → Settings → Deploy keys) at Settings → Environments → CONVEX_DEPLOY_KEY → Secrets."
+            exit 1
           fi
+          set +e
+          OUT="$(bunx convex deploy --dry-run 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$OUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::convex rejected CONVEX_DEPLOY_KEY before deploying (exit $rc, see above) — regenerate it on the production deployment"
+            exit 1
+          fi
+          TARGET="$(printf '%s\n' "$OUT" | grep -oE 'https://[a-z0-9-]+\.convex\.cloud' | head -1)"
+          SLUG="${TARGET#https://}"; SLUG="${SLUG%.convex.cloud}"
+          if [ -z "$SLUG" ]; then
+            echo "::error::could not resolve a target deployment from CONVEX_DEPLOY_KEY — refusing to deploy blind"
+            exit 1
+          fi
+          echo "target=$SLUG" >> "$GITHUB_OUTPUT"
+          if [ "$SLUG" != "$EXPECTED_SLUG" ]; then
+            echo "::error::CONVEX_DEPLOY_KEY targets '$SLUG', but production is '$EXPECTED_SLUG'. Nothing was deployed. Put the $EXPECTED_SLUG deploy key in the environment secret (or set the CONVEX_PROD_SLUG repository variable if production really moved)."
+            exit 1
+          fi
+          echo "CONVEX_DEPLOY_KEY targets $SLUG (production) — deploying"
 
       - name: Deploy Convex functions
-        if: steps.key.outputs.present == 'true'
-        run: bunx convex deploy
+        run: |
+          bunx convex deploy
+          echo "deployed to ${{ steps.key.outputs.target }} (production)" >> "$GITHUB_STEP_SUMMARY"
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+
+  # The operator guard (`bun run check:tasks`) is the only thing that proves the
+  # four migration tasks and the three deployment surfaces are intact, and until
+  # now it only ran by hand. It runs here after the gates.
+  #
+  # It reads .env.local, which is untracked and never exists on a runner: the two
+  # deploy keys arrive as secrets and check 1 (the developer machine's build
+  # target) is skipped, so the run log says skipped rather than inventing a file.
+  #
+  # Exit codes are kept apart on purpose: 1 = a check failed (red), 2 = nothing
+  # failed but the provider blocked a check (surfaced, not red), 0 = proved.
+  task-guard:
+    name: Task guard (migration + deployment checks)
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Task guard (4 migration + 3 deployment checks)
+        id: guard
+        env:
+          CONVEX_DEPLOY_KEY_1: ${{ secrets.CONVEX_DEPLOY_KEY_1 }}
+          CONVEX_DEPLOY_KEY_2: ${{ secrets.CONVEX_DEPLOY_KEY_2 }}
+          TASK_REPORT: reports/task-guard-latest.txt
+          SKIP_BUILD_TARGET: "1"
+        run: |
+          # A guard that cannot run must not look like a guard that passed.
+          missing=""
+          [ -n "$CONVEX_DEPLOY_KEY_1" ] || missing="$missing CONVEX_DEPLOY_KEY_1"
+          [ -n "$CONVEX_DEPLOY_KEY_2" ] || missing="$missing CONVEX_DEPLOY_KEY_2"
+          if [ -n "$missing" ]; then
+            echo "::error::task guard did not run: missing secret(s):$missing. Add them at Settings → Secrets and variables → Actions — CONVEX_DEPLOY_KEY_1 = the development deployment's deploy key, CONVEX_DEPLOY_KEY_2 = the production deployment's — then re-run this job."
+            exit 1
+          fi
+          set +e
+          bun run check:tasks
+          rc=$?
+          set -e
+          echo "guard exit=$rc"
+          case "$rc" in
+            0)
+              echo "result=passed" >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              # Nothing was proved false: the provider disabled function serving
+              # or answered with a bare infrastructure error. Reported loudly,
+              # but not turned into a red build that would hide the real verdict.
+              echo "result=blocked" >> "$GITHUB_OUTPUT"
+              echo "::error::task guard: no check failed, but at least one is BLOCKED by the provider (exit 2) — see reports/task-guard-latest.txt; re-run once serving is back"
+              ;;
+            *)
+              echo "result=failed" >> "$GITHUB_OUTPUT"
+              echo "::error::task guard failed (exit $rc) — see reports/task-guard-latest.txt"
+              exit "$rc"
+              ;;
+          esac
+
+      - name: Upload the guard's run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-guard-${{ github.sha }}
+          path: reports/task-guard-latest.txt
+          if-no-files-found: warn
+          retention-days: 30
+
