@@ -3310,3 +3310,107 @@ the stamp itself is the evidence of who/when to investigate.
    real funded transaction, so it stays gated on human funding.
 6. **Check dev serving too in the guard's preview step** — the preview can be
    green while the dev deployment it talks to is disabled.
+
+## Round 39 — the stamp drift was a platform rollout; the guard stops claiming otherwise (2026-11-24)
+
+### The protected-deployment drift, measured
+
+Round 38 flagged `shiny-bulldog-311` as changed because `.task-baseline` recorded
+`20261113T212057Z-50da370bf26a` while the deployment answered
+`20261123T234400Z-ab2c2501a060`. The investigation says that stamp is not a
+per-deployment fingerprint:
+
+- On 2026-11-24 all three deployments returned the same 29-byte body,
+  `20261123T234400Z-ab2c2501a060`: dev `pastel-pelican-634`, prod
+  `flexible-frog-776` and protected `shiny-bulldog-311`.
+- A deployment that does not exist (`zzz-does-not-exist-999`) answers 404, so the
+  route is per-deployment while the value is not — it is Convex's platform build
+  stamp for the backend fleet.
+- dev and prod took real CI deploys (`deploy-convex` → "Deploy Convex functions"
+  succeeded) at 2026-11-23T18:52Z and 2026-11-24T11:17Z, and the value never
+  moved. A user deploy cannot change it.
+- No GitHub Actions run exists at 2026-11-23T23:44Z: the six runs between 18:00Z
+  and 10:00Z the next day are the pushes from 18:05Z to 18:50Z. Nothing in this
+  repo deployed at that minute.
+- The protected deployment is alive on its own (`gate:operatorStatus` →
+  seeded:true) with its own data.
+
+Conclusion: the 2026-11-23 move is a platform rollout. Check 6's old premise —
+"a different stamp means the deployment was written to" — overclaimed what
+`/version` can prove, so the reference was re-baselined deliberately, not out of
+convenience.
+
+### Re-baseline, with the replaced value kept
+
+| Reference | Stamp | Recorded / superseded |
+|---|---|---|
+| Original baseline | 20261113T212057Z-50da370bf26a | recorded 2026-11-15T13:44:27Z |
+| Replaced | 20261113T212057Z-50da370bf26a | superseded 2026-11-24T11:34:29Z |
+| Current deployment | 20261123T234400Z-ab2c2501a060 | answering now |
+| New reference | 20261123T234400Z-ab2c2501a060 | recorded 2026-11-24T11:34:29Z |
+
+`.task-baseline` gained a `history=` line carrying the superseded stamp, when it
+was recorded, when it was superseded and what replaced it. Check 6 advances the
+reference by itself only when dev, prod and the protected deployment all report
+the same build; a divergence stays a FAIL (partial rollout or a restore).
+
+### Code follow-ups closed (round 38 items 1, 2, 3, 4, 6)
+
+1. **The provider's own error, not "unreachable".** `error_detail()` reads
+   Convex's `errorMessage` (request id kept, newlines collapsed) and 4c, 4d and
+   5b print it. The plan-ceiling sentence is quoted verbatim below.
+2. **BLOCKED is its own verdict.** A plan ceiling or a bare `Server Error` is
+   counted as BLOCKED — never PASS, never FAIL. The summary reports failures and
+   blocked checks separately and exits 2 when nothing failed, so a billing window
+   cannot look like a broken migration.
+3. **Verdicts are persisted.** Every run re-executes itself through `tee` into
+   `reports/task-guard-latest.txt` (gitignored, timestamped in the header), and
+   the exit status survives the pipe.
+4. **Check 6 asserts only what `/version` supports**: healthy (200, build-stamp
+   shape, seeded operator responds) and on the same platform build as dev/prod.
+5. **A faucet-free drill path** (round 38 #5) does not exist honestly: the drill's
+   point is a funded on-chain transaction. It stays gated on a human faucet claim.
+6. **Dev serving is checked on its own (5b).** The preview answered 200 while dev
+   function serving was disabled — exactly the gap between "the site loads" and
+   "the app works". 5b reports it as BLOCKED with the provider's sentence.
+
+### `bun run check:tasks` — measured after the change
+
+- 1, 2 (dev + prod), 3, 4a (dev + prod), 4b (dev + prod): PASS.
+- 4c dev: BLOCKED, provider sentence quoted; 4c prod: BLOCKED, infrastructure
+  `Server Error` with its request id.
+- 4d dev: BLOCKED with the plan sentence; 4d prod: BLOCKED, `Server Error`.
+- 5: PASS (/, /gate, /logo.svg).
+- 5b: BLOCKED — dev function serving disabled by the provider.
+- 6: PASS — protected deployment healthy on the fleet build
+  `20261123T234400Z-ab2c2501a060`, reference unchanged after the re-baseline.
+- 7a/7b/7c: PASS (one operatorConfig per side; 13 dev and 12 prod users each have
+  exactly one authAccount; dev not behind prod).
+- RESULT: no failures, 5 blocked by the provider, exit 2.
+
+### Also found
+
+- CI is red on every push for one reason only: the `solana-program` job's
+  "Assert the pinned toolchain" step fails; `verify` and `deploy-convex` succeed.
+  That predates this round and is unrelated to the bot/Solana execution work.
+- `deploy-convex` reports success whether or not it actually deploys, and nothing
+  asserts which deployment its environment key targets. A key pointed at the
+  wrong deployment would deploy this code there silently.
+
+### Follow-ups — round 39, brainstormed (none started)
+
+1. **Assert the CI deploy key's target.** Resolve the key's deployment slug before
+   deploying and fail unless it is `pastel-pelican-634`; a mis-scoped environment
+   secret is the one path that could write to `shiny-bulldog-311` silently.
+2. **Make a skipped deploy loud.** `deploy-convex`'s "Check deploy key" step turns
+   an absent secret into a successful job with a notice; make green mean deployed.
+3. **Fix the Solana CI toolchain assertion** — it fails before the program builds,
+   so a known-red job hides real SBPF/IDL regressions.
+4. **Wire `check:tasks` into CI** with BLOCKED (exit 2) surfaced but not failing;
+   today the guard only runs by hand and its log is local.
+5. **Keep a short history of guard runs**, not only the latest, so "green last
+   week" survives a later red run overwriting the file.
+6. **Retry once before calling a bare `Server Error` blocked** — prod returned it
+   while dev returned the full sentence for the same condition.
+7. **Cap `.task-baseline` history lines** (last ~10) so the committed file stays
+   readable as platform rollouts accumulate.

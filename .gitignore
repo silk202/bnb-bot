@@ -133,6 +133,9 @@ scripts/*.ps1
 scripts/probe.txt
 scripts/*.out
 .cache/
+# Latest task-guard verdict, rewritten on every run (timestamped, local only —
+# reports/follow-ups.md keeps the durable account of what each round found)
+reports/task-guard-latest.txt
 
 # ─── Mirror-check scratch (check:mirror unzip target) ────
 .mirror-check/

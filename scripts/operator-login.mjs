@@ -134,5 +134,13 @@ if (/"ok"\s*:\s*true/.test(body)) {
 if (/Too many operator sign-in attempts/i.test(body)) {
   verdict(3, "THROTTLED the 5/minute login limit is spent; credentials were not re-proved this run");
 }
-const reason = body.replace(/\s+/g, " ").slice(0, 160);
-verdict(1, `FAIL http ${res.status}: ${reason}`);
+// A non-verdict body is either Convex's JSON envelope or a plain error page.
+// Pull the deployment's own sentence out of the envelope instead of printing a
+// truncated JSON fragment: the plan ceiling, a 5xx and a bad function path all
+// arrive here, and only the message says which one it is.
+const message = (() => {
+  const match = /"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body);
+  const text = match ? match[1].replace(/\\n/g, " ").replace(/\\"/g, '"') : body;
+  return text.replace(/\s+/g, " ").trim().slice(0, 300);
+})();
+verdict(1, `FAIL http ${res.status}: ${message}`);
