@@ -3639,3 +3639,125 @@ https://flexible-frog-776.convex.cloud`. The only red job is `task-guard`, and
 only because its two secrets do not exist yet (`##[error]task guard did not run:
 missing secret(s): CONVEX_DEPLOY_KEY_1 CONVEX_DEPLOY_KEY_2 …`). That is follow-up
 1, an owner action, not a code defect.
+
+## Round 41 — the keys were on the environment, and every run keeps its verdict
+
+Round 40 left one red job (`task-guard`) and two settings "for the owner". Both
+were changed between rounds, but not in the shape the note assumed — and that
+difference was the actual bug.
+
+### What was really there (measured, not assumed)
+
+- `gh api repos/silk202/bnb-bot/actions/secrets` → **no repository secrets**.
+- `gh api .../environments/CONVEX_DEPLOY_KEY/secrets` → `DEV_KEY`
+  (2026-11-24T13:35:22Z) and `PROD_KEY` (13:33:58Z). The environment's original
+  `CONVEX_DEPLOY_KEY` secret is **gone**.
+- `task-guard` declared no environment and read `secrets.CONVEX_DEPLOY_KEY_1/_2`,
+  so it saw two empty strings. The guard was right to refuse to run; its message
+  named the wrong place.
+- The same replacement silently broke backend auto-deploy: in run 45406806725,
+  `deploy-convex` failed closed with `CONVEX_DEPLOY_KEY is not set for the
+  CONVEX_DEPLOY_KEY environment`. "Green means deployed" caught a real
+  regression instead of reporting a deploy that never happened.
+
+### What changed
+
+1. **The guard reads the keys where they are.** `task-guard` now declares
+   `environment: CONVEX_DEPLOY_KEY` and maps
+   `secrets.CONVEX_DEPLOY_KEY_1 || secrets.DEV_KEY` (and `_2 || PROD_KEY`), so
+   the documented repo-level names still win if someone adds them.
+2. **Check 2 asserts the key's own target.** A Convex deploy key is
+   `<type>:<deployment>|<secret>` (provider docs: `prod:qualified-jaguar-123|eyJ2…`),
+   so the guard reads the deployment name before the pipe and fails when it is
+   not the expected dev/prod deployment. A swapped or duplicated secret now
+   fails as "swapped or mis-scoped key" instead of passing as "a valid key".
+   Every branch (PASS/BLOCKED/FAIL) names the target it saw — never the key.
+3. **`deploy-convex` reads `secrets.CONVEX_DEPLOY_KEY || secrets.PROD_KEY`**, and
+   its fail-closed annotation names `PROD_KEY` too. The dry-run target assertion
+   is unchanged: it still refuses to deploy anywhere but `flexible-frog-776`.
+4. **Every guard run is kept.** The tee wrapper writes each run to
+   `reports/task-guard/<UTC>.txt` as well as `reports/task-guard-latest.txt`, in a
+   ring of the last `TASK_GUARD_KEEP` runs (default 20). Filenames are
+   fixed-width UTC stamps, so a plain `sort` is chronological; the ring is
+   trimmed before writing; the header prints both paths. The CI artifact uploads
+   the whole ring, so a green run stays readable after a later red one.
+5. **`.task-baseline` history is capped** at `PROTECTED_BASELINE_HISTORY` (default
+   10) newest superseded stamps. A cap that deletes silently is just data loss,
+   so the run prints `baseline history capped at 10 line(s); N oldest superseded
+   stamp(s) dropped`.
+6. **`vars.VITE_CONVEX_URL` set** to `https://flexible-frog-776.convex.cloud` —
+   the deployment `deploy-convex` asserts and the guard's overlay stamp names.
+7. **The build can no longer ship unconfigured.** `verify` fails *before* the
+   build when the variable is empty or is not a `*.convex.cloud` URL, and *after*
+   it when the rebuilt overlay files/zips are not stamped with its `.convex.site`
+   origin. Those were exactly the two symptoms of the empty variable; they are
+   now checked at the source, not only by the guard.
+8. **`workflow_dispatch` added.** The guard job's `if:` and DEPLOYMENT.md both
+   promised a manual dispatch the workflow's `on:` never accepted. `deploy-convex`
+   stays push-only, so a dispatch cannot deploy a backend.
+
+### Local checks (before pushing)
+
+- `bash -n scripts/check-4-tasks.sh` clean; the workflow parses with its four
+  jobs and the new `workflow_dispatch` trigger.
+- Three real guard runs with `TASK_GUARD_KEEP=2`: exit codes 2/2/2 survived the
+  two-file tee, the ring ended with exactly two files, and the newest ring file
+  is byte-identical to `task-guard-latest.txt` — earlier runs survive later ones.
+- Check 2 against the actual `.env.local` keys (only slugs printed):
+  `dev -> pastel-pelican-634`, `prod -> flexible-frog-776`, both accepted.
+- Prefix harness: `dev:pastel-pelican-634|abc` → `pastel-pelican-634`,
+  `prod:flexible-frog-776|abc` → `flexible-frog-776`, `garbage` → empty,
+  `preview:team:proj|abc` → `proj` (not a deployment, so it fails the dev/prod
+  assertion loudly instead of passing).
+- Baseline harness: 15 old + 1 new stamp → 10 kept, newest retained, 6 dropped
+  with the notice.
+
+### CI evidence
+
+Run **45406806725** (`19ee115`, wiring + history):
+
+| Job | Result |
+|---|---|
+| verify | success — `build target: https://flexible-frog-776.convex.cloud`, then `overlay artifacts stamped https://flexible-frog-776.convex.site (files + zips)` |
+| solana-program | success |
+| task-guard | **success, and it ran**: `guard keys: dev -> pastel-pelican-634 … prod -> flexible-frog-776`, check 2 PASS on both sides, 5 BLOCKED, `history: reports/task-guard/20261124T134726Z.txt` |
+| deploy-convex | failure — empty key (the environment's `CONVEX_DEPLOY_KEY` had been replaced) |
+
+Run **45407872141** (`5bfc22c`, deploy-key fix):
+
+| Job | Result |
+|---|---|
+| verify | success (same stamp assertions) |
+| deploy-convex | success — `CONVEX_DEPLOY_KEY targets flexible-frog-776 (production) — deploying`, `✔ Deployed Convex functions to https://flexible-frog-776.convex.cloud` |
+| task-guard | success — check 2 PASS both sides, 5 BLOCKED, ring file `20261124T135330Z.txt`; artifact `task-guard-5bfc22c…` 2830 B (latest + ring) |
+| solana-program | still running when this was written; unchanged code, green in the previous run |
+
+The five BLOCKED checks are one provider state, not five defects: dev answers
+*"You have exceeded the free plan limits, so your deployments have been
+disabled"*, prod answers a bare `[Request ID: …] Server Error`. Deploys are
+still accepted — only function serving is disabled.
+
+### Follow-ups — round 41, brainstormed (none started)
+
+1. **Lift the provider ceiling.** 5 checks stay BLOCKED until the dev/prod plan
+   serves again (or support lifts the disable). Nothing in the repo can fix it.
+2. **Schedule the guard nightly** (round 40 #8) — the verdict history now exists,
+   so a cron run leaves a comparable trail instead of overwriting one file.
+3. **Retry once before calling a bare `Server Error` BLOCKED** (round 40 #4) —
+   prod has returned only that for hours while dev names the cause.
+4. **Assert the frontend build target and the deploy target agree.**
+   `VITE_CONVEX_URL` and `CONVEX_PROD_SLUG` are independent settings: verify
+   proves the former is *a* Convex URL and deploy proves the latter is
+   production, but nothing proves they name the same deployment. A mismatch
+   would deploy to A while building the UI for B, silently.
+5. **A CI run that advances `.task-baseline` still loses the advance** (round 40
+   #6) — check 6 rewrites the file in the runner checkout and nothing commits it,
+   so the next run repeats the notice. The cap added here only bounds the file.
+6. **Guard `--json` mode** (round 40 #7) so dashboards/alerts stop parsing text.
+7. **Put the commit SHA in each run header** (`GITHUB_SHA` when set) so a ring
+   file ties to the push that produced it, not just a timestamp.
+8. **Keep superseded baseline stamps in this report, not only in
+   `.task-baseline`** — the cap drops the oldest with one log line, which is
+   easy to miss in a CI artifact.
+9. **`workflow_dispatch` re-runs the 45-minute Solana job too** — consider a
+   `guard-only` input so re-proving the guard after a secret change is cheap.
