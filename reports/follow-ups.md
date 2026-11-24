@@ -3444,8 +3444,12 @@ Default Rust: 1.95.0
 ```
 
 The job installed `cargo install cargo-build-sbf --locked` — **no version** — so it
-took whatever was newest (4.6.0) while the assertion still required v1.57. The
-crate sources settle which release is the right pin:
+took whatever was newest (4.6.0) while the assertion still required v1.57. Note
+the banner reads `Default platform-tools: v1.58`: the old grep looked for
+`platform-tools v1.57` **without the colon**, so that assertion could never match
+any output — its red message did not prove the drift it claimed. The drift is
+still real, but on the crate sources, not this line. The crate sources settle
+which release is the right pin:
 
 | crate | `DEFAULT_PLATFORM_TOOLS_VERSION` |
 |---|---|
@@ -3549,3 +3553,40 @@ so the pin is 4.5.0 — a version, not "latest".
     2.2 / litesvm 0.7. A dependency migration, not a flag flip.
 11. **Assert the deploy target for PR/preview builds too** — today only `main`
     pushes deploy, so a key that is mis-scoped for previews is untested.
+
+### First CI run of the change (45396966798, commit `29e5006`)
+
+Measured, not assumed — this is what the workflow actually did:
+
+- `verify`: **success**.
+- `deploy-convex`: **success**, and the log shows the new assertion working:
+  `▌ [Production] Ola:taengine:production (prod) … flexible-frog-776`, then
+  `CONVEX_DEPLOY_KEY targets flexible-frog-776 (production) — deploying`, then
+  `✔ Deployed Convex functions to https://flexible-frog-776.convex.cloud`.
+  Green now means deployed to the asserted target.
+- `task-guard`: **failure, by design** —
+  `##[error]task guard did not run: missing secret(s): CONVEX_DEPLOY_KEY_1
+  CONVEX_DEPLOY_KEY_2. Add them at Settings → Secrets and variables → Actions`.
+  Exactly the loud, named failure that replaces the old silent skip.
+- `solana-program`: **failure, in the new assertion** —
+  `cargo-build-sbf 4.5.0 declares a platform-tools default other than v1.57`.
+  The pinned build prints
+
+  ```
+  cargo-build-sbf 4.5.0
+  Default platform-tools: v1.57
+  Default Rust: 1.95.0
+  ```
+
+  and the check matched `platform-tools v1.57` without the colon. **The old
+  assertion had the same bug**, so its red never proved the version mismatch it
+  named; the drift is real because 4.6.0's source default is v1.58, and the
+  banner also advertises the newest release on GitHub (v1.58), which is not what
+  `--tools-version` builds with. Corrected to match the banner verbatim
+  (`Default platform-tools: v1.57`) and re-pushed; the toolchain install steps
+  themselves (4.5.0 install, cached platform-tools v1.57, Anchor 0.31.1) all
+  succeeded, so the pin is right and only the string was wrong.
+
+Lesson for the follow-ups: an assertion is only as good as the exact string it
+matches — print the value it compares and match the measured text, not the
+remembered one.

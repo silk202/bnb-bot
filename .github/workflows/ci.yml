@@ -215,7 +215,13 @@ jobs:
             echo "::error::cargo-build-sbf is not the pinned crates.io $PINNED_CRATE build (an unpinned install drifts to a newer default platform-tools)"
             exit 1
           fi
-          if ! printf '%s\n' "$OUT" | grep -qF "platform-tools $PINNED_TOOLS"; then
+          # The banner's exact wording, measured from 4.5.0: "Default
+          # platform-tools: v1.57". The previous assertion matched
+          # "platform-tools v1.57" — without the colon — so it could not match
+          # any output and its red never proved the drift it claimed. (It also
+          # mentions the newest release on GitHub, which is not what the build
+          # uses; --tools-version decides that, checked below.)
+          if ! printf '%s\n' "$OUT" | grep -qF "Default platform-tools: $PINNED_TOOLS"; then
             echo "::error::cargo-build-sbf $PINNED_CRATE declares a platform-tools default other than $PINNED_TOOLS — the pin and this assertion disagree"
             exit 1
           fi
