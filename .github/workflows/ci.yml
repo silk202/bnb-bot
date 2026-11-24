@@ -2,11 +2,13 @@
 #   1. This workflow verifies the whole app (typecheck, tests, production
 #      build — which rebuilds the overlay artifacts) and uploads the overlay
 #      zips/userscript as a downloadable artifact.
-#   2. The Convex backend deploys automatically from the CONVEX_DEPLOY_KEY
-#      environment secret (Settings → Environments → CONVEX_DEPLOY_KEY), which
-#      the `deploy-convex` job declares as its environment. That job resolves
-#      the key's target with a dry run first and refuses to deploy anywhere but
-#      the production deployment.
+#   2. The Convex backend deploys automatically from the production deploy key
+#      on the CONVEX_DEPLOY_KEY environment (Settings → Environments →
+#      CONVEX_DEPLOY_KEY → Secrets, stored as PROD_KEY, or as the older
+#      CONVEX_DEPLOY_KEY name — both are read), which the `deploy-convex` job
+#      declares as its environment. That job resolves the key's target with a
+#      dry run first and refuses to deploy anywhere but the production
+#      deployment.
 #   3. The `solana-program` job builds the Anchor program (Solana SBF), proves
 #      the tracked IDL still matches the source, runs clippy and the LiteSVM +
 #      IDL conformance tests. It never deploys and never needs a keypair.
@@ -387,11 +389,14 @@ jobs:
       - name: Assert the deploy key targets production
         id: key
         env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          # Measured 2026-11-24: the environment holds the production key as
+          # PROD_KEY (the guard's check 2 proves it targets flexible-frog-776);
+          # the older dedicated name is still accepted when it exists.
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY || secrets.PROD_KEY }}
           EXPECTED_SLUG: ${{ vars.CONVEX_PROD_SLUG || 'flexible-frog-776' }}
         run: |
           if [ -z "$CONVEX_DEPLOY_KEY" ]; then
-            echo "::error::CONVEX_DEPLOY_KEY is not set for the CONVEX_DEPLOY_KEY environment, so no backend was deployed. Add the production deployment's deploy key (dashboard → that deployment → Settings → Deploy keys) at Settings → Environments → CONVEX_DEPLOY_KEY → Secrets."
+            echo "::error::No production deploy key on the CONVEX_DEPLOY_KEY environment, so no backend was deployed. Add the production deployment's deploy key (dashboard → that deployment → Settings → Deploy keys) as PROD_KEY (or CONVEX_DEPLOY_KEY) at Settings → Environments → CONVEX_DEPLOY_KEY → Secrets."
             exit 1
           fi
           set +e
@@ -421,7 +426,7 @@ jobs:
           bunx convex deploy
           echo "deployed to ${{ steps.key.outputs.target }} (production)" >> "$GITHUB_STEP_SUMMARY"
         env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY || secrets.PROD_KEY }}
 
   # The operator guard (`bun run check:tasks`) is the only thing that proves the
   # four migration tasks and the three deployment surfaces are intact, and until
