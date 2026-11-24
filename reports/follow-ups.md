@@ -3761,3 +3761,8 @@ still accepted — only function serving is disabled.
    easy to miss in a CI artifact.
 9. **`workflow_dispatch` re-runs the 45-minute Solana job too** — consider a
    `guard-only` input so re-proving the guard after a secret change is cheap.
+
+> Measured after writing: run 45407872141 was cancelled by the next push's
+> concurrency group while its Solana job was still running — so the green Solana
+> reference stays run 45406806725 (same workflow, same program sources), not a
+> job that quietly never finished.
