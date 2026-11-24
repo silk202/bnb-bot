@@ -3590,3 +3590,29 @@ Measured, not assumed — this is what the workflow actually did:
 Lesson for the follow-ups: an assertion is only as good as the exact string it
 matches — print the value it compares and match the measured text, not the
 remembered one.
+
+### Second run (45398162691, commit `e49bcbd`): banner matched, manifest did not
+
+Steps 7–9 (cargo-build-sbf 4.5.0, cached platform-tools v1.57, Anchor 0.31.1)
+all succeeded; step 10 moved to its next check and failed there:
+`##[error]/home/runner/.cache/solana/v1.57/platform-tools/version.md does not
+report v1.57`. The `head -3` I added printed the file's real content:
+
+```
+ae660768afd467d131776918a1627e18920b230c  https://github.com/anza-xyz/rust.git
+bbbd3a76017677319ff85d096a7c9bee9813c3db  https://github.com/anza-xyz/cargo.git
+f0f8003daa3f71a1a3e2f067f8d5bb46e2756514  https://github.com/anza-xyz/newlib.git
+```
+
+So `version.md` is a manifest of pinned rust/cargo/newlib revisions, **not** a
+version string; the version lives in the directory name (`v1.57`, which the
+wrapper derives from the version) and in the banner's `Default platform-tools`.
+The assertion now checks what a real install has: the directory and file exist,
+the manifest lists three pinned revisions, and — the strongest bit —
+`v1.57/platform-tools/rust/bin/rustc --version` matches the `Default Rust:` the
+banner names for that version (that rustc is what `toolchain.rs` reads to pick the
+compiler). Cheap, no new hard-coded version, and it fails on a hollow download.
+
+Note the shape of this round: each run was red in the assertion and green in every
+install step, so the pin is right and the check was wrong twice. Both failures
+were reported with their measured line rather than guessed at.

@@ -199,7 +199,8 @@ jobs:
         run: |
           PINNED_CRATE=4.5.0
           PINNED_TOOLS=v1.57
-          TOOLS_MD="$HOME/.cache/solana/$PINNED_TOOLS/platform-tools/version.md"
+          TOOLS_DIR="$HOME/.cache/solana/$PINNED_TOOLS/platform-tools"
+          TOOLS_MD="$TOOLS_DIR/version.md"
 
           rustc --version && cargo --version
           OUT="$("$HOME/.cargo/bin/cargo-build-sbf" --version)"
@@ -225,15 +226,40 @@ jobs:
             echo "::error::cargo-build-sbf $PINNED_CRATE declares a platform-tools default other than $PINNED_TOOLS — the pin and this assertion disagree"
             exit 1
           fi
+          # version.md is NOT a version string — measured on a real v1.57
+          # install it is a manifest of the exact rust/cargo/newlib revisions:
+          #   <40-hex sha>  https://github.com/anza-xyz/rust.git
+          #   <40-hex sha>  https://github.com/anza-xyz/cargo.git
+          #   <40-hex sha>  https://github.com/anza-xyz/newlib.git
+          # The version is carried by the directory name (which the wrapper
+          # derives from the version) and by the banner's default above.
           if [ ! -f "$TOOLS_MD" ]; then
-            echo "::error::platform-tools $PINNED_TOOLS is not installed at $TOOLS_MD (the build passes --tools-version $PINNED_TOOLS)"
+            echo "::error::platform-tools $PINNED_TOOLS is not installed at $TOOLS_DIR (the build passes --tools-version $PINNED_TOOLS)"
             exit 1
           fi
           head -3 "$TOOLS_MD"
-          if ! grep -qF "$PINNED_TOOLS" "$TOOLS_MD"; then
-            echo "::error::$TOOLS_MD does not report $PINNED_TOOLS"
+          revisions="$(grep -cE '^[0-9a-f]{40}[[:space:]]+https://' "$TOOLS_MD" || true)"
+          if [ "${revisions:-0}" -lt 3 ]; then
+            echo "::error::$TOOLS_MD lists ${revisions:-0} pinned revision(s) — the $PINNED_TOOLS platform-tools install is incomplete"
             exit 1
           fi
+          echo "platform-tools $PINNED_TOOLS present at $TOOLS_DIR with $revisions pinned revisions"
+          # The wrapper reads this exact rustc (toolchain.rs: rust/bin/rustc) to
+          # decide the toolchain it compiles with, and the banner above states
+          # the Rust version it expects for this platform-tools. Comparing them
+          # proves the installed tree is the one the pin describes.
+          RUSTC_BIN="$TOOLS_DIR/rust/bin/rustc"
+          if [ ! -x "$RUSTC_BIN" ]; then
+            echo "::error::$RUSTC_BIN is missing — the $PINNED_TOOLS toolchain has no rust compiler"
+            exit 1
+          fi
+          RUSTC_OUT="$("$RUSTC_BIN" --version)"
+          echo "$RUSTC_OUT"
+          BANNER_RUST="$(printf '%s\n' "$OUT" | sed -n 's/^Default Rust: //p')"
+          case "$RUSTC_OUT" in
+            rustc\ "$BANNER_RUST"*) ;;
+            *) echo "::error::the $PINNED_TOOLS toolchain reports '$RUSTC_OUT' but cargo-build-sbf expects Rust '${BANNER_RUST:-unknown}' for it"; exit 1 ;;
+          esac
 
       # The tests load this artifact and fail (never skip) when it is missing.
       - name: Build the program (SBF v1)
