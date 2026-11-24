@@ -9,7 +9,10 @@
 #   1. .env.local build target carries a clean, unquoted VITE_CONVEX_URL
 #      (cosmetic drift — quotes/space from a secret sync — is normalized on
 #      every run, because the URL itself is unchanged and the app sanitizes it)
-#   2. dev + prod deploy keys are accepted
+#   2. dev + prod deploy keys are accepted AND target the deployment they are
+#      named for (a Convex deploy key's own `dev:<deployment>|<secret>` prefix
+#      names its target, so a swapped or duplicated secret fails without a
+#      network call)
 #   3. overlay artifacts are stamped with the production site origin
 #   4. both deployments carry the four required environment variables
 #      (+ JWT_PRIVATE_KEY is the 1703-byte armored key that decrypts the
@@ -42,7 +45,11 @@
 #   PREVIEW_URL=""  or SKIP_PREVIEW=1      skip check 5
 #   PROTECTED_URL                          deployment that must stay untouched
 #   PROTECTED_BASELINE                     baseline file (default .task-baseline)
-#   TASK_REPORT                            run log (default reports/task-guard-latest.txt)
+#   PROTECTED_BASELINE_HISTORY             superseded stamps kept there (default 10)
+#   TASK_REPORT                            latest run log (default reports/task-guard-latest.txt)
+#   TASK_GUARD_HISTORY_DIR                 timestamped ring of past runs
+#                                          (default reports/task-guard)
+#   TASK_GUARD_KEEP                        runs kept in that ring (default 20)
 #
 # Exit code: 0 = all checks pass, 1 = at least one failure, 2 = no check failed
 #            but the provider blocked at least one (nothing was proved false).
@@ -54,10 +61,44 @@ cd "$(dirname "$0")/.." || exit 1
 # when. The guard re-executes itself once so tee sees the whole output while the
 # parent still returns the child's exact exit status (pipefail alone would not
 # preserve a `blocked` exit code of 2 distinctly enough for the caller's eyes).
+#
+# Two destinations, not one: `task-guard-latest.txt` is rewritten on every run,
+# which is exactly how a green run disappears behind the next red one. Each run
+# therefore also lands in a timestamped ring (last TASK_GUARD_KEEP, default 20)
+# whose filenames are fixed-width UTC stamps, so a plain sort is chronological
+# and "it was green yesterday" stays checkable after today's failure.
 if [ "${TASK_GUARD_TEE:-0}" != "1" ]; then
   TASK_REPORT="${TASK_REPORT-reports/task-guard-latest.txt}"
   mkdir -p "$(dirname "$TASK_REPORT")" 2>/dev/null
-  TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" bash "$0" "$@" 2>&1 | tee "$TASK_REPORT"
+  TASK_GUARD_HISTORY_DIR="${TASK_GUARD_HISTORY_DIR-$(dirname "$TASK_REPORT")/task-guard}"
+  TASK_GUARD_KEEP="${TASK_GUARD_KEEP:-20}"
+  case "$TASK_GUARD_KEEP" in ''|*[!0-9]*) TASK_GUARD_KEEP=20 ;; esac
+  [ "$TASK_GUARD_KEEP" -ge 1 ] 2>/dev/null || TASK_GUARD_KEEP=20
+  TASK_GUARD_RUN_LOG=""
+  if mkdir -p "$TASK_GUARD_HISTORY_DIR" 2>/dev/null; then
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    TASK_GUARD_RUN_LOG="$TASK_GUARD_HISTORY_DIR/${stamp}.txt"
+    n=2
+    while [ -e "$TASK_GUARD_RUN_LOG" ]; do
+      TASK_GUARD_RUN_LOG="$TASK_GUARD_HISTORY_DIR/${stamp}-${n}.txt"
+      n=$((n + 1))
+    done
+    # Trim before writing, so the ring never exceeds KEEP even briefly.
+    while [ "$(find "$TASK_GUARD_HISTORY_DIR" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | wc -l)" -ge "$TASK_GUARD_KEEP" ]; do
+      oldest="$(find "$TASK_GUARD_HISTORY_DIR" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | sort | head -n 1)"
+      [ -n "$oldest" ] || break
+      rm -f "$oldest"
+    done
+  else
+    echo "WARN    guard history unavailable (cannot create $TASK_GUARD_HISTORY_DIR) — keeping only $TASK_REPORT" >&2
+  fi
+  if [ -n "$TASK_GUARD_RUN_LOG" ]; then
+    TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" TASK_GUARD_RUN_LOG="$TASK_GUARD_RUN_LOG" \
+      TASK_GUARD_HISTORY_DIR="$TASK_GUARD_HISTORY_DIR" TASK_GUARD_KEEP="$TASK_GUARD_KEEP" \
+      bash "$0" "$@" 2>&1 | tee "$TASK_REPORT" "$TASK_GUARD_RUN_LOG"
+  else
+    TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" bash "$0" "$@" 2>&1 | tee "$TASK_REPORT"
+  fi
   exit "${PIPESTATUS[0]}"
 fi
 
@@ -105,6 +146,15 @@ blocked() { printf 'BLOCKED %s\n' "$1"; BLOCKED=$((BLOCKED + 1)); PROVIDER_BLOCK
 
 site_of() { [ "$1" = "dev" ] && echo "$DEV_SITE" || echo "$PROD_SITE"; }
 key_of()  { [ "$1" = "dev" ] && echo "$DEV_KEY" || echo "$PROD_KEY"; }
+# A deploy key names its own target: `<type>:<deployment>|<secret>` for dev/prod
+# keys (`prod:qualified-jaguar-123|eyJ2…` in Convex's docs), and
+# `<preview|project>:<team>:<project>|<secret>` for the others. Taking the field
+# before the last colon of the part before the pipe yields the target for the
+# first shape and an empty string for the second — never a guess.
+key_slug() {
+  local head="${1%%|*}"
+  case "$head" in *:*) printf '%s' "${head##*:}" ;; *) printf '%s' "" ;; esac
+}
 
 # Single source for the URL rule. The guard used to carry its own sed copy,
 # which is exactly how two normalizers drift apart — it now asks the same
@@ -128,6 +178,9 @@ is_bare_provider_error() {
 
 echo "task guard — 4 migration + 3 deployment checks — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "run log: ${TASK_REPORT:-stdout only}"
+if [ -n "${TASK_GUARD_RUN_LOG:-}" ]; then
+  echo "history: ${TASK_GUARD_RUN_LOG} (ring: ${TASK_GUARD_HISTORY_DIR}, last ${TASK_GUARD_KEEP} runs)"
+fi
 echo
 
 # ── 1. build target ────────────────────────────────────────────────────────
@@ -184,17 +237,27 @@ for env_name in dev prod; do
     fail "2. ${env_name} deploy key missing from .env.local"
     continue
   fi
+  # The key's own prefix is the target. This is the check that catches the
+  # mistake that kept CI red: both secrets present, but not the deployments
+  # the reader assumes (same deployment twice, or swapped) — the export below
+  # would accept any valid key and never notice.
+  slug="$(key_slug "$key")"
+  want_site="$(site_of "$env_name")"
+  if [ -n "$slug" ] && [ "$slug" != "$want_site" ]; then
+    fail "2. ${env_name} deploy key targets ${slug}, expected ${want_site} — swapped or mis-scoped key"
+    continue
+  fi
   CONVEX_DEPLOY_KEY="$key" timeout "$EXPORT_TIMEOUT" "$CONVEX_BIN" export --path "/tmp/fbt-${env_name}.zip" >/dev/null 2>&1
   rc=$?
   rm -f "/tmp/fbt-${env_name}.zip"
   if [ $rc -eq 0 ]; then
-    pass "2. ${env_name} deploy key accepted (export exit 0)"
+    pass "2. ${env_name} deploy key accepted (targets ${slug:-unparsed prefix}, export exit 0)"
   elif [ $rc -eq 124 ]; then
     # Not a rejection: a wrong key is refused in seconds with a message. The
     # export is simply slow (or the deployment is disabled by the provider).
-    blocked "2. ${env_name} deploy key check inconclusive — export timed out after ${EXPORT_TIMEOUT}s (not a rejection)"
+    blocked "2. ${env_name} deploy key check inconclusive — export timed out after ${EXPORT_TIMEOUT}s (not a rejection; prefix targets ${slug:-unknown})"
   else
-    fail "2. ${env_name} deploy key rejected (export exit ${rc})"
+    fail "2. ${env_name} deploy key rejected (export exit ${rc}; prefix targets ${slug:-unknown})"
   fi
 done
 
@@ -371,9 +434,24 @@ fi
 # fleet moves, the reference advances by itself and the superseded value is
 # appended as `history=`, so re-baselining never erases what it replaced.
 write_baseline() { # new_stamp superseded_stamp superseded_recorded note
-  local kept="" now
+  local kept="" now keep limit total drop
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  [ -f "$PROTECTED_BASELINE" ] && kept="$(grep '^history=' "$PROTECTED_BASELINE" 2>/dev/null)"
+  # The superseded stamps are history, not a ledger: platform rollouts accumulate
+  # them, and an unbounded list makes the committed file unreadable. Keep the
+  # newest PROTECTED_BASELINE_HISTORY (default 10), and say what was dropped so
+  # capping never looks like the value never existed.
+  keep="${PROTECTED_BASELINE_HISTORY:-10}"
+  case "$keep" in ''|*[!0-9]*) keep=10 ;; esac
+  [ "$keep" -ge 1 ] 2>/dev/null || keep=10
+  limit=$keep
+  [ -n "${2:-}" ] && limit=$((keep - 1))
+  if [ -f "$PROTECTED_BASELINE" ]; then
+    total="$(grep -c '^history=' "$PROTECTED_BASELINE" 2>/dev/null)"
+    total="${total:-0}"
+    kept="$(grep '^history=' "$PROTECTED_BASELINE" 2>/dev/null | tail -n "$limit")"
+    drop=$((total > limit ? total - limit : 0))
+    [ "$drop" -gt 0 ] && info "baseline history capped at ${keep} line(s); ${drop} oldest superseded stamp(s) dropped"
+  fi
   {
     printf 'url=%s\nstamp=%s\nrecorded=%s\n' "$PROTECTED_URL" "$1" "$now"
     [ -n "$kept" ] && printf '%s\n' "$kept"

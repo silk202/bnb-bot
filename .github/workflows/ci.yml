@@ -29,6 +29,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The task guard's own comment (and DEPLOYMENT.md) promise a manual dispatch;
+  # without this key that promise was false. `deploy-convex` is push-only, so a
+  # dispatch never deploys a backend.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -57,6 +61,29 @@ jobs:
       - name: Test
         run: bun test
 
+      # A build with no VITE_CONVEX_URL compiles, passes tests, and then ships a
+      # "Backend not configured" screen with overlay artifacts that cannot gate
+      # (no .convex.site stamp). Green must not mean that, so the value is
+      # asserted before the build and the built artifacts are checked after it —
+      # the same two facts `check:tasks` proves for the committed artifacts.
+      - name: Assert the build target is configured
+        env:
+          VITE_CONVEX_URL: ${{ vars.VITE_CONVEX_URL }}
+        run: |
+          if [ -z "$VITE_CONVEX_URL" ]; then
+            echo "::error::VITE_CONVEX_URL repository variable is not set, so this build would publish the 'Backend not configured' screen and unstamped overlay artifacts. Set Settings → Secrets and variables → Actions → Variables → VITE_CONVEX_URL to the production deployment's https://<deployment>.convex.cloud URL."
+            exit 1
+          fi
+          ORIGIN="${VITE_CONVEX_URL%/}"
+          case "$ORIGIN" in
+            https://*.convex.cloud) ;;
+            *)
+              echo "::error::VITE_CONVEX_URL='$ORIGIN' is not a https://<deployment>.convex.cloud URL — src/lib/convex-url.ts rejects it, so the app would fall back to the unconfigured screen."
+              exit 1
+              ;;
+          esac
+          echo "build target: $ORIGIN (overlay gate origin ${ORIGIN%.convex.cloud}.convex.site)"
+
       # `bun run build` = tsc -b && bun run overlay && vite build — the
       # overlay artifacts (extension zips + userscript served by the app's
       # Downloads page) are rebuilt from the same version consts on every
@@ -65,6 +92,20 @@ jobs:
         run: bun run build
         env:
           VITE_CONVEX_URL: ${{ vars.VITE_CONVEX_URL }}
+
+      - name: Assert the built overlay artifacts carry the build target
+        env:
+          VITE_CONVEX_URL: ${{ vars.VITE_CONVEX_URL }}
+        run: |
+          want="${VITE_CONVEX_URL%/}"; want="${want%.convex.cloud}.convex.site"
+          files="$(grep -rhoE 'https://[a-z0-9-]+\.convex\.site' public/overlay --exclude='*.zip' 2>/dev/null | sort -u)"
+          zips="$(for z in public/overlay/*.zip; do unzip -p "$z" 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.convex\.site'; done | sort -u)"
+          if [ "$files" = "$want" ] && [ "$zips" = "$want" ]; then
+            echo "overlay artifacts stamped $want (files + zips)"
+          else
+            echo "::error::overlay artifacts are not stamped with $want — files: '${files:-none}', zips: '${zips:-none}'. The uploaded downloads would ship without the daily-target gate."
+            exit 1
+          fi
 
       - name: Upload overlay artifacts (downloads surface)
         uses: actions/upload-artifact@v4
@@ -398,6 +439,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The dev/prod deploy keys live on the CONVEX_DEPLOY_KEY environment as
+    # DEV_KEY / PROD_KEY (measured 2026-11-24). A job only sees an environment's
+    # secrets when it declares that environment, so without this line the guard
+    # read two empty strings and failed with "missing secret(s)" every push.
+    # Repository-level CONVEX_DEPLOY_KEY_1 / _2 still work and take precedence.
+    environment: CONVEX_DEPLOY_KEY
     steps:
       - uses: actions/checkout@v4
 
@@ -411,8 +458,10 @@ jobs:
       - name: Task guard (4 migration + 3 deployment checks)
         id: guard
         env:
-          CONVEX_DEPLOY_KEY_1: ${{ secrets.CONVEX_DEPLOY_KEY_1 }}
-          CONVEX_DEPLOY_KEY_2: ${{ secrets.CONVEX_DEPLOY_KEY_2 }}
+          # Repo-level names first (the documented layout), then the environment
+          # names that exist today. Either pair works; neither is copied here.
+          CONVEX_DEPLOY_KEY_1: ${{ secrets.CONVEX_DEPLOY_KEY_1 || secrets.DEV_KEY }}
+          CONVEX_DEPLOY_KEY_2: ${{ secrets.CONVEX_DEPLOY_KEY_2 || secrets.PROD_KEY }}
           TASK_REPORT: reports/task-guard-latest.txt
           SKIP_BUILD_TARGET: "1"
         run: |
@@ -421,9 +470,14 @@ jobs:
           [ -n "$CONVEX_DEPLOY_KEY_1" ] || missing="$missing CONVEX_DEPLOY_KEY_1"
           [ -n "$CONVEX_DEPLOY_KEY_2" ] || missing="$missing CONVEX_DEPLOY_KEY_2"
           if [ -n "$missing" ]; then
-            echo "::error::task guard did not run: missing secret(s):$missing. Add them at Settings → Secrets and variables → Actions — CONVEX_DEPLOY_KEY_1 = the development deployment's deploy key, CONVEX_DEPLOY_KEY_2 = the production deployment's — then re-run this job."
+            echo "::error::task guard did not run: missing secret(s):$missing. Set them as repository secrets (Settings → Secrets and variables → Actions) or as DEV_KEY / PROD_KEY on the CONVEX_DEPLOY_KEY environment this job declares — then re-run."
             exit 1
           fi
+          # The key's own `dev:<deployment>|…` prefix names its target, so the log
+          # states which deployments these secrets address before any check runs
+          # (never the value). A swap is caught here and again in check 2.
+          slug_of() { local h="${1%%|*}"; case "$h" in *:*) printf %s "${h##*:}" ;; *) printf %s "" ;; esac; }
+          echo "guard keys: dev -> $(slug_of "$CONVEX_DEPLOY_KEY_1" || true) (expected pastel-pelican-634), prod -> $(slug_of "$CONVEX_DEPLOY_KEY_2" || true) (expected flexible-frog-776)"
           set +e
           bun run check:tasks
           rc=$?
@@ -452,7 +506,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: task-guard-${{ github.sha }}
-          path: reports/task-guard-latest.txt
+          path: |
+            reports/task-guard-latest.txt
+            reports/task-guard/*.txt
           if-no-files-found: warn
           retention-days: 30
 

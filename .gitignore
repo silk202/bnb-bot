@@ -136,6 +136,9 @@ scripts/*.out
 # Latest task-guard verdict, rewritten on every run (timestamped, local only —
 # reports/follow-ups.md keeps the durable account of what each round found)
 reports/task-guard-latest.txt
+# Timestamped ring of past guard runs (last 20), so an older green run survives a
+# later red one overwriting the latest file. Local only, like the latest file.
+reports/task-guard/
 
 # ─── Mirror-check scratch (check:mirror unzip target) ────
 .mirror-check/
