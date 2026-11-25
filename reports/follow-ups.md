@@ -4205,3 +4205,29 @@ Text mode is untouched by both changes — the edited code is inside the
 1. **Provider ceiling** (round 41 #1) — unchanged and owner-only: 3 checks stay
    BLOCKED until dev/prod function serving returns (dev: free-plan disable;
    prod: bare `[Request ID: …] Server Error`). Nothing in the repo fixes it.
+
+### CI evidence (measured after pushing f831b87)
+
+Run **45615813488** (`f831b87`, push to `main`), job `task-guard`
+(139211568379):
+
+```
+task guard self-test: all 38 assertions passed
+task guard — 4 migration + 3 deployment checks — 2026-11-25T12:40:54Z
+commit: f831b8767a52ecea5b68d44f51e94c7eb94af3d1 (main)
+history: reports/task-guard/20261125T124054Z.txt (ring: reports/task-guard, last 20 runs, <= 262144 B)
+BLOCKED 4c. dev function serving disabled by the provider: … free plan limits …
+BLOCKED 4d. dev sign-in not attemptable — provider error: … free plan limits …
+BLOCKED 4c. prod provider returned an infrastructure error after 2 attempt(s): [Request ID: 87f9d1ae226fed2f] Server Error
+BLOCKED 4d. prod sign-in not attemptable — provider error: [Request ID: 8da857519f3991b6] Server Error
+BLOCKED 5b. dev backend serving disabled by the provider: … free plan limits …
+PASS    6. protected deployment healthy on the fleet build 20261124T221653Z-e69b633e242e; reference unchanged
+RESULT no failures; 5 check(s) blocked by the provider
+guard exit=2
+```
+
+The self-test step ran **before** the live guard and passed on the runner, which
+is the point of checking it in: the ring, ledger and JSON assertions now run on
+every push instead of only where someone remembered a /tmp file. The verdict
+itself is unchanged from round 43 (5 BLOCKED on a real sign-in, exit 2), and
+the Solana program job was **success** in the same run, so the whole push is green.
