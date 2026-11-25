@@ -4067,7 +4067,7 @@ picks up `*.json` ring entries, so a `--json` run in CI would not lose its log.
 
 - `bash -n scripts/check-4-tasks.sh` — clean.
 - Harness `/tmp/guard-harness.sh` (network-free, extracts the ring/ledger/JSON
-  functions from the script itself): **all 20 assertions pass**, including the
+  functions from the script itself): **all 21 assertions pass**, including the
   three failure modes above.
 - **Live text run** (real deployments, `SKIP_LOGIN=1`, `/tmp` report + ring so
   the repo's history is not polluted): 41.7 s, exit **2**, **3 BLOCKED**
