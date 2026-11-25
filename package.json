@@ -23,6 +23,7 @@
     "check:rpc": "bun scripts/rpc-diagnostics.mjs",
     "check:deploy-config": "bun scripts/check-deploy-config.mjs",
     "check:headers": "bun scripts/check-headers-parity.mjs",
+    "check:telegram-docs": "bun scripts/check-telegram-docs.ts",
     "package:mirror": "bash scripts/package-mirror.sh && bash scripts/check-mirror-sync.sh",
     "deploy:vercel": "vercel --prod",
     "deploy:netlify": "netlify deploy --prod",

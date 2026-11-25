@@ -82,6 +82,13 @@ jobs:
       - name: Test
         run: bun test
 
+      # TELEGRAM.md and the /help board are prose and drift silently (two
+      # commands once shipped answering but undocumented). This compares both
+      # with BOT_COMMAND_SPECS and the real parser, so a new command cannot land
+      # with a stale page: counts, coverage, and parseability in both directions.
+      - name: Telegram docs drift
+        run: bun run check:telegram-docs
+
       # A build with no VITE_CONVEX_URL compiles, passes tests, and then ships a
       # "Backend not configured" screen with overlay artifacts that cannot gate
       # (no .convex.site stamp). Green must not mean that, so the value is

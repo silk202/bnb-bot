@@ -43,8 +43,16 @@ The menu includes both scan commands:
 - `/bnb_scan` — run a live BNB feed scan now
 - `/sol_scan` — refresh the SOL feed with one live pass
 
-`/start_payload`, bare pairing codes and `/pair` are not menu entries; they are
-handled but not advertised.
+The `start_payload` kind (deep-link `/start <CODE>`), bare pairing codes and
+`/pair` are not menu entries; they are handled but not advertised.
+
+Both scan commands share a **per-chat cooldown**: one manual scan per chain
+every 30 seconds (`SCAN_COOLDOWN_MS`). The slot is claimed atomically before any
+feed work, so a double tap (or a Telegram retry) cannot fire two scans; a tap
+inside the window answers with the real remaining seconds instead of scanning.
+A scan that never ran — feed unreachable, or `scanPass` yielded to the app, a
+stopped scanner or an in-flight lease — releases the slot, so the chat is not
+charged for work it did not get.
 
 ## Commands — what they display
 
@@ -57,7 +65,7 @@ handled but not advertised.
 | `/dashboard` | Session window, AI score/rating, route count, average edge, liquidity, volume, gas, fleet metrics. An unreachable feed answers with an explicit warning — numbers are never fabricated. |
 | `/status` | BNB/SOL engine state, mode, network/chain, contract address, wallet count, scans today + last scan source, opportunities, executions/wins/success rate, lifetime PnL, webhook health, bot username, linked chats, digest/sound/auto-pair prefs. |
 | `/engines`, `/engine` | The 24/7 board for all four engines (BNB scan, BNB sniper, SOL scan, SOL sniper) with per-engine freshness stamps and start/stop controls. |
-| `/help` | The full command board. Every `/command` it names is parsed by `parseBotCommand`; a parity test fails if it advertises something unknown. |
+| `/help` | The full command board. Every slash command it names is parsed by `parseBotCommand`; a parity test fails if it advertises something unknown, and the docs-drift gate fails if the board and `TELEGRAM.md` disagree with `BOT_COMMAND_SPECS`. |
 
 ### BNB FlashBolt
 
@@ -68,7 +76,7 @@ handled but not advertised.
 | `/bnb_off` | Stops BNB only; the SOL engine keeps its own switch. |
 | `/bnb_paper` | Sets the global mode to paper; reports that executions are simulated. |
 | `/bnb_live` | Sets the global mode to live; reports that real execution arms only with a deployed contract and a connected wallet. |
-| `/bnb_scan` | Runs one live feed scan immediately, stamps the BNB scan bookkeeping (freshness + opportunity count, the same bump the app's Scan performs) and replies with the live routes board. An unreachable feed returns the explicit warning instead of an empty board. |
+| `/bnb_scan` | Runs one live feed scan immediately (subject to the 30s per-chat cooldown), stamps the BNB scan bookkeeping (freshness + opportunity count, the same bump the app's Scan performs) and replies with the live routes board. An unreachable feed returns the explicit warning instead of an empty board and releases the cooldown slot. |
 | `/routes` | Top live arbitrage routes from the current feed (no scan stamp). |
 | `/execs` | The recent executions trail. Filters: `/execs@live`, `/execs@sim`; the keyboard cycles all → live → sim. A row counts as LIVE when it carries a `txHash`. |
 | `/pnl` | On-chain PnL summary for BNB and SOL plus simulated totals. Same filters as `/execs`. |
@@ -80,7 +88,7 @@ handled but not advertised.
 | `/sol` | SOL dashboard: engine, network, mode, buy/sell/target/trailing settings, wallets, PnL, with start/stop and "Scan now" buttons. |
 | `/sol_on` | Engages the SOL scan + sniper loops server-side. |
 | `/sol_off` | Stops the SOL engines only; BNB keeps running. |
-| `/sol_scan` | Runs exactly one real pass through the SOL engine body (never a second, divergent scan path) and reports the pass's live/generated route counts. If the pass does not run it names the reason: scanner stopped, app currently driving the scan, no SOL state, a pass already in flight, or the lease just renewed. |
+| `/sol_scan` | Runs exactly one real pass through the SOL engine body (never a second, divergent scan path) and reports the pass's live/generated route counts. Same 30s per-chat cooldown as `/bnb_scan`; when the pass does not run the slot is released and the reply names the reason: scanner stopped, app currently driving the scan, no SOL state, a pass already in flight, or the lease just renewed. |
 
 ### FlashBolt Trade
 
@@ -149,6 +157,14 @@ row-level abandonment is surfaced on the board instead of being hidden.
   still answer, and the `setMyCommands` menu cannot drift from the dispatcher:
   every entry is a valid, parseable Telegram command, no name repeats, and every
   handled kind except the documented unlisted ones is advertised.
+- `bun test src/lib/__tests__/telegram-scan-cooldown.test.ts` — the 30s window,
+  the exact boundary, a backwards clock failing closed, the released slot, and
+  the reply naming the real remaining seconds.
+- `bun run check:telegram-docs` — the docs-drift gate (also a CI step): the menu
+  count claim equals `BOT_COMMAND_SPECS.length`, every menu command is
+  documented here, every backticked slash command on this page is answered by
+  the parser, and `/help` lists every menu command except the one stated
+  exemption.
 - `bun run typecheck` — the dispatch switch is exhaustive over `BotCommand`, so a
   new kind without a case fails the build.
 

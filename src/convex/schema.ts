@@ -774,6 +774,11 @@ const schema = defineSchema(
       linkedAt: v.number(),
       lastSeenAt: v.number(),
       lastCommand: v.optional(v.string()),
+      // Per-chain stamp of the last ACCEPTED manual scan (/bnb_scan,
+      // /sol_scan). The claim mutation is atomic on this document, so two taps
+      // cannot both scan; 0 means "no cooldown" (a released claim).
+      lastBnbScanAt: v.optional(v.number()),
+      lastSolScanAt: v.optional(v.number()),
       // per-chat UI preference: silent (no sound) vs normal notifications
       silent: v.boolean(),
       blocked: v.boolean(), // operator can remotely disable a chat

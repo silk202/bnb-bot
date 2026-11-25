@@ -47,6 +47,8 @@ import {
   selectPurgeable,
   type BotMessageSource,
   BOT_COMMAND_SPECS,
+  scanCooldown,
+  scanCooldownMessage,
   startMessage,
   helpMessage,
   unlinkedMessage,
@@ -327,6 +329,8 @@ export const getChat = internalQuery({
       linkedAt: row.linkedAt,
       lastSeenAt: row.lastSeenAt,
       lastCommand: row.lastCommand,
+      lastBnbScanAt: row.lastBnbScanAt,
+      lastSolScanAt: row.lastSolScanAt,
       silent: row.silent,
       blocked: row.blocked,
     };
@@ -433,6 +437,65 @@ export const unpairChat = internalMutation({
       .first();
     if (row) await ctx.db.delete(row._id);
     return { ok: true };
+  },
+});
+
+// ── Manual-scan cooldown ────────────────────────────────────────────────
+
+/**
+ * Atomically take the manual-scan slot for a chat. Convex serializes mutations
+ * on the chat document, so two taps (or a Telegram retry delivering twice)
+ * cannot both pass: the second transaction re-reads the stamp the first wrote
+ * and is refused. The wait comes from the same pure rule the tests exercise, so
+ * the reply states a real number instead of a hand-written one.
+ */
+export const claimScan = internalMutation({
+  args: {
+    chatId: v.string(),
+    chain: v.union(v.literal("bnb"), v.literal("sol")),
+    now: v.number(),
+  },
+  handler: async (ctx, { chatId, chain, now }): Promise<{ allowed: boolean; retryInMs: number }> => {
+    const row = await ctx.db
+      .query("telegramBotChats")
+      .withIndex("by_chat", (q) => q.eq("chatId", chatId))
+      .first();
+    // The dispatch already passed the pairing gate; a row that vanished means
+    // the chat was unpaired mid-flight. Allow rather than invent a cooldown.
+    if (!row) return { allowed: true, retryInMs: 0 };
+    const lastAt = chain === "bnb" ? row.lastBnbScanAt : row.lastSolScanAt;
+    const status = scanCooldown(lastAt, now);
+    if (!status.allowed) return status;
+    await ctx.db.patch(
+      row._id,
+      chain === "bnb" ? { lastBnbScanAt: now } : { lastSolScanAt: now },
+    );
+    return { allowed: true, retryInMs: 0 };
+  },
+});
+
+/**
+ * Hand the slot back when a claimed scan never ran (feed unreachable, SOL
+ * yielded to the app or the engine lease). Guarded on `claimedAt`, so a release
+ * can never clear a newer claim written by a concurrent tap. 0 means "long
+ * ago" rather than deleting the field, keeping the shape stable for readers.
+ */
+export const releaseScan = internalMutation({
+  args: {
+    chatId: v.string(),
+    chain: v.union(v.literal("bnb"), v.literal("sol")),
+    claimedAt: v.number(),
+  },
+  handler: async (ctx, { chatId, chain, claimedAt }) => {
+    const row = await ctx.db
+      .query("telegramBotChats")
+      .withIndex("by_chat", (q) => q.eq("chatId", chatId))
+      .first();
+    if (!row) return { released: false as const };
+    const current = chain === "bnb" ? row.lastBnbScanAt : row.lastSolScanAt;
+    if (current !== claimedAt) return { released: false as const };
+    await ctx.db.patch(row._id, chain === "bnb" ? { lastBnbScanAt: 0 } : { lastSolScanAt: 0 });
+    return { released: true as const };
   },
 });
 
@@ -2912,8 +2975,26 @@ export const handleUpdate = internalAction({
       }
 
       case "bnb_scan": {
+        // A double tap must not fire two feed scans: the claim is atomic on
+        // the chat document and answers with the real remaining seconds.
+        const claimedAt = Date.now();
+        const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
+          chatId,
+          chain: "bnb",
+          now: claimedAt,
+        });
+        if (!claim.allowed) {
+          await reply(scanCooldownMessage("bnb", claim.retryInMs), mainMenu().keyboard);
+          return done("bnb_scan:cooldown");
+        }
         const view = await scanRoutes(ctx);
         if (!view) {
+          // Nothing was scanned, so nothing should be charged to the budget.
+          await ctx.runMutation(internal.telegramBot.releaseScan, {
+            chatId,
+            chain: "bnb",
+            claimedAt,
+          });
           await reply("⚠️ Live feed unreachable right now — retry in a moment.");
           return done("scan-feed-down");
         }
@@ -2930,6 +3011,17 @@ export const handleUpdate = internalAction({
       }
 
       case "sol_scan": {
+        // Same per-chat budget, claimed before any engine work begins.
+        const claimedAt = Date.now();
+        const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
+          chatId,
+          chain: "sol",
+          now: claimedAt,
+        });
+        if (!claim.allowed) {
+          await reply(scanCooldownMessage("sol", claim.retryInMs), mainMenu().keyboard);
+          return done("sol_scan:cooldown");
+        }
         // The SOL feed has its own engine body — run ONE real pass through it
         // and report its honest verdict (never a second, divergent scan path).
         const res = await ctx.runAction(internal.terminal.scanPass, { chain: "sol" });
@@ -2940,6 +3032,13 @@ export const handleUpdate = internalAction({
           );
           return done("sol_scan");
         }
+        // The pass never ran, so no scan happened: hand the budget back rather
+        // than charging the chat a cooldown for work it did not get.
+        await ctx.runMutation(internal.telegramBot.releaseScan, {
+          chatId,
+          chain: "sol",
+          claimedAt,
+        });
         const why =
           res.reason === "not-running"
             ? "the SOL scanner is stopped (/sol_on to engage)"

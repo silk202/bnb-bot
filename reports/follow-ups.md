@@ -4366,3 +4366,80 @@ and the verification section describes the drift suite.
 4. Surface the last scan stamp on `/engines` and `/status`.
 5. Docs drift in CI (compare `/help` and `TELEGRAM.md` with the specs).
 6. Bound the `/claim` batch and name partial failures.
+
+---
+
+## Round 47 — manual scans are rate-limited, and the docs are now a CI gate
+
+Round 45's follow-ups #3 (scan cooldown) and #5 (docs drift in CI) are done.
+
+### Scan cooldown (`/bnb_scan`, `/sol_scan`)
+
+- Pure rule in `src/lib/telegramBot.ts`: `SCAN_COOLDOWN_MS = 30_000`,
+  `scanCooldown(lastAt, now)` → `{ allowed, retryInMs }`, and
+  `scanCooldownMessage(chain, retryInMs)`. A missing stamp or a released one
+  (0) allows; a stamp in the future fails closed; the remainder is clamped to
+  the window (never negative).
+- Persistence: `telegramBotChats.lastBnbScanAt` / `lastSolScanAt`
+  (optional numbers, so the schema change is additive).
+- Enforcement: `claimScan` is an **internalMutation**, so Convex serialises it
+  on the chat document — two taps, or a Telegram retry delivered twice, cannot
+  both scan. It returns the real remaining time. `releaseScan` hands the slot
+  back when the claimed work never ran (feed unreachable; SOL yielded to the
+  app, a stopped scanner or an in-flight lease), guarded on `claimedAt` so a
+  late release cannot clear a newer claim.
+- The cooldown begins on an accepted claim, not on a successful scan; the
+  release path means a scan that produced nothing is not charged.
+- Both typed commands and the "Scan now" buttons go through the same switch,
+  so they share the budget.
+
+Tests: `src/lib/__tests__/telegram-scan-cooldown.test.ts` — 7 tests pinning the
+window, the exact boundary (opens at 30s, not 1ms early), the backwards clock,
+the released stamp, a disabled window, and the reply naming the real remaining
+seconds (17.4s → "18s").
+
+### Docs drift gate
+
+`scripts/check-telegram-docs.ts`, run by `bun run check:telegram-docs` and as a
+CI step in `verify`:
+
+1. the `BOT_COMMAND_SPECS (N entries)` claim in TELEGRAM.md equals the real
+   length;
+2. every menu command is documented as ``/command`` in TELEGRAM.md;
+3. every backticked `/command` on the page is answered by `parseBotCommand`;
+4. `/help` lists every menu command except a stated exemption (`/start`, which
+   the pairing card advertises);
+5. every `/command` on `/help` parses.
+
+Prose is not compared, only the command contract.
+
+### Proof the gate fails on drift
+
+- un-backticked both `/sol_scan` mentions → "…is in BOT_COMMAND_SPECS but the
+  page never documents it" (exit 1);
+- changed the count claim to 39 → "claims 39 menu entries, BOT_COMMAND_SPECS
+  has 40" (exit 1);
+- removed `/sol_scan` from `helpMessage()` → "/help does not list /sol_scan"
+  (exit 1).
+
+Restored: `telegram docs ok — 40 menu commands, all documented; 39 commands on
+/help, all parse.` (exit 0).
+
+An earlier "removed one table row" mutation stayed green because the command is
+still documented elsewhere — correctly so: the check is coverage, not layout.
+
+### Checks
+
+- `bun run typecheck` → exit 0
+- `bun test …telegram-menu.test.ts …telegram-scan-cooldown.test.ts` → 21 pass /
+  0 fail, 1183 expects
+- `bun run check:telegram-docs` → exit 0
+
+### Follow-ups still open
+
+2. Live-delivery smoke test on a throwaway bot token.
+4. Surface the last scan stamp on `/engines` and `/status`.
+6. Bound the `/claim` batch and name partial failures.
+
+Not verified here: live Telegram delivery/render and the deployed schema (the
+push's `deploy-convex` job applies both).

@@ -22,8 +22,57 @@ export interface BotChat {
   linkedAt: number;
   lastSeenAt: number;
   lastCommand?: string;
+  /** Last accepted manual scan per chain (epoch ms) — the cooldown stamp. */
+  lastBnbScanAt?: number;
+  lastSolScanAt?: number;
   silent: boolean;
   blocked: boolean;
+}
+
+/**
+ * Minimum gap between manual feed scans in one chat, per chain.
+ *
+ * `/bnb_scan` hits the live feed and `/sol_scan` runs a whole engine pass, so
+ * repeated taps must not queue up provider calls. The typed commands and the
+ * "Scan now" buttons share the same budget.
+ */
+export const SCAN_COOLDOWN_MS = 30_000;
+
+export type ScanChain = "bnb" | "sol";
+
+/**
+ * Is a manual scan allowed now? Pure, so the dispatch gate and its tests share
+ * one rule: no stamp (or a disabled window) allows, a stamp in the future fails
+ * closed, and the remainder is clamped to the window instead of going negative.
+ */
+export function scanCooldown(
+  lastScanAt: number | null | undefined,
+  now: number,
+  cooldownMs: number = SCAN_COOLDOWN_MS,
+): { allowed: boolean; retryInMs: number } {
+  // No stamp, a released claim (0) and a disabled window all allow. A stamp
+  // in the future falls through and fails closed below.
+  if (cooldownMs <= 0 || lastScanAt == null || !Number.isFinite(lastScanAt) || lastScanAt <= 0) {
+    return { allowed: true, retryInMs: 0 };
+  }
+  const elapsed = Math.max(0, now - lastScanAt);
+  if (elapsed >= cooldownMs) return { allowed: true, retryInMs: 0 };
+  return { allowed: false, retryInMs: cooldownMs - elapsed };
+}
+
+/** The reply a cooling-down scan returns — names the real wait, never a guess. */
+export function scanCooldownMessage(
+  chain: ScanChain,
+  retryInMs: number,
+  cooldownMs: number = SCAN_COOLDOWN_MS,
+): string {
+  const label = chain === "bnb" ? "BNB" : "SOL";
+  const wait = Math.max(1, Math.ceil(retryInMs / 1000));
+  const window = Math.max(1, Math.round(cooldownMs / 1000));
+  return [
+    `⏳ **${label} scan is cooling down** — try again in ${wait}s.`,
+    `One manual ${label} scan every ${window}s keeps repeated taps off the live feed.`,
+  ].join("\n");
 }
 
 /**
