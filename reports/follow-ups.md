@@ -4088,3 +4088,34 @@ picks up `*.json` ring entries, so a `--json` run in CI would not lose its log.
    BLOCKED until dev/prod function serving returns (dev: free-plan disable;
    prod: bare `[Request ID: …] Server Error`). Nothing in the repo fixes it and
    nothing here pretends otherwise.
+
+### CI evidence (measured after pushing 5330e6b)
+
+Run **45611488893** (`5330e6b`, push to `main`), job `task-guard` (139196633606):
+
+```
+task guard — 4 migration + 3 deployment checks — 2026-11-25T12:13:40Z
+commit: 5330e6be9dbe9526d7cf93b66cd3c24a87ebc9a6 (main)
+history: reports/task-guard/20261125T121340Z.txt (ring: reports/task-guard, last 20 runs, <= 262144 B)
+BLOCKED 4c. dev function serving disabled by the provider: … free plan limits …
+BLOCKED 4c. prod provider returned an infrastructure error after 2 attempt(s): [Request ID: 07bc008304f89194] Server Error
+PASS    6. protected deployment healthy on the fleet build 20261124T221653Z-e69b633e242e; reference unchanged
+RESULT no failures; 5 check(s) blocked by the provider
+guard exit=2
+```
+
+`verify` and `deploy-convex` are success; the Solana job was still running when
+this was written (it rebuilds the Anchor program, ~45 minutes) and no change in
+this round touches it. Five BLOCKED rather than the three a local
+`SKIP_LOGIN=1` run shows is still exactly the 4d pair: CI signs in for real and
+both deployments answer with the provider's plan ceiling.
+
+Two things the log proves about this round's changes, on a runner rather than a
+developer machine:
+
+- the ring header carries the byte budget, and the run wrote
+  `reports/task-guard/20261125T121340Z.txt` with no trim warning — one run is
+  far under 256 KiB, so the budget is a backstop and not a change in behaviour;
+- the ledger backfilled silently — the two stamps committed in
+  `reports/baseline-history.md` were already there, so nothing was appended and
+  no duplicate row was created in the runner's checkout.
