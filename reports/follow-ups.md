@@ -3914,3 +3914,41 @@ reads as "not committed", not as "the file is broken".
   deployments: `prod: tries=2`, `dev: tries=1`.
 - Two full live guard runs: exit 2 both times, 3 BLOCKED (down from 5), the
   message text above, `commit: local` in the header, ring entry written.
+
+### CI evidence (measured after pushing 99d4a5d)
+
+Run **45606269044** (`99d4a5d`, push) — all four jobs **success**:
+
+```
+build target: https://flexible-frog-776.convex.cloud (overlay gate origin https://flexible-frog-776.convex.site), agrees with CONVEX_PROD_SLUG=flexible-frog-776
+overlay artifacts stamped https://flexible-frog-776.convex.site (files + zips)
+guard keys: dev -> pastel-pelican-634 …, prod -> flexible-frog-776 …
+commit: 99d4a5d3113fe2d88a2f74e6ea53c4cf778c994b (main)
+history: reports/task-guard/20261125T114008Z.txt (ring: reports/task-guard, last 20 runs)
+BLOCKED 4c. prod provider returned an infrastructure error after 2 attempt(s): [Request ID: 9662e86ec657e71e] Server Error
+RESULT no failures; 5 check(s) blocked by the provider   (guard exit=2)
+```
+
+Five BLOCKED in CI (not the three a local `SKIP_LOGIN=1` run shows) because CI
+also runs 4d, which signs in for real and is capped by the same plan ceiling on
+both deployments. Round 41's cancellation is gone: this run reached its Solana
+job and finished.
+
+Run **45607597089** (`workflow_dispatch`, `guard_only=true`):
+
+| Job | Result |
+|---|---|
+| verify | **skipped** |
+| Solana program | **skipped** |
+| deploy-convex | **skipped** (push-only) |
+| Task guard | **success**, exit 2 path, ring entry written |
+
+That is the `always()` + `needs.verify.result == 'skipped'` combination behaving
+as written: the guard ran with its dependency skipped, and a red verify would
+still have blocked it.
+
+**Not yet observed:** the 06:17 UTC cron itself — its first fire is tonight, and
+its effect on a concurrent push (the separate concurrency group) can only be
+watched then. The configuration parses and the same code path was proved by the
+`guard_only` dispatch, which skips verify and Solana in exactly the way the cron
+does.
