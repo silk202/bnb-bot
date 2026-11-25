@@ -4684,3 +4684,21 @@ call on the same disabled deployment.
    flips back, that deployment has to be retired/paused (owner's call — it is
    protected) or the bot token rotated; a manual repoint cannot outrun a
    10-minute cron.
+
+### Confirmed at 15:30 UTC: the protected deployment reclaims it
+
+The repoint held at 15:19 UTC (`url flexible-frog-776`, no error, pending 0). At
+the 15:30 self-heal tick `getWebhookInfo` showed the webhook back at
+`https://shiny-bulldog-311.convex.site/api/telegram/webhook` with `pending 1` and
+`Wrong response from the webhook: 401 Unauthorized` — a real update arrived in
+between and got the old 401. A manual repoint cannot hold while that deployment's
+cron keeps re-registering itself (every 10 minutes, and its pre-round-49 code
+always thought the URL was wrong). Repointing again would be undone at 15:40.
+
+Durable fixes are owner decisions on the protected deployment: pause/retire
+`shiny-bulldog-311`, or rotate the bot token so its stored token stops working —
+after which production's fixed self-heal owns the webhook.
+
+Production code is current: `deploy-convex` succeeded on 66cce86 (CI
+45644253992), so `/routes` and the secret-bearing registration are deployed
+there. Its functions stay disabled by the free-plan limit until that is resolved.
