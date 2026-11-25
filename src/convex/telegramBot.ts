@@ -213,9 +213,11 @@ const BOT_COMMAND_SPECS: Array<{ command: string; description: string }> = [
   { command: "bnb_off", description: "Stop the BNB scanner engine" },
   { command: "bnb_paper", description: "Switch BNB to paper mode" },
   { command: "bnb_live", description: "Switch BNB to live mode" },
+  { command: "bnb_scan", description: "Run a live BNB feed scan now" },
   { command: "sol", description: "SOL FlashBolt dashboard" },
   { command: "sol_on", description: "Start the SOL scanner + sniper" },
   { command: "sol_off", description: "Stop the SOL scanner + sniper" },
+  { command: "sol_scan", description: "Refresh the SOL feed with one live pass" },
   { command: "routes", description: "Top live arbitrage routes" },
   { command: "execs", description: "Recent executions (all | live | sim)" },
   { command: "pnl", description: "PnL summary (all | live | sim)" },
@@ -249,7 +251,7 @@ const BOT_COMMAND_SPECS: Array<{ command: string; description: string }> = [
  * waiting for the weekly refresh — the menu the operator sees always matches
  * the commands that answer.
  */
-const BOT_COMMAND_VERSION = 2;
+const BOT_COMMAND_VERSION = 3;
 
 /** Push the command menu to Telegram (idempotent; best-effort). */
 async function pushCommandMenu(token: string): Promise<boolean> {

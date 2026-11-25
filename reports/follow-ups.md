@@ -4231,3 +4231,82 @@ is the point of checking it in: the ring, ledger and JSON assertions now run on
 every push instead of only where someone remembered a /tmp file. The verdict
 itself is unchanged from round 43 (5 BLOCKED on a real sign-in, exit 2), and
 the Solana program job was **success** in the same run, so the whole push is green.
+
+---
+
+## Round 45 — the scan commands join the menu, and the bot gets a written contract
+
+Two working commands were still missing from Telegram's native slash menu, and
+the command-by-command behaviour only existed in a chat answer. This round
+registers the commands, writes the contract down, and records what is still
+worth doing.
+
+### 1. `/bnb_scan` and `/sol_scan` are menu entries
+
+Both commands already parsed, dispatched and had buttons ("Scan now" on the
+BNB/SOL boards), but neither was in `BOT_COMMAND_SPECS`, so Telegram's native
+menu did not offer them. They are now registered next to their chain's other
+commands:
+
+```
+{ command: "bnb_scan", description: "Run a live BNB feed scan now" },
+{ command: "sol_scan", description: "Refresh the SOL feed with one live pass" },
+```
+
+`BOT_COMMAND_VERSION` moved **2 → 3**, which is what makes the existing
+every-10-minute self-heal re-push the menu instead of waiting for the weekly
+refresh. The specs are now **40** entries (38 before).
+
+This is a code-side registration only: the new list reaches Telegram when the
+deployment serving the webhook runs this commit. Until that happens the menu
+still shows the old 38 (the commands themselves already answered).
+
+### 2. `TELEGRAM.md` — what every command displays
+
+The full reference is now in the repo: pairing/unlinked gate, all 40 menu
+commands with what each replies, the scan commands' real work and honest
+failure replies, filters for `/execs` and `/pnl`, every callback form
+(`cmd:`, `menu:`, `help:`, `pair:`, `set:`), the message-lifetime rules and
+which tests cover the contract. `README.md` links to it from the Telegram
+section. It is written from the builders and the dispatch switch, not from a
+live session.
+
+### 3. Follow-ups brainstormed (none started)
+
+Ordered by what would have caught a real failure first:
+
+1. **A menu-spec drift test.** The parity test proves every `/help` command
+   parses and every button resolves, but nothing compares `BOT_COMMAND_SPECS`
+   to the handlers: a command can be registered and unhandled, or handled and
+   unregistered (this round's bug), with every test green. Smallest version:
+   move the specs to the pure lib, then assert every entry parses to a kind in
+   `HANDLED_COMMAND_KINDS`, no duplicate names, and Telegram's constraints
+   (`^[a-z0-9_]{1,32}$`, description 3–256 chars) before a push is attempted.
+2. **A live-delivery smoke test on a throwaway bot token.** The builders are
+   tested; Telegram accepting the markup, entities and 64-byte callback data is
+   not. One disposable bot + one chat would prove send/render without touching
+   the operator's bot.
+3. **A cooldown on the two scan commands.** `/bnb_scan` and `/sol_scan` do real
+   feed/engine work inside the webhook; repeated taps can stack passes. A short
+   per-chat cooldown (or answering "a pass is already in flight" from the
+   engine lease) makes the cost bounded and the reply honest.
+4. **Show the last scan result outside the scan reply.** `/bnb_scan` stamps
+   freshness and opportunity count; `/engines` and `/status` could surface that
+   stamp so a missed reply does not hide whether the scan ran.
+5. **Docs drift in CI.** A grep that compares the `/help` board and the
+   `TELEGRAM.md` command tables against the specs would stop a command landing
+   undocumented (this round is the manual version of that check).
+6. **Bound the `/claim` batch.** It claims every plan in a loop and catches
+   per-plan errors into one reply; a cap plus named partial failures would keep
+   one bad plan from making the result ambiguous.
+
+### Checks run
+
+- `bun test src/lib/__tests__/telegram-menu.test.ts` — **10 pass / 0 fail**,
+  961 expects.
+- `bun run typecheck` — exit 0 (`tsc -b --noEmit`).
+- Spec count by inspection — **40** entries, both scan commands present
+  (lines 216 and 220), version 3 (line 254).
+- **Not checked:** live Telegram delivery/rendering, and the native-menu push
+  (needs this code deployed to the serving deployment; no deploy was made in
+  this round).

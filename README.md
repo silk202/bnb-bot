@@ -202,7 +202,8 @@ pass and how long ago). Trade/session alerts go to the TASignal channel
 (`TELEGRAM_CHAT_ID`); commands, fanout and digests go only to linked operator
 chats. The webhook self-heals every 10 minutes (and on every dialog open) —
 `getWebhookInfo` must show the serving deployment's own
-`.convex.site/api/telegram/webhook` URL.
+`.convex.site/api/telegram/webhook` URL. Every command, inline button and reply
+is documented in [`TELEGRAM.md`](TELEGRAM.md).
 
 ## Responsiveness
 
