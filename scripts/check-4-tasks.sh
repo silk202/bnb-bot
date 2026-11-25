@@ -299,6 +299,12 @@ def as_int(name, default=0):
 
 checks = []
 notes_at_top = []
+# A note is printed with the id of the check it belongs to, and that id is the
+# authority — not "whichever check was recorded last". Check 6 copies superseded
+# stamps into the ledger *before* it prints its own verdict, so an
+# order-only rule filed that note under check 5 (or 5b) and left check 6 bare.
+# A note whose check has not been recorded yet waits here for it.
+pending = {}
 with open(env("GUARD_CHECKS_FILE") or "/dev/null", encoding="utf-8", errors="replace") as handle:
     for raw in handle:
         line = raw.rstrip("\n")
@@ -307,14 +313,29 @@ with open(env("GUARD_CHECKS_FILE") or "/dev/null", encoding="utf-8", errors="rep
         status, _, rest = line.partition("\t")
         check, _, message = rest.partition("\t")
         if status == "note":
-            # A note belongs to the check it follows; one that precedes every
-            # check is kept where it cannot be mistaken for a verdict.
-            if checks:
+            # The usual case: a note printed right after its verdict.
+            if checks and checks[-1]["id"] == check:
+                checks[-1]["details"].append(message)
+            elif check and check != "-":
+                # Before its check reported — hold it for that check.
+                pending.setdefault(check, []).append(message)
+            elif checks:
                 checks[-1]["details"].append(message)
             else:
+                # Precedes every check: kept where it cannot be mistaken for one.
                 notes_at_top.append(message)
             continue
-        checks.append({"id": check or "-", "status": status, "message": message, "details": []})
+        checks.append({
+            "id": check or "-",
+            "status": status,
+            "message": message,
+            "details": pending.pop(check or "-", []),
+        })
+
+# A note held for a check that never reported is not dropped: it is surfaced at
+# the top, labelled with the id it was waiting for.
+for held_id, held in pending.items():
+    notes_at_top.extend(f"{held_id}: {note}" for note in held)
 
 counts = {"pass": 0, "fail": 0, "blocked": 0, "skipped": 0}
 for entry in checks:

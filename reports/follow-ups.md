@@ -4119,3 +4119,89 @@ developer machine:
 - the ledger backfilled silently — the two stamps committed in
   `reports/baseline-history.md` were already there, so nothing was appended and
   no duplicate row was created in the runner's checkout.
+
+---
+
+## Round 44 — the guard's proof lives in the repo, and a JSON note filed under the wrong check
+
+Round 43's remaining list had one item left (the provider ceiling) and it is
+owner-only. So this round takes the two gaps the guard itself still had: its
+proof was not in the repo, and one part of its JSON verdict was wrong.
+
+### 1. The proof was in `/tmp`, so it was not proof (`bun run check:guard`)
+
+Round 43 found two silent-loss bugs with a harness at `/tmp/guard-harness.sh`.
+That file is gone with the machine, so nothing re-runs those assertions and
+nothing fails when the code behind them changes. The harness is now
+**`scripts/test-task-guard.sh`**, run as **`bun run check:guard`** and as a step
+in the `task-guard` CI job *before* the live run spends deployment calls.
+
+It is network-free and extracts each function from `scripts/check-4-tasks.sh`
+itself (`awk` from `name() {` to the first column-0 `}`), so it cannot pass
+against a stale copy: **38 assertions**, covering
+
+- the ring's count limit, its byte budget, `.txt` + `.json` entries in one ring,
+  and the "never trim the only verdict" rule;
+- the ledger's cap, its backfill, its idempotence, its self-healing after
+  deletion, and the first-cell dedupe that once wrote 6 of 12 rows;
+- the `--json` document: schema, counts (including `skipped`, which once read 0
+  because the status was `skip`), the caller's result/exit pair, the per-verdict
+  ids and the note placement below.
+
+A self-test proves nothing unless it fails on the bug it names, so both
+historical defects were reintroduced one at a time and measured:
+
+| Reintroduced | Self-test result |
+|---|---|
+| ledger dedupe made a plain substring match again | **7 FAIL** — backfill count, per-stamp uniqueness, "no stamp is lost", second advance, deleted-ledger rebuild, rebuild count |
+| notes attributed by order only (pre-fix) | **3 FAIL** — "a note before its check's verdict waits for that check", "and is not filed under the previous check", "a note for a check that never reported is surfaced, not dropped" |
+
+Restored: **all 38 assertions pass**.
+
+### 2. A note printed before its check was filed under the previous one
+
+`emit_json` attached every `note` record to `checks[-1]` — whichever check
+happened to be recorded last. That is right for the common case (a note is
+printed right after its verdict) and wrong for the one note the guard prints
+*before* a verdict: check 6's `ledger_backfill` reports what it copied before
+check 6 reports at all. Measured on a fixture with that exact ordering, the
+pre-fix JSON put
+
+```
+baseline ledger: copied 10 superseded stamp(s) …
+```
+
+in the `details` of **4c** (or 5b, whichever came last) and left check 6 with
+`details: []` — a consumer reading "which check has a ledger note" was answered
+with the wrong check, silently.
+
+Notes now carry the id they were recorded with: a note attaches to the check
+whose id it names, waits in a `pending` map if that check has not reported yet,
+and a note whose check never appears is surfaced in the document's top-level
+`notes` labelled with its id instead of being dropped. The fixture asserts all
+three placements.
+
+Text mode is untouched by both changes — the edited code is inside the
+`python3` block, and the record file format is unchanged.
+
+### Checks run before pushing
+
+- `bash -n scripts/check-4-tasks.sh` and `bash -n scripts/test-task-guard.sh` — clean.
+- `bun run check:guard` — **all 38 assertions passed**, exit 0.
+- Mutation runs above (each defect reintroduced, named failures, restored green).
+- **Live text run** (`SKIP_LOGIN=1`, `/tmp` report + ring): exit **2**, 2736 B,
+  **3 BLOCKED** (dev names its plan ceiling, prod answers a bare provider error
+  after 2 attempts), check 6 `reference unchanged`, 5 and 7a/7b/7c PASS — the
+  same verdicts, in the same shape, as round 43.
+- **Live JSON run** through `bun run check:tasks --json`: exit **2**, **4518 B**
+  of valid JSON, `counts 14 pass / 0 fail / 3 blocked / 2 skipped / 19 checks`,
+  ids `1,2,2,3,4a,4b,4c,4d,4a,4b,4c,4d,5,5b,6,7a,7b,7b,7c`, ring entry
+  `20261125T123747Z.json`. On the real ledger the backfill is silent
+  (idempotent), so this run exercises the fix through the fixture, not through a
+  fake note.
+
+### Remaining follow-ups
+
+1. **Provider ceiling** (round 41 #1) — unchanged and owner-only: 3 checks stay
+   BLOCKED until dev/prod function serving returns (dev: free-plan disable;
+   prod: bare `[Request ID: …] Server Error`). Nothing in the repo fixes it.

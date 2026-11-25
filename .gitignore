@@ -124,6 +124,9 @@ scripts/*.sh
 !scripts/package-source.sh
 !scripts/report-drill-status.sh
 !scripts/check-4-tasks.sh
+# The guard's network-free self-test: the CI task-guard job runs it before the
+# live run, so it has to exist in a fresh clone.
+!scripts/test-task-guard.sh
 !scripts/solana-program-preflight.sh
 scripts/*.ps1
 !scripts/setup.ps1

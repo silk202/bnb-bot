@@ -497,6 +497,14 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # The guard's ring, baseline ledger and --json verdict are shell + python
+      # only, so they are proved here before the live run spends the deployment
+      # calls. Every regression this catches was silent (half the ledger rows
+      # missing, skipped checks counted as zero), which is why it runs on the
+      # runner and not only on a developer machine.
+      - name: Task guard self-test (network-free)
+        run: bun run check:guard
+
       - name: Task guard (4 migration + 3 deployment checks)
         id: guard
         env:

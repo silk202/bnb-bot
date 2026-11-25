@@ -41,6 +41,7 @@
     "drill:report": "bun scripts/drill-report.ts",
     "check:drill": "bun scripts/check-drill-gate.ts",
     "check:tasks": "bash scripts/check-4-tasks.sh",
+    "check:guard": "bash scripts/test-task-guard.sh",
     "audit:wallet": "bun scripts/wallet-audit.mjs"
   },
   "dependencies": {
