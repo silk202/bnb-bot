@@ -46,6 +46,7 @@ import {
   CHANNEL_MESSAGE_TTL_MS,
   selectPurgeable,
   type BotMessageSource,
+  BOT_COMMAND_SPECS,
   startMessage,
   helpMessage,
   unlinkedMessage,
@@ -197,54 +198,10 @@ function envTokenPresent(): boolean {
 }
 
 /**
- * The bot's Telegram command menu — pushed via setMyCommands so every slash
- * command shows up in Telegram's built-in menu WITH its description. Pairs
- * with the /help board in the presentation layer (same commands, same scope).
- */
-const BOT_COMMAND_SPECS: Array<{ command: string; description: string }> = [
-  { command: "start", description: "Pair this chat and boot the console" },
-  { command: "menu", description: "Main menu with every control" },
-  { command: "dashboard", description: "Live dashboard: sessions, AI score, fleet" },
-  { command: "status", description: "Engines, mode, PnL, webhook status" },
-  { command: "engine", description: "Engine board — BNB + SOL start/stop" },
-  { command: "engines", description: "Engine board (alias of /engine)" },
-  { command: "bnb", description: "BNB FlashBolt dashboard" },
-  { command: "bnb_on", description: "Start the BNB scanner engine" },
-  { command: "bnb_off", description: "Stop the BNB scanner engine" },
-  { command: "bnb_paper", description: "Switch BNB to paper mode" },
-  { command: "bnb_live", description: "Switch BNB to live mode" },
-  { command: "bnb_scan", description: "Run a live BNB feed scan now" },
-  { command: "sol", description: "SOL FlashBolt dashboard" },
-  { command: "sol_on", description: "Start the SOL scanner + sniper" },
-  { command: "sol_off", description: "Stop the SOL scanner + sniper" },
-  { command: "sol_scan", description: "Refresh the SOL feed with one live pass" },
-  { command: "routes", description: "Top live arbitrage routes" },
-  { command: "execs", description: "Recent executions (all | live | sim)" },
-  { command: "pnl", description: "PnL summary (all | live | sim)" },
-  { command: "trade", description: "Trade dashboard overview" },
-  { command: "balance", description: "Asset balances with live prices" },
-  { command: "amount", description: "Position sizing parameters" },
-  { command: "settings", description: "Strategy & engine parameters" },
-  { command: "deploy", description: "Contract deployment status" },
-  { command: "prices", description: "Live market prices" },
-  { command: "markets", description: "Top market pairs" },
-  { command: "orders", description: "Open limit orders" },
-  { command: "earn", description: "Earn plans" },
-  { command: "claim", description: "Claim flexible-earn interest" },
-  { command: "withdraw", description: "Cash balances + withdrawals" },
-  { command: "txs", description: "Recent transactions" },
-  { command: "alerts", description: "Alert, sound & auto-purge settings" },
-  { command: "digest", description: "Scheduled dashboard digest on/off" },
-  { command: "sound", description: "Notification sound on/off" },
-  { command: "silence", description: "Mute this chat" },
-  { command: "purge", description: "Delete the bot's messages in this chat" },
-  { command: "unpair", description: "Unlink this chat" },
-  { command: "stop", description: "Stop BOTH engines" },
-  { command: "panic", description: "Emergency stop + force paper mode" },
-  { command: "help", description: "Full command list" },
-];
-
-/**
+ * The menu data (`BOT_COMMAND_SPECS`) lives in the pure layer so the parity
+ * test can compare it with the parser without importing this module; this
+ * file owns only the push and this version gate.
+ *
  * Bumped whenever BOT_COMMAND_SPECS changes. The self-heal sweep re-pushes the
  * menu when the stored version is older, so a new command shows up in
  * Telegram's native menu within one ten-minute self-heal pass instead of

@@ -13,6 +13,7 @@ import {
   alertsMessage,
   amountMessage,
   balanceMessage,
+  BOT_COMMAND_SPECS,
   BOT_MESSAGE_TTL_MS,
   bnbMessage,
   bootMessage,
@@ -409,5 +410,59 @@ describe("alerts board — auto-purge is visible and toggleable", () => {
     );
     expect(never.text).toContain("Last sweep: not reported yet");
     expect(never.text).not.toContain("0 deleted");
+  });
+});
+
+/**
+ * The setMyCommands menu and the dispatcher must not drift.
+ *
+ * The suites above prove /help and the inline buttons are answerable; this one
+ * proves the NATIVE menu is. It catches both directions: an entry Telegram
+ * would reject (or that parses to nothing), and a handled command missing from
+ * the menu — the /bnb_scan and /sol_scan bug.
+ */
+describe("the setMyCommands menu matches the handlers", () => {
+  // Handled but deliberately not advertised: deep-link/pairing plumbing and
+  // the unknown fallback. Every other handled kind must be in the menu.
+  const UNLISTED = new Set(["start_payload", "pair_start", "pair_code", "unknown"]);
+
+  test("every entry is a valid Telegram command the parser answers", () => {
+    for (const spec of BOT_COMMAND_SPECS) {
+      // Telegram's BotCommand constraints: 1-32 chars from [a-z0-9_], and a
+      // description of 3-256 chars.
+      expect({ command: spec.command, valid: /^[a-z0-9_]{1,32}$/.test(spec.command) }).toEqual({
+        command: spec.command,
+        valid: true,
+      });
+      expect(spec.description.length).toBeGreaterThanOrEqual(3);
+      expect(spec.description.length).toBeLessThanOrEqual(256);
+      const parsed = parseBotCommand(`/${spec.command}`);
+      expect({ command: spec.command, kind: parsed.kind }).toEqual({
+        command: spec.command,
+        kind: expect.stringMatching(new RegExp(`^(${HANDLED_COMMAND_KINDS.join("|")})$`)),
+      });
+      expect(parsed.kind).not.toBe("unknown");
+    }
+  });
+
+  test("no command is registered twice", () => {
+    const names = BOT_COMMAND_SPECS.map((s) => s.command);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("every handled command is advertised, except the documented unlisted kinds", () => {
+    const listed = new Set(
+      BOT_COMMAND_SPECS.map((s) => parseBotCommand(`/${s.command}`).kind),
+    );
+    const missing = HANDLED_COMMAND_KINDS.filter(
+      (kind) => !listed.has(kind) && !UNLISTED.has(kind),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  test("the two scan commands are advertised", () => {
+    const names = BOT_COMMAND_SPECS.map((s) => s.command);
+    expect(names).toContain("bnb_scan");
+    expect(names).toContain("sol_scan");
   });
 });

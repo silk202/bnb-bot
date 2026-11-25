@@ -7,11 +7,10 @@ menu command displays and what each inline button returns.
 Implementation split, so a change lands in the right place:
 
 - `src/lib/telegramBot.ts` — pure builders and parsers: every message text,
-  inline keyboard, `parseBotCommand`, `resolveCallbackData`,
-  `HANDLED_COMMAND_KINDS`.
-- `src/convex/telegramBot.ts` — the webhook, the `BOT_COMMAND_SPECS` registry
-  pushed through `setMyCommands`, pairing, purge, and the exhaustive dispatch
-  switch.
+  inline keyboard, `BOT_COMMAND_SPECS` (the menu data the parity test reads),
+  `parseBotCommand`, `resolveCallbackData`, `HANDLED_COMMAND_KINDS`.
+- `src/convex/telegramBot.ts` — the webhook, the `setMyCommands` push and its
+  version gate, pairing, purge, and the exhaustive dispatch switch.
 
 ## Access and pairing
 
@@ -146,8 +145,10 @@ row-level abandonment is surfaced on the board instead of being hidden.
 ## Verification
 
 - `bun test src/lib/__tests__/telegram-menu.test.ts` — every emitted callback
-  resolves to a handled kind, every `/help` command parses, and unknown payloads
-  still answer.
+  resolves to a handled kind, every `/help` command parses, unknown payloads
+  still answer, and the `setMyCommands` menu cannot drift from the dispatcher:
+  every entry is a valid, parseable Telegram command, no name repeats, and every
+  handled kind except the documented unlisted ones is advertised.
 - `bun run typecheck` — the dispatch switch is exhaustive over `BotCommand`, so a
   new kind without a case fails the build.
 

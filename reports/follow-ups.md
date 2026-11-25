@@ -4310,3 +4310,59 @@ Ordered by what would have caught a real failure first:
 - **Not checked:** live Telegram delivery/rendering, and the native-menu push
   (needs this code deployed to the serving deployment; no deploy was made in
   this round).
+
+---
+
+## Round 46 — the menu can no longer drift from the dispatcher
+
+Round 45's follow-up #1 is done: the `setMyCommands` menu is now tested against
+the same parser and handled-kind list the webhook uses.
+
+### What changed
+
+`BOT_COMMAND_SPECS` moved from `src/convex/telegramBot.ts` to the pure layer
+(`src/lib/telegramBot.ts`) and is exported, so the parity test can read it
+without importing the Convex module. The deployment file keeps only the push
+and its version gate (`BOT_COMMAND_VERSION`), and imports the array. Behaviour
+is unchanged: same 40 entries, same order, same descriptions.
+
+New suite in `src/lib/__tests__/telegram-menu.test.ts`, "the setMyCommands menu
+matches the handlers":
+
+1. **Every entry is a valid Telegram command the parser answers.** Name matches
+   Telegram's `BotCommand` constraint (`^[a-z0-9_]{1,32}$`), description is
+   3–256 chars, `parseBotCommand("/<name>")` resolves to a kind in
+   `HANDLED_COMMAND_KINDS`, and never to `unknown`.
+2. **No command is registered twice** (Telegram rejects duplicates on push).
+3. **Every handled kind is advertised**, except the four deliberately unlisted
+   plumbing kinds (`start_payload`, `pair_start`, `pair_code`, `unknown`).
+   This is the direction that failed in round 45: a command that answers but is
+   missing from the native menu.
+4. **Both scan commands are present** — the explicit regression pin.
+
+### Proof the test catches the bug it names
+
+Reintroduced round 45's exact defect by deleting the `bnb_scan` spec line:
+
+```
+(fail) every handled command is advertised, except the documented unlisted kinds
+(fail) the two scan commands are advertised
+ 12 pass
+ 2 fail
+DRIFT_TEST_EXIT=1
+```
+
+Both directions failed, the "every handled command" failure printed the
+received 39-name list so the missing command is visible. Restored:
+**14 pass / 0 fail, 1165 expects, exit 0**.
+
+`TELEGRAM.md` updated: the implementation split now names the pure-layer specs,
+and the verification section describes the drift suite.
+
+### Follow-ups still open (from round 45)
+
+2. Live-delivery smoke test on a throwaway bot token.
+3. A cooldown on `/bnb_scan` and `/sol_scan`.
+4. Surface the last scan stamp on `/engines` and `/status`.
+5. Docs drift in CI (compare `/help` and `TELEGRAM.md` with the specs).
+6. Bound the `/claim` batch and name partial failures.
