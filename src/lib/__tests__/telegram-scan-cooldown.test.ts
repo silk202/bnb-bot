@@ -8,7 +8,15 @@
  * never blocks. The reply must name both the wait and the window.
  */
 import { describe, expect, test } from "bun:test";
-import { SCAN_COOLDOWN_MS, scanCooldown, scanCooldownMessage } from "../telegramBot";
+import {
+  SCAN_COOLDOWN_MS,
+  cooldownStateLabel,
+  enginesMessage,
+  feedCooldownMessage,
+  scanCooldown,
+  scanCooldownMessage,
+  type EngineStamp,
+} from "../telegramBot";
 
 describe("manual scan cooldown", () => {
   test("the window is thirty seconds", () => {
@@ -55,5 +63,54 @@ describe("manual scan cooldown", () => {
     expect(sol).toContain("SOL scan is cooling down");
     expect(sol).toContain("try again in 18s");
     expect(sol).toContain("every 30s");
+  });
+});
+
+describe("cooldown on the boards", () => {
+  const NOW = 1_000_000;
+  const stamp = (at: number | null, source: "client" | "server" | null): EngineStamp => ({
+    at,
+    source,
+  });
+  const stamps = {
+    bnbScan: stamp(NOW - 30_000, "server"),
+    solScan: stamp(NOW - 90_000, "client"),
+    bnbSniper: stamp(null, null),
+    solSniper: stamp(NOW - 3_600_000, "server"),
+  };
+
+  test("the engines board shows each scanner's manual-scan readiness", () => {
+    const m = enginesMessage({ bnb: true, sol: true }, stamps, NOW, {
+      bnb: { allowed: false, retryInMs: 18_400 },
+      sol: { allowed: true, retryInMs: 0 },
+    });
+    expect(m.text).toContain(
+      "BNB scanner: 🟢 ON · last pass 30s ago (engine) · manual scan in 19s",
+    );
+    expect(m.text).toContain(
+      "SOL scanner: 🟢 ON · last pass 2m ago (app) · manual scan ready",
+    );
+    expect(m.text).toContain("share a 30s budget per chat");
+    // Snipers are not manual-scan engines and carry no cooldown text.
+    expect(m.text).toContain("SOL sniper: 🟢 ON · last pass 1h ago (engine)\n");
+  });
+
+  test("without a cooldown the board reads exactly as before", () => {
+    const m = enginesMessage({ bnb: true, sol: true }, stamps, NOW);
+    expect(m.text).not.toContain("manual scan");
+    expect(m.text).not.toContain("budget per chat");
+  });
+
+  test("one label phrasing for every board", () => {
+    expect(cooldownStateLabel({ allowed: true, retryInMs: 0 })).toBe("ready");
+    expect(cooldownStateLabel({ allowed: false, retryInMs: 1 })).toBe("in 1s");
+    expect(cooldownStateLabel({ allowed: false, retryInMs: 18_400 })).toBe("in 19s");
+  });
+
+  test("/routes refuses on the shared feed budget and says so", () => {
+    const msg = feedCooldownMessage("bnb", 12_000);
+    expect(msg).toContain("BNB live feed is cooling down");
+    expect(msg).toContain("try again in 12s");
+    expect(msg).toContain("shared with /bnb_scan");
   });
 });

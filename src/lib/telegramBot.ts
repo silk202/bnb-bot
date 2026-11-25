@@ -40,6 +40,12 @@ export const SCAN_COOLDOWN_MS = 30_000;
 
 export type ScanChain = "bnb" | "sol";
 
+/** The answer both the claim mutation and the boards render. */
+export interface ScanCooldownState {
+  allowed: boolean;
+  retryInMs: number;
+}
+
 /**
  * Is a manual scan allowed now? Pure, so the dispatch gate and its tests share
  * one rule: no stamp (or a disabled window) allows, a stamp in the future fails
@@ -49,7 +55,7 @@ export function scanCooldown(
   lastScanAt: number | null | undefined,
   now: number,
   cooldownMs: number = SCAN_COOLDOWN_MS,
-): { allowed: boolean; retryInMs: number } {
+): ScanCooldownState {
   // No stamp, a released claim (0) and a disabled window all allow. A stamp
   // in the future falls through and fails closed below.
   if (cooldownMs <= 0 || lastScanAt == null || !Number.isFinite(lastScanAt) || lastScanAt <= 0) {
@@ -72,6 +78,30 @@ export function scanCooldownMessage(
   return [
     `⏳ **${label} scan is cooling down** — try again in ${wait}s.`,
     `One manual ${label} scan every ${window}s keeps repeated taps off the live feed.`,
+  ].join("\n");
+}
+
+/** "ready" or "in 18s" — one phrasing for every board that shows the budget. */
+export function cooldownStateLabel(state: ScanCooldownState): string {
+  return state.allowed ? "ready" : `in ${Math.max(1, Math.ceil(state.retryInMs / 1000))}s`;
+}
+
+/**
+ * `/routes` reads the same live feed `/bnb_scan` does, so it spends the same
+ * per-chat budget. Its refusal names the feed and the shared budget, rather
+ * than looking like an unrelated scan cooldown.
+ */
+export function feedCooldownMessage(
+  chain: ScanChain,
+  retryInMs: number,
+  cooldownMs: number = SCAN_COOLDOWN_MS,
+): string {
+  const label = chain === "bnb" ? "BNB" : "SOL";
+  const wait = Math.max(1, Math.ceil(retryInMs / 1000));
+  const window = Math.max(1, Math.round(cooldownMs / 1000));
+  return [
+    `⏳ **${label} live feed is cooling down** — try again in ${wait}s.`,
+    `One manual ${label} feed pass every ${window}s (shared with /${chain}_scan) keeps repeated taps off the provider.`,
   ].join("\n");
 }
 
@@ -1280,26 +1310,40 @@ export function enginesMessage(
     solSniper: EngineStamp;
   },
   now: number,
+  // This chat's manual-scan budget. Shown on the two scanner lines so the
+  // "Scan now" buttons never look broken while the feed is cooling down.
+  cooldown?: { bnb: ScanCooldownState; sol: ScanCooldownState },
 ): { text: string; keyboard: TgKeyboard } {
-  const line = (name: string, on: boolean, st: EngineStamp): string => {
+  const line = (
+    name: string,
+    on: boolean,
+    st: EngineStamp,
+    cd?: ScanCooldownState,
+  ): string => {
     const sw = on ? "🟢 ON" : "🔴 OFF";
-    if (!st.at) return `• ${name}: ${sw} · starting…`;
+    const manual = cd ? ` · manual scan ${cooldownStateLabel(cd)}` : "";
+    if (!st.at) return `• ${name}: ${sw} · starting…${manual}`;
     const drv = st.source === "server" ? "engine" : st.source === "client" ? "app" : "—";
-    return `• ${name}: ${sw} · last pass ${fmtAgo(st.at, now)} (${drv})`;
+    return `• ${name}: ${sw} · last pass ${fmtAgo(st.at, now)} (${drv})${manual}`;
   };
   return {
     text: [
       "⚙️ **FlashBolt engines — 24/7 server autonomy**",
       "",
       "These loops run on the Convex servers with the app closed:",
-      line("BNB scanner", running.bnb, stamps.bnbScan),
-      line("SOL scanner", running.sol, stamps.solScan),
+      line("BNB scanner", running.bnb, stamps.bnbScan, cooldown?.bnb),
+      line("SOL scanner", running.sol, stamps.solScan, cooldown?.sol),
       line("BNB sniper", running.bnb, stamps.bnbSniper),
       line("SOL sniper", running.sol, stamps.solSniper),
       "",
       "Per-minute heartbeat revives any stopped loop; the 10-minute",
       "self-heal keeps the webhook registered. Switches are per-chain:",
       "each engine stands down only when its own chain is stopped.",
+      ...(cooldown
+        ? [
+            `Manual scans (/bnb_scan, /sol_scan) and /routes share a ${Math.round(SCAN_COOLDOWN_MS / 1000)}s budget per chat.`,
+          ]
+        : []),
     ].join("\n"),
     keyboard: [
       [
@@ -1740,6 +1784,75 @@ export function earnMessage(plans: EarnPlanLite[], now: number): { text: string;
       [{ text: "🧭 Menu", callback_data: "menu:main" }],
     ],
   };
+}
+
+/** One claimed plan, as the batch reply needs it. */
+export interface ClaimedPlan {
+  asset: string;
+  amount: number;
+}
+
+/** A plan the batch could not claim — named with what was left on it. */
+export interface FailedPlan {
+  asset: string;
+  accrued: number;
+}
+
+/**
+ * Plans one `/claim` tap attempts. A large earn book must not turn a single tap
+ * into an unbounded loop of writes; a truncated pass says how many remain so
+ * the next tap finishes the job.
+ */
+export const CLAIM_BATCH_LIMIT = 8;
+
+/**
+ * The one reply `/claim` sends. It never hides a partial result: successes are
+ * totalled per asset, failures are named with the amount still sitting on them,
+ * and a truncated pass states how many plans were left for the next tap.
+ */
+export function claimBatchMessage(input: {
+  claimed: ClaimedPlan[];
+  failed: FailedPlan[];
+  claimable: number;
+  limit?: number;
+}): string {
+  const limit = input.limit ?? CLAIM_BATCH_LIMIT;
+  const attempted = input.claimed.length + input.failed.length;
+  const totals = new Map<string, number>();
+  for (const plan of input.claimed) {
+    totals.set(plan.asset, (totals.get(plan.asset) ?? 0) + plan.amount);
+  }
+  const detail = [...totals.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([asset, amount]) => `+${fmtNum(amount, 6)} ${asset}`)
+    .join(" · ");
+  const lines: string[] = [];
+  if (input.claimed.length > 0) {
+    lines.push(
+      input.failed.length === 0
+        ? `✅ Claimed ${input.claimed.length} earn plan${input.claimed.length === 1 ? "" : "s"} — ${detail}.`
+        : `✅ Claimed ${input.claimed.length} of ${attempted} earn plans — ${detail}.`,
+    );
+  } else {
+    lines.push(
+      `⚠️ None of the ${attempted} attempted earn plan${attempted === 1 ? "" : "s"} could be claimed — nothing was changed. Retry in a moment or check /earn.`,
+    );
+  }
+  if (input.failed.length > 0) {
+    const names = input.failed
+      .slice(0, 6)
+      .map((plan) => `${plan.asset} (${fmtNum(plan.accrued, 6)} still there)`)
+      .join(", ");
+    const more = input.failed.length > 6 ? `, +${input.failed.length - 6} more` : "";
+    lines.push(`• ${input.failed.length} left untouched: ${names}${more} — retry /claim.`);
+  }
+  const remaining = Math.max(0, input.claimable - attempted);
+  if (remaining > 0) {
+    lines.push(
+      `• ${remaining} more claimable plan${remaining === 1 ? "" : "s"} — this pass ran a batch of ${limit}; tap /claim again for the rest.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export function txsMessage(rows: TxLite[], now: number): { text: string; keyboard: TgKeyboard } {

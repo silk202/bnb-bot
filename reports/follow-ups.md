@@ -4443,3 +4443,72 @@ still documented elsewhere — correctly so: the check is coverage, not layout.
 
 Not verified here: live Telegram delivery/render and the deployed schema (the
 push's `deploy-convex` job applies both).
+
+---
+
+## Round 48 — /routes spends the budget, the boards show it, /claim rounds its batch
+
+Round 47's follow-ups #4 (show scan state on the boards) and #6 (bound /claim)
+are done, plus a cooldown for `/routes` that round 47 left as a bypass.
+
+### 1. `/routes` is no longer a cooldown bypass
+
+`/routes` reads the same live BNB feed `/bnb_scan` does, so it now calls the same
+`claimScan` mutation with `chain: "bnb"`: one 30s per-chat budget covers
+`/bnb_scan` and `/routes` together. Refusal is `feedCooldownMessage("bnb", …)` —
+it names the feed and says the budget is shared with `/bnb_scan`, so it does not
+read as an unrelated scan error. An unreachable feed releases the claim, exactly
+like the scan commands.
+
+`/sol_scan` keeps its own SOL budget (it runs an engine pass, not a feed read).
+
+### 2. The boards show readiness before the tap
+
+- `enginesMessage` gained an optional fourth argument, this chat's BNB/SOL
+  cooldown state. Scanner lines now read
+  `BNB scanner: 🟢 ON · last pass 30s ago (engine) · manual scan in 19s` or
+  `· manual scan ready`; sniper lines are unchanged. A footer states the 30s
+  shared budget. Without the argument the board renders byte-for-byte as before
+  (pinned by a test).
+- `/status` gained one line:
+  `• Manual scans (this chat): BNB ready · SOL in 18s`.
+- One phrasing helper (`cooldownStateLabel`) feeds both boards, so they cannot
+  describe the same state differently.
+
+### 3. `/claim` is a bounded, fully reported batch
+
+- `CLAIM_BATCH_LIMIT = 8` in the pure layer. The handler takes
+  `plans.slice(0, 8)` and settles all eight with `Promise.allSettled`, then sends
+  **one** reply.
+- `claimBatchMessage` reports: per-asset totals (`+0.75 USDC · +1.2 USDT`), each
+  failed plan named with the amount still sitting on it
+  (`USDT (0.42 still there)`), "nothing was changed" when every attempt failed,
+  and `2 more claimable plans — this pass ran a batch of 8; tap /claim again`
+  when the pass was truncated. A failure list longer than six is capped but
+  counted.
+- The old loop swallowed every error and could answer "could not complete"
+  after silently skipping plans; that path is gone.
+
+### Tests
+
+- `telegram-scan-cooldown.test.ts` (+3): engines board readiness for both
+  scanners with the snippet above, the unchanged board without the argument,
+  the label boundary (1ms → "in 1s"), and the `/routes` shared-budget refusal.
+- `telegram-claim-batch.test.ts` (new, 6): all-claimed totals, named partial
+  failure, total failure, truncated pass, capped long failure list, limit = 8.
+
+### Checks
+
+- `bun run typecheck` → exit 0
+- `bun test telegram-scan-cooldown telegram-claim-batch telegram-menu telegram`
+  → **54 pass / 0 fail**, 1285 expects
+- `bun run check:telegram-docs` → exit 0
+
+### Follow-ups still open
+
+2. Live-delivery smoke test on a throwaway bot token (needs the owner's token;
+   never pasted in chat — set it as an environment secret and run the script).
+
+Not verified here: live Telegram rendering of the new board lines, and the
+concurrent-claim behaviour under real balance contention (Convex retries
+conflicting mutations, but that was reasoned, not load-tested).

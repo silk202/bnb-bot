@@ -49,6 +49,12 @@ import {
   BOT_COMMAND_SPECS,
   scanCooldown,
   scanCooldownMessage,
+  cooldownStateLabel,
+  feedCooldownMessage,
+  claimBatchMessage,
+  CLAIM_BATCH_LIMIT,
+  type ClaimedPlan,
+  type FailedPlan,
   startMessage,
   helpMessage,
   unlinkedMessage,
@@ -2837,6 +2843,7 @@ export const handleUpdate = internalAction({
           await reply("⚙️ No terminal state yet — open the terminal once to initialize the console.");
           return done("engines-no-state");
         }
+        const now = Date.now();
         const m = enginesMessage(
           { bnb: st.botRunning, sol: st.solBotRunning !== false },
           {
@@ -2845,7 +2852,11 @@ export const handleUpdate = internalAction({
             bnbSniper: { at: st.bSnLastScanAt ?? null, source: st.bSnLastScanSource ?? null },
             solSniper: { at: st.sSnLastScanAt ?? null, source: st.sSnLastScanSource ?? null },
           },
-          Date.now(),
+          now,
+          {
+            bnb: scanCooldown(chat?.lastBnbScanAt, now),
+            sol: scanCooldown(chat?.lastSolScanAt, now),
+          },
         );
         await reply(m.text, m.keyboard);
         return done("engines");
@@ -2908,8 +2919,9 @@ export const handleUpdate = internalAction({
           await reply("📋 No terminal state yet — open the terminal once to initialize the console.");
           return done("status-no-state");
         }
+        const now = Date.now();
         const lastScan = st.lastScanAt
-          ? `${fmtAgo(st.lastScanAt, Date.now())} (${st.lastScanSource ?? "—"})`
+          ? `${fmtAgo(st.lastScanAt, now)} (${st.lastScanSource ?? "—"})`
           : "never";
         await reply(
           [
@@ -2919,6 +2931,7 @@ export const handleUpdate = internalAction({
             `• Mode: ${st.mode === "live" ? "🔴 LIVE" : "📄 paper"} · Network: ${st.network} · Chain: ${st.chainKey}`,
             `• Contract: ${st.deployedContractAddress ? `\`${st.deployedContractAddress.slice(0, 12)}…\`` : "not armed"} · Wallets: ${st.connectedWallets.length}`,
             `• Scans today ${st.scansToday} · last scan ${lastScan} · opportunities ${st.openOpportunities}`,
+            `• Manual scans (this chat): BNB ${cooldownStateLabel(scanCooldown(chat?.lastBnbScanAt, now))} · SOL ${cooldownStateLabel(scanCooldown(chat?.lastSolScanAt, now))}`,
             `• Executions today ${st.executionsToday} · wins ${st.successesToday} (${st.successRate}%) · lifetime PnL +${fmtNum(st.lifetimePnl)}`,
             "",
             `• Webhook: ${row?.webhookOk === true ? "✅ registered" : row?.webhookOk === false ? "❌ failing (self-heal retries)" : "unknown (self-heal pending)"}`,
@@ -2964,8 +2977,26 @@ export const handleUpdate = internalAction({
       }
 
       case "routes": {
+        // /routes reads the same live feed /bnb_scan does, so it spends the
+        // same per-chat budget instead of being a cooldown bypass.
+        const claimedAt = Date.now();
+        const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
+          chatId,
+          chain: "bnb",
+          now: claimedAt,
+        });
+        if (!claim.allowed) {
+          await reply(feedCooldownMessage("bnb", claim.retryInMs), mainMenu().keyboard);
+          return done("routes:cooldown");
+        }
         const view = await scanRoutes(ctx);
         if (!view) {
+          // Nothing was read, so nothing is charged to the budget.
+          await ctx.runMutation(internal.telegramBot.releaseScan, {
+            chatId,
+            chain: "bnb",
+            claimedAt,
+          });
           await reply("⚠️ Live feed unreachable right now — retry in a moment.");
           return done("routes-feed-down");
         }
@@ -3135,29 +3166,35 @@ export const handleUpdate = internalAction({
           await reply("💡 Nothing to claim yet — flexible-earn interest accrues over time.", earnKeys);
           return done("claim-none");
         }
-        let claimedCount = 0;
-        const totals: Record<string, number> = {};
-        for (const plan of plans) {
-          try {
-            const res = await ctx.runMutation(internal.trade.botClaimInterest, {
+        // Bounded batch, all settled: a big earn book cannot turn one tap into
+        // an unbounded loop, and a single failing plan cannot hide the others.
+        const batch = plans.slice(0, CLAIM_BATCH_LIMIT);
+        const settled = await Promise.allSettled(
+          batch.map((plan) =>
+            ctx.runMutation(internal.trade.botClaimInterest, {
               planId: plan._id as Id<"tradeEarnPlans">,
-            });
-            claimedCount += 1;
-            totals[res.asset] = (totals[res.asset] ?? 0) + res.amount;
-          } catch {
-            // Honest partial failure — reported below instead of hidden.
+            }),
+          ),
+        );
+        const claimed: ClaimedPlan[] = [];
+        const failed: FailedPlan[] = [];
+        settled.forEach((result, i) => {
+          if (result.status === "fulfilled") {
+            claimed.push(result.value);
+          } else {
+            failed.push({ asset: batch[i].asset, accrued: batch[i].accrued });
           }
-        }
-        const detail = Object.entries(totals)
-          .map(([asset, amount]) => `+${fmtNum(amount, 6)} ${asset}`)
-          .join(" · ");
+        });
         await reply(
-          claimedCount > 0
-            ? `✅ Claimed ${claimedCount} earn plan${claimedCount === 1 ? "" : "s"} — ${detail}.`
-            : "⚠️ The claim could not complete — retry in a moment or check /earn.",
+          claimBatchMessage({
+            claimed,
+            failed,
+            claimable: plans.length,
+            limit: CLAIM_BATCH_LIMIT,
+          }),
           earnKeys,
         );
-        return done("claim");
+        return done(`claim:${claimed.length}/${batch.length}`);
       }
 
       // ── Control & parameters — deploy / settings / amounts / funds ──

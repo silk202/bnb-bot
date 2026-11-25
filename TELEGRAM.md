@@ -46,13 +46,16 @@ The menu includes both scan commands:
 The `start_payload` kind (deep-link `/start <CODE>`), bare pairing codes and
 `/pair` are not menu entries; they are handled but not advertised.
 
-Both scan commands share a **per-chat cooldown**: one manual scan per chain
-every 30 seconds (`SCAN_COOLDOWN_MS`). The slot is claimed atomically before any
-feed work, so a double tap (or a Telegram retry) cannot fire two scans; a tap
-inside the window answers with the real remaining seconds instead of scanning.
-A scan that never ran — feed unreachable, or `scanPass` yielded to the app, a
-stopped scanner or an in-flight lease — releases the slot, so the chat is not
-charged for work it did not get.
+Manual feed work shares a **per-chat cooldown**: one pass per chain every 30
+seconds (`SCAN_COOLDOWN_MS`). `/bnb_scan`, `/sol_scan` **and `/routes`** spend it —
+`/routes` reads the same BNB feed, so it is not a bypass. The slot is claimed
+atomically before any feed work, so a double tap (or a Telegram retry) cannot
+fire two passes; a tap inside the window answers with the real remaining seconds
+instead of scanning. A pass that never ran — feed unreachable, or `scanPass`
+yielded to the app, a stopped scanner or an in-flight lease — releases the slot,
+so the chat is not charged for work it did not get. `/engines` and `/status`
+show the readiness ("manual scan ready" / "in 18s") so a cooling-down button is
+explained before it is tapped.
 
 ## Commands — what they display
 
@@ -63,8 +66,8 @@ charged for work it did not get.
 | `/start` | Linked: engages the BNB engine server-side and shows the boot card (mode + chain, START/STOP/menu/help buttons). Unlinked: pairing card or auto-pair. |
 | `/menu` | Main menu board with inline buttons for every control (start/stop per chain, dashboard, status, engines, settings, deploy, balances, amounts, withdraw, panic, BNB/SOL boards, Trade, routes, executions, PnL, prices, orders, earn, alerts, sound, help). |
 | `/dashboard` | Session window, AI score/rating, route count, average edge, liquidity, volume, gas, fleet metrics. An unreachable feed answers with an explicit warning — numbers are never fabricated. |
-| `/status` | BNB/SOL engine state, mode, network/chain, contract address, wallet count, scans today + last scan source, opportunities, executions/wins/success rate, lifetime PnL, webhook health, bot username, linked chats, digest/sound/auto-pair prefs. |
-| `/engines`, `/engine` | The 24/7 board for all four engines (BNB scan, BNB sniper, SOL scan, SOL sniper) with per-engine freshness stamps and start/stop controls. |
+| `/status` | BNB/SOL engine state, mode, network/chain, contract address, wallet count, scans today + last scan source, this chat's manual-scan readiness per chain, opportunities, executions/wins/success rate, lifetime PnL, webhook health, bot username, linked chats, digest/sound/auto-pair prefs. |
+| `/engines`, `/engine` | The 24/7 board for all four engines (BNB scan, BNB sniper, SOL scan, SOL sniper) with per-engine freshness stamps, each scanner's manual-scan cooldown ("manual scan ready" / "in 18s") and start/stop controls. |
 | `/help` | The full command board. Every slash command it names is parsed by `parseBotCommand`; a parity test fails if it advertises something unknown, and the docs-drift gate fails if the board and `TELEGRAM.md` disagree with `BOT_COMMAND_SPECS`. |
 
 ### BNB FlashBolt
@@ -77,7 +80,7 @@ charged for work it did not get.
 | `/bnb_paper` | Sets the global mode to paper; reports that executions are simulated. |
 | `/bnb_live` | Sets the global mode to live; reports that real execution arms only with a deployed contract and a connected wallet. |
 | `/bnb_scan` | Runs one live feed scan immediately (subject to the 30s per-chat cooldown), stamps the BNB scan bookkeeping (freshness + opportunity count, the same bump the app's Scan performs) and replies with the live routes board. An unreachable feed returns the explicit warning instead of an empty board and releases the cooldown slot. |
-| `/routes` | Top live arbitrage routes from the current feed (no scan stamp). |
+| `/routes` | Top live arbitrage routes from the current feed (no scan stamp). Reads the same live feed as `/bnb_scan`, so it spends the **same 30s per-chat budget** and refuses with the remaining seconds instead of bypassing the cooldown. |
 | `/execs` | The recent executions trail. Filters: `/execs@live`, `/execs@sim`; the keyboard cycles all → live → sim. A row counts as LIVE when it carries a `txHash`. |
 | `/pnl` | On-chain PnL summary for BNB and SOL plus simulated totals. Same filters as `/execs`. |
 
@@ -102,7 +105,7 @@ charged for work it did not get.
 | `/txs` | Recent transactions. |
 | `/orders` | Open limit orders (up to 10). |
 | `/earn` | Earn plans with accrual. |
-| `/claim` | Claims every claimable flexible-earn plan, then reports the count and per-asset totals; "nothing to claim" and partial-failure replies are explicit. |
+| `/claim` | Claims claimable flexible-earn plans in a bounded batch of 8, all settled in parallel, then sends **one** reply: per-asset totals, each failed plan named with the amount still sitting on it, and how many plans remain for the next tap. "Nothing to claim" and "nothing was changed" are explicit. |
 
 ### Control, parameters, safety
 
@@ -158,8 +161,12 @@ row-level abandonment is surfaced on the board instead of being hidden.
   every entry is a valid, parseable Telegram command, no name repeats, and every
   handled kind except the documented unlisted ones is advertised.
 - `bun test src/lib/__tests__/telegram-scan-cooldown.test.ts` — the 30s window,
-  the exact boundary, a backwards clock failing closed, the released slot, and
-  the reply naming the real remaining seconds.
+  the exact boundary, a backwards clock failing closed, the released slot, the
+  reply naming the real remaining seconds, the `/routes` shared-budget refusal,
+  and the readiness shown on the `/engines` board.
+- `bun test src/lib/__tests__/telegram-claim-batch.test.ts` — the bounded batch
+  reply: per-asset totals, named partial failures, "nothing was changed", the
+  remaining count on a truncated pass, and the 8-plan limit.
 - `bun run check:telegram-docs` — the docs-drift gate (also a CI step): the menu
   count claim equals `BOT_COMMAND_SPECS.length`, every menu command is
   documented here, every backticked slash command on this page is answered by
