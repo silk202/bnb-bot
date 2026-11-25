@@ -33,16 +33,35 @@ on:
   pull_request:
   # The task guard's own comment (and DEPLOYMENT.md) promise a manual dispatch;
   # without this key that promise was false. `deploy-convex` is push-only, so a
-  # dispatch never deploys a backend.
+  # dispatch never deploys a backend. `guard_only` exists because the full run
+  # spends 45 minutes on the Solana job, which proves nothing when what changed
+  # is a deploy key or a secret layout.
   workflow_dispatch:
+    inputs:
+      guard_only:
+        description: "Run only the task guard (skip verify, the app build and the Solana job)"
+        type: boolean
+        default: false
+  # A nightly guard run: the timestamped verdict ring (reports/task-guard/) only
+  # grows when the guard runs, so waiting for a push means a provider serving
+  # regression can sit unnoticed for days. 06:17 UTC — off the hour, so the
+  # scheduled run is not queued behind every other cron that fires at :00.
+  schedule:
+    - cron: "17 6 * * *"
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # The nightly run gets its own group: a push that is mid-Solana must not be
+  # cancelled by a cron, and a slow cron must not be cancelled by a push.
+  # Measured: run 45407872141 was cancelled exactly that way by the next push.
+  group: ci-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'change' }}
   cancel-in-progress: true
 
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # The nightly run and a `guard_only` dispatch exist to re-prove the guard and
+    # its key wiring, so they skip the app build entirely.
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.guard_only) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +90,7 @@ jobs:
       - name: Assert the build target is configured
         env:
           VITE_CONVEX_URL: ${{ vars.VITE_CONVEX_URL }}
+          EXPECTED_SLUG: ${{ vars.CONVEX_PROD_SLUG || 'flexible-frog-776' }}
         run: |
           if [ -z "$VITE_CONVEX_URL" ]; then
             echo "::error::VITE_CONVEX_URL repository variable is not set, so this build would publish the 'Backend not configured' screen and unstamped overlay artifacts. Set Settings → Secrets and variables → Actions → Variables → VITE_CONVEX_URL to the production deployment's https://<deployment>.convex.cloud URL."
@@ -84,7 +104,17 @@ jobs:
               exit 1
               ;;
           esac
-          echo "build target: $ORIGIN (overlay gate origin ${ORIGIN%.convex.cloud}.convex.site)"
+          # The frontend target and the deploy target are independent settings:
+          # `deploy-convex` proves the key names EXPECTED_SLUG, this proves the
+          # UI is built for that same deployment. A mismatch would deploy the
+          # backend to one deployment while shipping a UI wired to another, and
+          # nothing else in CI would notice.
+          SLUG="${ORIGIN#https://}"; SLUG="${SLUG%.convex.cloud}"
+          if [ "$SLUG" != "$EXPECTED_SLUG" ]; then
+            echo "::error::VITE_CONVEX_URL names '$SLUG', but production is '$EXPECTED_SLUG' (CONVEX_PROD_SLUG). The UI would be built for one deployment while deploy-convex deploys the other. Set the variable to https://$EXPECTED_SLUG.convex.cloud (or set CONVEX_PROD_SLUG if production really moved)."
+            exit 1
+          fi
+          echo "build target: $ORIGIN (overlay gate origin ${ORIGIN%.convex.cloud}.convex.site), agrees with CONVEX_PROD_SLUG=$EXPECTED_SLUG"
 
       # `bun run build` = tsc -b && bun run overlay && vite build — the
       # overlay artifacts (extension zips + userscript served by the app's
@@ -154,6 +184,9 @@ jobs:
     name: Solana program (build, IDL, tests)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # Same reason as `verify`: nightly and `guard_only` runs prove the guard, not
+    # the program, and this job is the expensive half of the workflow.
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.guard_only) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -441,7 +474,11 @@ jobs:
   task-guard:
     name: Task guard (migration + deployment checks)
     needs: verify
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Push to main, nightly, or a dispatch. `needs: verify` alone would skip this
+    # job whenever verify is skipped (nightly, guard_only), so verify's result is
+    # read explicitly: a red verify still blocks the guard (that failure is the
+    # finding), a skipped verify does not.
+    if: ${{ always() && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The dev/prod deploy keys live on the CONVEX_DEPLOY_KEY environment as

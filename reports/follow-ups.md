@@ -3766,3 +3766,151 @@ still accepted — only function serving is disabled.
 > concurrency group while its Solana job was still running — so the green Solana
 > reference stays run 45406806725 (same workflow, same program sources), not a
 > job that quietly never finished.
+
+---
+
+## Round 42 — five follow-ups from round 41, measured against the live deployments
+
+Round 41 ended with nine follow-ups and five BLOCKED checks. This round takes the
+five that needed no owner action and no new credentials, and measures the
+provider again while doing it. Nothing was mocked: every verdict below comes from
+a real run against `pastel-pelican-634`, `flexible-frog-776`,
+`shiny-bulldog-311` and the published preview.
+
+### 1. Nightly guard run (round 41 #2)
+
+`on: schedule: - cron: "17 6 * * *"` on CI. The timestamped ring added in round
+41 only accumulates when the guard runs, and waiting for a push means a provider
+regression can sit for days (round 41 saw exactly that: the deployment was
+plan-capped and only a push revealed it).
+
+Two details that are not decoration:
+
+- **Off the hour.** `:00` is where every other cron in every repo fires; 06:17
+  UTC is the same slot, minus the queue.
+- **Its own concurrency group.** `ci-<ref>` alone would let a cron cancel a push
+  that is 40 minutes into the Solana job — measured in round 41, run
+  **45407872141** was cancelled exactly that way by the next push. The group is
+  now `ci-<ref>-nightly` for scheduled runs and `ci-<ref>-change` otherwise, so a
+  cron and a push can never cancel each other.
+
+`deploy-convex` keeps its push-only `if:`, so a cron can never deploy a backend.
+
+### 2. One retry before calling a bare `Server Error` BLOCKED (round 41 #3)
+
+Prod had answered nothing but `[Request ID: …] Server Error` for hours while dev
+named its plan ceiling, so a transient blip and a standing outage produced the
+same verdict. `operator_status()` now retries once (2 s) **only** when the body
+is a bare provider error, and the message says how many attempts answered:
+
+```
+BLOCKED 4c. prod provider returned an infrastructure error after 2 attempt(s): [Request ID: 2624edf382f9eddf] Server Error
+BLOCKED 4c. dev function serving disabled by the provider: … You have exceeded the free plan limits …
+```
+
+Dev does **not** retry — a named plan ceiling is a verdict, not a blip. Used by
+4c and 5b (the two direct probes); 4d keeps its own single-attempt semantics
+because every attempt spends one of the deployment's 5/minute login slots.
+
+The first version of this had a real bug that only measurement caught: it set
+`STATUS_RETRIED` inside `$( )`, so the parent never saw it and the message read
+**"1 attempt(s)" after two real attempts**. The count now travels back as a
+`#tries:<n>` first line that `unwrap_status()` splits off — proved with
+`prod: tries=2` / `dev: tries=1` against the live deployments before the full
+run, and again in the full run's own output above.
+
+### 3. The frontend target and the deploy target must name the same deployment (round 41 #4)
+
+`verify`'s build-target step now compares the slug in `VITE_CONVEX_URL` with
+`CONVEX_PROD_SLUG` (default `flexible-frog-776`, the same default `deploy-convex`
+asserts). Before this, `verify` proved the variable was *a* `*.convex.cloud` URL
+and `deploy-convex` proved the key named production, but nothing proved they were
+the same deployment — a mismatch would deploy the backend to A while shipping a
+UI wired to B, silently.
+
+Proved by running the step's own extracted `run:` block:
+
+| `VITE_CONVEX_URL` | Result |
+|---|---|
+| `https://flexible-frog-776.convex.cloud` | exit 0 — `… agrees with CONVEX_PROD_SLUG=flexible-frog-776` |
+| `https://pastel-pelican-634.convex.cloud` | exit 1 — names `pastel-pelican-634`, production is `flexible-frog-776` |
+| empty | exit 1 — the round-41 "not set" annotation |
+
+### 4. The commit SHA in every run header (round 41 #7)
+
+A ring file named only by its timestamp cannot be tied to the push that produced
+it. The header now prints `commit: ${GITHUB_SHA:-local}${GITHUB_REF_NAME:+ (…)}`
+— `commit: local` on a developer machine, the SHA and branch in CI. It is inside
+the tee'd output, so the latest file and the ring entry both carry it.
+
+### 5. `guard_only` dispatch input (round 41 #9)
+
+`workflow_dispatch` gained `guard_only` (boolean, default false). With it set,
+`verify` and `solana-program` are skipped and `task-guard` still runs — which
+needed care: `needs: verify` skips a dependent job when its dependency is
+skipped, so the guard's condition now reads verify's result explicitly
+(`success` or `skipped`) wrapped in `always()`. A **red** verify still blocks the
+guard (that failure is the finding); a skipped one does not. The nightly run
+takes the same path, so a cron costs one 15-minute job instead of a 45-minute
+Solana rebuild that proves nothing new.
+
+### Live state, measured this round (no mocking)
+
+Same commands as round 41, `SKIP_LOGIN=1`, `CLI_TIMEOUT=30`, `EXPORT_TIMEOUT=60`
+(`/tmp` report + ring so the repo's history is not polluted by a measurement):
+
+| Check | Round 41 | Round 42 |
+|---|---|---|
+| 2. dev/prod deploy key export | BLOCKED (timeout) | **PASS both** — `export exit 0`, prefixes target the right deployments |
+| 4a. env vars | BLOCKED | **PASS both** |
+| 4b. JWT_PRIVATE_KEY armored 1703 B | BLOCKED | **PASS both** |
+| 4c. `gate:operatorStatus` | BLOCKED ×2 | still BLOCKED ×2 (dev names the free-plan cap, prod bare `Server Error` after 2 attempts) |
+| 5. published preview | PASS | **PASS** (/, /gate, /logo.svg) |
+| 5b. dev backend serving | BLOCKED | still BLOCKED (plan cap) |
+| 6. protected deployment | PASS | **PASS, fleet build rolled** `20261123T234400Z-ab2c2501a060 → 20261124T221653Z-e69b633e242e` |
+| 7a/7b/7c. dev/prod parity | BLOCKED | **PASS** — operatorConfig 1/1, 13 and 12 users each with exactly one authAccount, dev not behind prod |
+
+So the plan ceiling now blocks **function serving only**: reads, exports, env
+reads and parity all answer. `RESULT no failures; 3 check(s) blocked by the
+provider`, exit 2 — unchanged semantics, narrower blast radius.
+
+The fleet-wide platform build roll advanced `.task-baseline` through the real
+`write_baseline()` path: the superseded stamp was appended as `history=` (2 lines
+now, cap 10, nothing dropped). That advance is committed here — see the decision
+below.
+
+### Decision: `.task-baseline` stays developer-owned (round 41 #5)
+
+CI cannot commit, and a workflow that pushes to `main` from a runner would be a
+second writer to the one file the guard treats as its reference of record. The
+rule, now explicit rather than implied: **`check 6` advancing the file is correct
+wherever it runs, and the advance is committed by a human/agent on the next push
+that touches the guard** — exactly what this round does. CI's copy is a runner
+checkout that is discarded; the report says so, so a repeated advance in CI logs
+reads as "not committed", not as "the file is broken".
+
+### Remaining follow-ups
+
+1. **Provider ceiling** (round 41 #1) — unchanged, owner-only: 3 checks stay
+   BLOCKED until dev/prod function serving returns. Nothing in the repo can fix
+   it, and no attempt is faked here.
+2. **Guard `--json`** (round 41 #6) — still text-only; a dashboards/alerts
+   consumer has to parse the lines.
+3. **Superseded stamps in this report** (round 41 #8) — the cap drops the oldest
+   with one log line; the report still relies on the artifact for the trail.
+4. **`TASK_GUARD_KEEP` vs artifact size** — 20 runs × ~3 KB is fine today; a ring
+   of 20 *full* logs with all BLOCKED details would be the first thing to trim if
+   the artifact grows.
+
+### Checks run before pushing
+
+- `bash -n scripts/check-4-tasks.sh` clean.
+- Workflow parses: triggers `pull_request, push, schedule, workflow_dispatch`,
+  one dispatch input, `cron: 17 6 * * *`, four jobs, `deploy-convex` still
+  push-only.
+- The `verify` build-target step extracted from the YAML and exercised with three
+  values (table above).
+- `operator_status` + `unwrap_status` extracted and run against both live
+  deployments: `prod: tries=2`, `dev: tries=1`.
+- Two full live guard runs: exit 2 both times, 3 BLOCKED (down from 5), the
+  message text above, `commit: local` in the header, ring entry written.

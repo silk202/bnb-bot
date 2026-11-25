@@ -176,7 +176,41 @@ is_bare_provider_error() {
   printf '%s' "$1" | grep -Eq '^(http [0-9]{3}: )?\[Request ID: [^]]*\] Server Error$'
 }
 
+# One retry before a bare `Server Error` is reported. Measured 2026-11-24: prod
+# answered nothing but `[Request ID: …] Server Error` for hours while dev named
+# its plan ceiling, so a single infrastructure blip and a standing outage looked
+# identical in the verdict. The retry costs ~2 s and tells them apart; the
+# retry's body wins whenever it has one, so a blip is proved transient instead of
+# being recorded as blocked. The first output line is `#tries:<n>`, so the count
+# survives the `$( )` subshell the caller reads the body from (a variable set in
+# here would not — measured: the first version reported "1 attempt" after two).
+operator_status() { # site -> "#tries:<n>\n<gate:operatorStatus response body>"
+  local site="$1" body second tries=1
+  body="$(curl -sS -m 20 -X POST "https://${site}.convex.cloud/api/query" -H 'Content-Type: application/json' \
+    -d '{"path":"gate:operatorStatus","args":{}}' 2>/dev/null)"
+  if is_bare_provider_error "$(error_detail "$body")"; then
+    sleep 2
+    second="$(curl -sS -m 20 -X POST "https://${site}.convex.cloud/api/query" -H 'Content-Type: application/json' \
+      -d '{"path":"gate:operatorStatus","args":{}}' 2>/dev/null)"
+    tries=2
+    # An empty retry (a dropped connection) must not erase the provider's own
+    # sentence — that sentence is the only handle support has.
+    [ -n "$second" ] && body="$second"
+  fi
+  printf '#tries:%s\n%s' "$tries" "$body"
+}
+# Split that envelope back apart. Both halves are used by the messages below, so
+# the envelope is unwrapped once per probe instead of in each branch.
+unwrap_status() { # envelope -> sets STATUS_BODY and STATUS_TRIES
+  STATUS_TRIES="${1%%$'\n'*}"; STATUS_TRIES="${STATUS_TRIES#\#tries:}"
+  case "$STATUS_TRIES" in ''|*[!0-9]*) STATUS_TRIES=1 ;; esac
+  STATUS_BODY="${1#*$'\n'}"
+}
+
 echo "task guard — 4 migration + 3 deployment checks — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Which push produced this verdict: a ring file named only by its timestamp
+# cannot be tied to the commit that ran it, and CI already exports the SHA.
+echo "commit: ${GITHUB_SHA:-local}${GITHUB_REF_NAME:+ (${GITHUB_REF_NAME})}"
 echo "run log: ${TASK_REPORT:-stdout only}"
 if [ -n "${TASK_GUARD_RUN_LOG:-}" ]; then
   echo "history: ${TASK_GUARD_RUN_LOG} (ring: ${TASK_GUARD_HISTORY_DIR}, last ${TASK_GUARD_KEEP} runs)"
@@ -304,8 +338,9 @@ for env_name in dev prod; do
     fail "4b. ${env_name} JWT_PRIVATE_KEY is unarmored/len ${jwt_len} — decrypt will fail (run --fix)"
   fi
 
-  status_body="$(curl -sS -m 20 -X POST "https://${site}.convex.cloud/api/query" -H 'Content-Type: application/json' \
-    -d '{"path":"gate:operatorStatus","args":{}}' 2>/dev/null)"
+  unwrap_status "$(operator_status "$site")"
+  status_body="$STATUS_BODY"
+  status_attempts="$STATUS_TRIES"
   seeded="$(printf '%s' "$status_body" | grep -o 'seeded":[a-z]*' | cut -d: -f2)"
   detail="$(error_detail "$status_body")"
   if [ "$seeded" = "true" ]; then
@@ -314,7 +349,7 @@ for env_name in dev prod; do
     blocked "4c. ${env_name} function serving disabled by the provider: ${detail:-no error text}"
     info "not a code defect — an upgrade or the next usage window lifts it; re-run then"
   elif is_bare_provider_error "$detail"; then
-    blocked "4c. ${env_name} provider returned an infrastructure error: ${detail}"
+    blocked "4c. ${env_name} provider returned an infrastructure error after ${status_attempts} attempt(s): ${detail}"
   elif [ -n "$detail" ]; then
     fail "4c. ${env_name} gate:operatorStatus failed: ${detail}"
   else
@@ -401,8 +436,10 @@ fi
 # and a disabled deployment look identical from the outside — this is that gap.
 # Deliberately probed again rather than reused from 4c: check 5 must stand on its
 # own when the login half is skipped.
-dev_body="$(curl -sS -m 20 -X POST "https://${DEV_SITE}.convex.cloud/api/query" -H 'Content-Type: application/json' \
-  -d '{"path":"gate:operatorStatus","args":{}}' 2>/dev/null)"
+dev_envelope="$(operator_status "$DEV_SITE")"
+unwrap_status "$dev_envelope"
+dev_body="$STATUS_BODY"
+dev_attempts="$STATUS_TRIES"
 dev_seeded="$(printf '%s' "$dev_body" | grep -o 'seeded":[a-z]*' | cut -d: -f2)"
 dev_detail="$(error_detail "$dev_body")"
 if [ "$dev_seeded" = "true" ]; then
@@ -411,7 +448,7 @@ elif is_plan_cap "$dev_body"; then
   blocked "5b. dev backend serving disabled by the provider: ${dev_detail:-no error text}"
   info "the preview can answer 200 while every call it makes fails — this is that state"
 elif is_bare_provider_error "$dev_detail"; then
-  blocked "5b. dev backend returned an infrastructure error: ${dev_detail}"
+  blocked "5b. dev backend returned an infrastructure error after ${dev_attempts} attempt(s): ${dev_detail}"
 else
   fail "5b. dev backend gate:operatorStatus = '${dev_seeded:-unreachable}'${dev_detail:+ — $dev_detail}"
 fi
