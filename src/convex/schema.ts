@@ -779,6 +779,11 @@ const schema = defineSchema(
       // cannot both scan; 0 means "no cooldown" (a released claim).
       lastBnbScanAt: v.optional(v.number()),
       lastSolScanAt: v.optional(v.number()),
+      // The same slot for the /routes board, per chain and SEPARATE from the
+      // scan stamps: reading routes is not scanning, so neither board can spend
+      // the other's window. 0 = released (no cooldown).
+      lastBnbRoutesAt: v.optional(v.number()),
+      lastSolRoutesAt: v.optional(v.number()),
       // per-chat UI preference: silent (no sound) vs normal notifications
       silent: v.boolean(),
       blocked: v.boolean(), // operator can remotely disable a chat

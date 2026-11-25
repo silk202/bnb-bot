@@ -47,10 +47,18 @@ import {
   selectPurgeable,
   type BotMessageSource,
   BOT_COMMAND_SPECS,
-  scanCooldown,
+  webhookNeedsRepair,
+  type WebhookHealth,
   scanCooldownMessage,
   cooldownStateLabel,
-  feedCooldownMessage,
+  scanSlotCooldown,
+  scanSlotStamp,
+  routesCooldownMessage,
+  ROUTE_COOLDOWN_MS,
+  type ChainRoutesView,
+  type ScanChain,
+  type ScanScope,
+  type ScanSlotChat,
   claimBatchMessage,
   CLAIM_BATCH_LIMIT,
   type ClaimedPlan,
@@ -337,6 +345,8 @@ export const getChat = internalQuery({
       lastCommand: row.lastCommand,
       lastBnbScanAt: row.lastBnbScanAt,
       lastSolScanAt: row.lastSolScanAt,
+      lastBnbRoutesAt: row.lastBnbRoutesAt,
+      lastSolRoutesAt: row.lastSolRoutesAt,
       silent: row.silent,
       blocked: row.blocked,
     };
@@ -455,13 +465,36 @@ export const unpairChat = internalMutation({
  * and is refused. The wait comes from the same pure rule the tests exercise, so
  * the reply states a real number instead of a hand-written one.
  */
+/** The field a (chain, scope) slot stamps — one place for the mapping. */
+function slotStampPatch(
+  chain: ScanChain,
+  scope: ScanScope,
+  at: number,
+): {
+  lastBnbScanAt?: number;
+  lastSolScanAt?: number;
+  lastBnbRoutesAt?: number;
+  lastSolRoutesAt?: number;
+} {
+  if (scope === "routes") {
+    return chain === "bnb" ? { lastBnbRoutesAt: at } : { lastSolRoutesAt: at };
+  }
+  return chain === "bnb" ? { lastBnbScanAt: at } : { lastSolScanAt: at };
+}
+
 export const claimScan = internalMutation({
   args: {
     chatId: v.string(),
     chain: v.union(v.literal("bnb"), v.literal("sol")),
     now: v.number(),
+    // Which budget this tap spends. Omitted (the scan path) = a manual scan.
+    scope: v.optional(v.union(v.literal("scan"), v.literal("routes"))),
   },
-  handler: async (ctx, { chatId, chain, now }): Promise<{ allowed: boolean; retryInMs: number }> => {
+  handler: async (
+    ctx,
+    { chatId, chain, now, scope },
+  ): Promise<{ allowed: boolean; retryInMs: number }> => {
+    const slot: ScanScope = scope === "routes" ? "routes" : "scan";
     const row = await ctx.db
       .query("telegramBotChats")
       .withIndex("by_chat", (q) => q.eq("chatId", chatId))
@@ -469,13 +502,9 @@ export const claimScan = internalMutation({
     // The dispatch already passed the pairing gate; a row that vanished means
     // the chat was unpaired mid-flight. Allow rather than invent a cooldown.
     if (!row) return { allowed: true, retryInMs: 0 };
-    const lastAt = chain === "bnb" ? row.lastBnbScanAt : row.lastSolScanAt;
-    const status = scanCooldown(lastAt, now);
+    const status = scanSlotCooldown(row, chain, slot, now);
     if (!status.allowed) return status;
-    await ctx.db.patch(
-      row._id,
-      chain === "bnb" ? { lastBnbScanAt: now } : { lastSolScanAt: now },
-    );
+    await ctx.db.patch(row._id, slotStampPatch(chain, slot, now));
     return { allowed: true, retryInMs: 0 };
   },
 });
@@ -491,16 +520,19 @@ export const releaseScan = internalMutation({
     chatId: v.string(),
     chain: v.union(v.literal("bnb"), v.literal("sol")),
     claimedAt: v.number(),
+    scope: v.optional(v.union(v.literal("scan"), v.literal("routes"))),
   },
-  handler: async (ctx, { chatId, chain, claimedAt }) => {
+  handler: async (ctx, { chatId, chain, claimedAt, scope }) => {
+    const slot: ScanScope = scope === "routes" ? "routes" : "scan";
     const row = await ctx.db
       .query("telegramBotChats")
       .withIndex("by_chat", (q) => q.eq("chatId", chatId))
       .first();
     if (!row) return { released: false as const };
-    const current = chain === "bnb" ? row.lastBnbScanAt : row.lastSolScanAt;
-    if (current !== claimedAt) return { released: false as const };
-    await ctx.db.patch(row._id, chain === "bnb" ? { lastBnbScanAt: 0 } : { lastSolScanAt: 0 });
+    // Guarded on the exact stamp this tap wrote: a release can never clear a
+    // newer claim made by a concurrent tap.
+    if (scanSlotStamp(row, chain, slot) !== claimedAt) return { released: false as const };
+    await ctx.db.patch(row._id, slotStampPatch(chain, slot, 0));
     return { released: true as const };
   },
 });
@@ -640,11 +672,13 @@ export const ensureWebhookReady = internalAction({
     const hookUrl = `${base}/api/telegram/webhook`;
 
     const info = await tgCall(token, "getWebhookInfo", {});
-    const currentUrl = (info as unknown as { url?: string }).url ?? "";
+    // Telegram answers { ok, result: { url, last_error_message, … } }; reading
+    // `url` off the envelope always yielded "", so every sweep re-registered.
+    const health = info.ok ? ((info.result as WebhookHealth | undefined) ?? null) : null;
     let ok = false;
     let registered = false;
     let reg: { ok: boolean; url?: string; error?: string } | null = null;
-    if (info.ok && currentUrl === hookUrl) {
+    if (!webhookNeedsRepair(health, hookUrl)) {
       ok = true;
     } else {
       // Registered via a runAction reference (an internalAction value is not
@@ -1473,10 +1507,23 @@ export const registerWebhookInner = internalAction({
     if (!url) return { ok: false, error: "CONVEX_SITE_URL not configured" };
     const base = url.replace(/\/$/, "");
     const hookUrl = `${base}/api/telegram/webhook`;
+    // The handler rejects any update whose X-Telegram-Bot-Api-Secret-Token does
+    // not equal this secret, and Telegram only sends that header when the
+    // webhook was registered WITH it. Registering without it made every update
+    // a 401 — the bot went silent while this call still reported success.
+    const { secret } = await ctx.runMutation(internal.telegramBot.ensureConfig, {});
+    const secretToken = secret?.trim() ?? "";
+    if (!secretToken) {
+      return { ok: false, error: "Webhook secret missing — open the Telegram Bot panel once to create it." };
+    }
     const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: hookUrl, allowed_updates: ["message", "callback_query"] }),
+      body: JSON.stringify({
+        url: hookUrl,
+        secret_token: secretToken,
+        allowed_updates: ["message", "callback_query"],
+      }),
     });
     const data = (await res.json()) as { ok?: boolean; description?: string };
     if (data.ok) return { ok: true, url: hookUrl };
@@ -2455,6 +2502,91 @@ async function scanRoutes(
   return { live, generated, opportunities: live.length + generated.length };
 }
 
+/**
+ * Why a SOL engine pass yielded — one wording for `/sol_scan` and for the SOL
+ * section of `/routes`, so the two boards never describe the same yield
+ * differently.
+ */
+function solPassReason(reason: string | null | undefined): string {
+  switch (reason) {
+    case "not-running":
+      return "the SOL scanner is stopped (/sol_on to engage)";
+    case "app-online":
+      return "the app is driving the SOL scan right now";
+    case "no-state":
+      return "no SOL terminal state yet — open the SOL terminal once";
+    case "loop-alive":
+      return "a SOL pass is already in flight";
+    default:
+      return "the engine lease just renewed — retry in a second";
+  }
+}
+
+/**
+ * The `/routes` section a chain renders when this tap did NOT read it: its real
+ * last read from the terminal state, its own remaining seconds, and why. Shared
+ * by `/routes` (for the chain it skipped) and by `/bnb_scan` (which only reads
+ * BNB, so its board still shows the SOL section honestly as not read).
+ */
+function idleRoutesView(
+  chat: ScanSlotChat | null | undefined,
+  st: Doc<"terminalStates"> | null | undefined,
+  chain: ScanChain,
+  now: number,
+  note: string | null,
+): ChainRoutesView {
+  return {
+    live: [],
+    generated: [],
+    liveCount: null,
+    generatedCount: null,
+    opportunities:
+      chain === "sol" ? (st?.solOpenOpportunities ?? null) : (st?.openOpportunities ?? null),
+    at: chain === "sol" ? (st?.solLastScanAt ?? null) : (st?.lastScanAt ?? null),
+    source: chain === "sol" ? (st?.solLastScanSource ?? null) : (st?.lastScanSource ?? null),
+    cooldown: scanSlotCooldown(chat, chain, "routes", now),
+    note,
+  };
+}
+
+/** BNB's section after a real feed read — the rows the feed actually returned. */
+function bnbRoutesView(
+  view: { live: RouteLite[]; generated: RouteLite[]; opportunities: number },
+  now: number,
+): ChainRoutesView {
+  return {
+    live: view.live,
+    generated: view.generated,
+    liveCount: null,
+    generatedCount: null,
+    opportunities: view.opportunities,
+    at: now,
+    source: "server",
+    cooldown: { allowed: false, retryInMs: ROUTE_COOLDOWN_MS },
+    note: null,
+  };
+}
+
+/** SOL's section after a real engine pass — counts, which is what it reports. */
+function solRoutesView(
+  res: { live?: number; generated?: number },
+  now: number,
+): ChainRoutesView {
+  const live = res.live ?? 0;
+  const generated = res.generated ?? 0;
+  return {
+    live: [],
+    generated: [],
+    liveCount: live,
+    generatedCount: generated,
+    opportunities: live + generated,
+    at: now,
+    source: "server",
+    cooldown: { allowed: false, retryInMs: ROUTE_COOLDOWN_MS },
+    note: null,
+  };
+}
+
 /** Cached trade price map (null when never loaded / unparseable). */
 async function readPrices(
   ctx: ActionCtx,
@@ -2854,8 +2986,10 @@ export const handleUpdate = internalAction({
           },
           now,
           {
-            bnb: scanCooldown(chat?.lastBnbScanAt, now),
-            sol: scanCooldown(chat?.lastSolScanAt, now),
+            bnb: scanSlotCooldown(chat, "bnb", "scan", now),
+            sol: scanSlotCooldown(chat, "sol", "scan", now),
+            bnbRoutes: scanSlotCooldown(chat, "bnb", "routes", now),
+            solRoutes: scanSlotCooldown(chat, "sol", "routes", now),
           },
         );
         await reply(m.text, m.keyboard);
@@ -2931,7 +3065,8 @@ export const handleUpdate = internalAction({
             `• Mode: ${st.mode === "live" ? "🔴 LIVE" : "📄 paper"} · Network: ${st.network} · Chain: ${st.chainKey}`,
             `• Contract: ${st.deployedContractAddress ? `\`${st.deployedContractAddress.slice(0, 12)}…\`` : "not armed"} · Wallets: ${st.connectedWallets.length}`,
             `• Scans today ${st.scansToday} · last scan ${lastScan} · opportunities ${st.openOpportunities}`,
-            `• Manual scans (this chat): BNB ${cooldownStateLabel(scanCooldown(chat?.lastBnbScanAt, now))} · SOL ${cooldownStateLabel(scanCooldown(chat?.lastSolScanAt, now))}`,
+            `• Scan budget (this chat): BNB ${cooldownStateLabel(scanSlotCooldown(chat, "bnb", "scan", now))} · SOL ${cooldownStateLabel(scanSlotCooldown(chat, "sol", "scan", now))}`,
+            `• Routes budget (this chat): BNB ${cooldownStateLabel(scanSlotCooldown(chat, "bnb", "routes", now))} · SOL ${cooldownStateLabel(scanSlotCooldown(chat, "sol", "routes", now))}`,
             `• Executions today ${st.executionsToday} · wins ${st.successesToday} (${st.successRate}%) · lifetime PnL +${fmtNum(st.lifetimePnl)}`,
             "",
             `• Webhook: ${row?.webhookOk === true ? "✅ registered" : row?.webhookOk === false ? "❌ failing (self-heal retries)" : "unknown (self-heal pending)"}`,
@@ -2977,30 +3112,91 @@ export const handleUpdate = internalAction({
       }
 
       case "routes": {
-        // /routes reads the same live feed /bnb_scan does, so it spends the
-        // same per-chat budget instead of being a cooldown bypass.
-        const claimedAt = Date.now();
-        const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
-          chatId,
-          chain: "bnb",
-          now: claimedAt,
-        });
-        if (!claim.allowed) {
-          await reply(feedCooldownMessage("bnb", claim.retryInMs), mainMenu().keyboard);
+        // /routes covers BNB and SOL separately. Each chain spends its OWN
+        // routes budget — never /bnb_scan's window, never the other chain's —
+        // so one board can never make the other look unavailable.
+        const wanted: ScanChain[] = cmd.chain === "all" ? ["bnb", "sol"] : [cmd.chain];
+        const now = Date.now();
+        const st = await ctx.runQuery(internal.terminal.botGetState, {});
+        const views: Partial<Record<ScanChain, ChainRoutesView>> = {};
+        const refused: Array<{ chain: ScanChain; retryInMs: number }> = [];
+        const idle = (chain: ScanChain, note: string | null): ChainRoutesView =>
+          // A chain this tap did not read still renders, with its REAL last read.
+          idleRoutesView(chat, st, chain, now, note);
+
+        for (const chain of wanted) {
+          const claimedAt = Date.now();
+          const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
+            chatId,
+            chain,
+            scope: "routes",
+            now: claimedAt,
+          });
+          if (!claim.allowed) {
+            refused.push({ chain, retryInMs: claim.retryInMs });
+            views[chain] = idle(
+              chain,
+              `cooling down — its routes refresh is back in ${Math.max(1, Math.ceil(claim.retryInMs / 1000))}s.`,
+            );
+            continue;
+          }
+          if (chain === "bnb") {
+            const view = await scanRoutes(ctx);
+            if (!view) {
+              // Nothing was read, so nothing is charged to this budget.
+              await ctx.runMutation(internal.telegramBot.releaseScan, {
+                chatId,
+                chain,
+                scope: "routes",
+                claimedAt,
+              });
+              views.bnb = {
+                ...idle(
+                  "bnb",
+                  "live feed unreachable right now — nothing was read, the budget was not spent.",
+                ),
+                cooldown: { allowed: true, retryInMs: 0 },
+              };
+              continue;
+            }
+            views.bnb = bnbRoutesView(view, Date.now());
+            continue;
+          }
+          // SOL: one real pass through the SAME engine body /sol_scan runs. It
+          // yields to the app and to its own lease rather than disrupting them.
+          const res = await ctx.runAction(internal.terminal.scanPass, { chain: "sol" });
+          if (!res.ran) {
+            await ctx.runMutation(internal.telegramBot.releaseScan, {
+              chatId,
+              chain: "sol",
+              scope: "routes",
+              claimedAt,
+            });
+            views.sol = idle(
+              "sol",
+              `pass did not run: ${solPassReason(res.reason)} — the budget was not spent.`,
+            );
+            continue;
+          }
+          views.sol = solRoutesView(res, Date.now());
+        }
+
+        if (refused.length === wanted.length) {
+          await reply(
+            refused
+              .map((entry) => routesCooldownMessage(entry.chain, entry.retryInMs))
+              .join("\n\n"),
+            mainMenu().keyboard,
+          );
           return done("routes:cooldown");
         }
-        const view = await scanRoutes(ctx);
-        if (!view) {
-          // Nothing was read, so nothing is charged to the budget.
-          await ctx.runMutation(internal.telegramBot.releaseScan, {
-            chatId,
-            chain: "bnb",
-            claimedAt,
-          });
-          await reply("⚠️ Live feed unreachable right now — retry in a moment.");
-          return done("routes-feed-down");
-        }
-        const m = routesMessage(view.live, view.generated);
+        const m = routesMessage(
+          {
+            bnb: views.bnb ?? idle("bnb", "not read by this tap — use its refresh button."),
+            sol: views.sol ?? idle("sol", "not read by this tap — use its refresh button."),
+          },
+          Date.now(),
+        );
         await reply(m.text, m.keyboard);
         return done("routes");
       }
@@ -3036,7 +3232,23 @@ export const handleUpdate = internalAction({
           chain: "bnb",
           subsystem: "scan",
         });
-        const m = routesMessage(view.live, view.generated);
+        // Same board as /routes, with the BNB section from this read and the
+        // SOL section honestly marked as not read by this tap.
+        const now = Date.now();
+        const st = await ctx.runQuery(internal.terminal.botGetState, {});
+        const m = routesMessage(
+          {
+            bnb: bnbRoutesView(view, now),
+            sol: idleRoutesView(
+              chat,
+              st,
+              "sol",
+              now,
+              "not read by /bnb_scan — /routes@sol runs its own pass.",
+            ),
+          },
+          now,
+        );
         await reply(m.text, m.keyboard);
         return done("bnb_scan");
       }
@@ -3070,16 +3282,7 @@ export const handleUpdate = internalAction({
           chain: "sol",
           claimedAt,
         });
-        const why =
-          res.reason === "not-running"
-            ? "the SOL scanner is stopped (/sol_on to engage)"
-            : res.reason === "app-online"
-              ? "the app is driving the SOL scan right now"
-              : res.reason === "no-state"
-                ? "no SOL terminal state yet — open the SOL terminal once"
-                : res.reason === "loop-alive"
-                  ? "a SOL pass is already in flight"
-                  : "the engine lease just renewed — retry in a second";
+        const why = solPassReason(res.reason);
         await reply(`☀️ SOL scan did not run: ${why}.`, mainMenu().keyboard);
         return done(`sol_scan:${res.reason ?? "yielded"}`);
       }

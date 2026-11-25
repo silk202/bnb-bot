@@ -25,6 +25,13 @@ export interface BotChat {
   /** Last accepted manual scan per chain (epoch ms) — the cooldown stamp. */
   lastBnbScanAt?: number;
   lastSolScanAt?: number;
+  /**
+   * The same, for the `/routes` board's own slot. Separate from the scan
+   * stamps on purpose: reading routes is not scanning, so one must never spend
+   * the other's window.
+   */
+  lastBnbRoutesAt?: number;
+  lastSolRoutesAt?: number;
   silent: boolean;
   blocked: boolean;
 }
@@ -38,7 +45,28 @@ export interface BotChat {
  */
 export const SCAN_COOLDOWN_MS = 30_000;
 
+/**
+ * The `/routes` board's own budget — per chat AND per chain.
+ *
+ * `/routes` used to spend the `/bnb_scan` window because it reads the same live
+ * feed. That made the two boards fight over one slot: a scan tap greyed out the
+ * routes board, and a routes tap refused a scan. They are different questions
+ * ("scan this chain now" vs "show me its routes now"), so they get different
+ * slots — and the slot is per chain, because the BNB feed and the SOL engine are
+ * independent. Refreshing BNB routes can never make the SOL section unavailable.
+ */
+export const ROUTE_COOLDOWN_MS = 30_000;
+
 export type ScanChain = "bnb" | "sol";
+
+/** Which budget a manual feed read spends: a scan, or the routes board. */
+export type ScanScope = "scan" | "routes";
+
+/** A chat's four slot stamps: chain × scope. */
+export type ScanSlotChat = Pick<
+  BotChat,
+  "lastBnbScanAt" | "lastSolScanAt" | "lastBnbRoutesAt" | "lastSolRoutesAt"
+>;
 
 /** The answer both the claim mutation and the boards render. */
 export interface ScanCooldownState {
@@ -86,22 +114,48 @@ export function cooldownStateLabel(state: ScanCooldownState): string {
   return state.allowed ? "ready" : `in ${Math.max(1, Math.ceil(state.retryInMs / 1000))}s`;
 }
 
+/** How long the window is for a scope — the claim and the boards share this. */
+export function scanWindowMs(scope: ScanScope): number {
+  return scope === "routes" ? ROUTE_COOLDOWN_MS : SCAN_COOLDOWN_MS;
+}
+
+/** The stamp a (chain, scope) slot reads. Absent = that slot never ran. */
+export function scanSlotStamp(
+  chat: ScanSlotChat | null | undefined,
+  chain: ScanChain,
+  scope: ScanScope,
+): number | undefined {
+  if (!chat) return undefined;
+  if (scope === "routes") return chain === "bnb" ? chat.lastBnbRoutesAt : chat.lastSolRoutesAt;
+  return chain === "bnb" ? chat.lastBnbScanAt : chat.lastSolScanAt;
+}
+
+/** The state of one (chain, scope) slot for this chat — the one rule. */
+export function scanSlotCooldown(
+  chat: ScanSlotChat | null | undefined,
+  chain: ScanChain,
+  scope: ScanScope,
+  now: number,
+): ScanCooldownState {
+  return scanCooldown(scanSlotStamp(chat, chain, scope), now, scanWindowMs(scope));
+}
+
 /**
- * `/routes` reads the same live feed `/bnb_scan` does, so it spends the same
- * per-chat budget. Its refusal names the feed and the shared budget, rather
- * than looking like an unrelated scan cooldown.
+ * A refused `/routes` refresh. It names the chain, its remaining seconds and
+ * its OWN budget — never the scan window it no longer shares — so the operator
+ * can tell the two boards apart when both are quiet.
  */
-export function feedCooldownMessage(
+export function routesCooldownMessage(
   chain: ScanChain,
   retryInMs: number,
-  cooldownMs: number = SCAN_COOLDOWN_MS,
+  cooldownMs: number = ROUTE_COOLDOWN_MS,
 ): string {
   const label = chain === "bnb" ? "BNB" : "SOL";
   const wait = Math.max(1, Math.ceil(retryInMs / 1000));
   const window = Math.max(1, Math.round(cooldownMs / 1000));
   return [
-    `⏳ **${label} live feed is cooling down** — try again in ${wait}s.`,
-    `One manual ${label} feed pass every ${window}s (shared with /${chain}_scan) keeps repeated taps off the provider.`,
+    `⏳ **${label} routes are cooling down** — try again in ${wait}s.`,
+    `One ${label} routes refresh every ${window}s keeps repeated taps off the feed; /${chain}_scan keeps its own budget.`,
   ].join("\n");
 }
 
@@ -776,6 +830,40 @@ export function parseTgUpdate(raw: unknown): TgUpdate | null {
 // Identity + auth responses
 // ---------------------------------------------------------------------------
 
+/**
+ * The part of Telegram's `getWebhookInfo` that decides whether registration
+ * needs repair. Everything else in that answer is reporting, not a verdict.
+ */
+export interface WebhookHealth {
+  url?: string | null;
+  last_error_message?: string | null;
+}
+
+/**
+ * Does the webhook need (re)registering?
+ *
+ * Two things go wrong, and both leave the bot silent while the code looks
+ * healthy:
+ *
+ *  - the URL is missing or points at another host (a fresh deployment, or a
+ *    production move) — nothing is delivered at all;
+ *  - the URL is right but Telegram reports a DELIVERY ERROR. The one that bit
+ *    production: `setWebhook` was called without `secret_token`, while the
+ *    handler requires the matching `X-Telegram-Bot-Api-Secret-Token` header, so
+ *    every update was answered 401 and Telegram kept the error on the webhook.
+ *    A URL-only check calls that healthy and never heals it, so the error is
+ *    part of the verdict here. Re-registering re-sends the secret; the error
+ *    clears on the next update Telegram manages to deliver.
+ */
+export function webhookNeedsRepair(
+  health: WebhookHealth | null | undefined,
+  expectedUrl: string,
+): boolean {
+  const url = (health?.url ?? "").trim();
+  if (!url || url !== expectedUrl.trim()) return true;
+  return Boolean(health?.last_error_message?.trim());
+}
+
 /** Bot username stamped at build time is unknown here — the menu links use
  * t.me deep links that resolve via the bot token at runtime (backend). */
 export function startMessage(): { text: string; keyboard: TgKeyboard } {
@@ -1310,29 +1398,37 @@ export function enginesMessage(
     solSniper: EngineStamp;
   },
   now: number,
-  // This chat's manual-scan budget. Shown on the two scanner lines so the
-  // "Scan now" buttons never look broken while the feed is cooling down.
-  cooldown?: { bnb: ScanCooldownState; sol: ScanCooldownState },
+  // This chat's budgets, per chain and per board. Shown on the two scanner
+  // lines so "Scan now" and "Routes" never look broken while one is cooling
+  // down, and so the two windows are visibly independent.
+  cooldown?: {
+    bnb: ScanCooldownState;
+    sol: ScanCooldownState;
+    bnbRoutes?: ScanCooldownState;
+    solRoutes?: ScanCooldownState;
+  },
 ): { text: string; keyboard: TgKeyboard } {
   const line = (
     name: string,
     on: boolean,
     st: EngineStamp,
     cd?: ScanCooldownState,
+    rt?: ScanCooldownState,
   ): string => {
     const sw = on ? "🟢 ON" : "🔴 OFF";
     const manual = cd ? ` · manual scan ${cooldownStateLabel(cd)}` : "";
-    if (!st.at) return `• ${name}: ${sw} · starting…${manual}`;
+    const routes = rt ? ` · routes ${cooldownStateLabel(rt)}` : "";
+    if (!st.at) return `• ${name}: ${sw} · starting…${manual}${routes}`;
     const drv = st.source === "server" ? "engine" : st.source === "client" ? "app" : "—";
-    return `• ${name}: ${sw} · last pass ${fmtAgo(st.at, now)} (${drv})${manual}`;
+    return `• ${name}: ${sw} · last pass ${fmtAgo(st.at, now)} (${drv})${manual}${routes}`;
   };
   return {
     text: [
       "⚙️ **FlashBolt engines — 24/7 server autonomy**",
       "",
       "These loops run on the Convex servers with the app closed:",
-      line("BNB scanner", running.bnb, stamps.bnbScan, cooldown?.bnb),
-      line("SOL scanner", running.sol, stamps.solScan, cooldown?.sol),
+      line("BNB scanner", running.bnb, stamps.bnbScan, cooldown?.bnb, cooldown?.bnbRoutes),
+      line("SOL scanner", running.sol, stamps.solScan, cooldown?.sol, cooldown?.solRoutes),
       line("BNB sniper", running.bnb, stamps.bnbSniper),
       line("SOL sniper", running.sol, stamps.solSniper),
       "",
@@ -1341,7 +1437,7 @@ export function enginesMessage(
       "each engine stands down only when its own chain is stopped.",
       ...(cooldown
         ? [
-            `Manual scans (/bnb_scan, /sol_scan) and /routes share a ${Math.round(SCAN_COOLDOWN_MS / 1000)}s budget per chat.`,
+            `Manual scans (/bnb_scan, /sol_scan) and /routes each keep their own ${Math.round(SCAN_COOLDOWN_MS / 1000)}s budget per chat and chain.`,
           ]
         : []),
     ].join("\n"),
@@ -1373,30 +1469,99 @@ export interface RouteLite {
   netProfitPct?: number;
 }
 
+/** One route, rendered the same way on every board that lists one. */
+function routeLine(r: RouteLite): string {
+  const pct = r.netProfitPct ?? r.profitPct;
+  return `${r.legs.join(" → ")} — +${pct.toFixed(2)}% ${r.lender} · ${fmtUsd(r.liquidityUsd)}`;
+}
+
+/**
+ * One chain's section of `/routes`.
+ *
+ * BNB reports route rows (the live feed returns them); the SOL engine reports a
+ * pass verdict — counts, no rows. Both are real backend answers, so the board
+ * carries whichever one the chain actually produced instead of inventing rows
+ * for the engine that does not return them.
+ */
+export interface ChainRoutesView {
+  /** Route rows, when the chain produced a readable board (the BNB feed). */
+  live: RouteLite[];
+  generated: RouteLite[];
+  /** Counts only, when the engine reports a pass without rows (the SOL engine). */
+  liveCount?: number | null;
+  generatedCount?: number | null;
+  /** Open opportunities the chain's own state reports; null = unknown. */
+  opportunities: number | null;
+  /** When this chain was last read/passed (epoch ms); null = never. */
+  at: number | null;
+  source: "client" | "server" | null;
+  /** This chat's `/routes` budget for THIS chain — never the other chain's. */
+  cooldown: ScanCooldownState;
+  /** Why the read did not run, or came back empty, when that is known. */
+  note?: string | null;
+}
+
+/** "read just now", "read 4m ago", "not read yet" — never a faked age. */
+function routesFreshness(at: number | null, now: number): string {
+  if (at === null || !Number.isFinite(at)) return "not read yet";
+  const age = Math.max(0, now - at);
+  return age < 1_000 ? "read just now" : `read ${fmtAgo(at, now)}`;
+}
+
+/**
+ * `/routes` covers BNB and SOL separately.
+ *
+ * Each chain gets its own heading with its own freshness and its own budget,
+ * because the two engines are independent: a BNB refresh must not make the SOL
+ * section look unavailable, and a SOL pass yielding to the app must not hide the
+ * BNB board. A chain that was not read by this tap says so with its real last
+ * read and its remaining seconds.
+ */
 export function routesMessage(
-  live: RouteLite[],
-  generated: RouteLite[],
+  input: { bnb: ChainRoutesView; sol: ChainRoutesView },
+  now: number,
 ): { text: string; keyboard: TgKeyboard } {
-  const line = (r: RouteLite) =>
-    `• ${r.legs.join(" → ")} — +${(r.netProfitPct ?? r.profitPct).toFixed(2)}% ${r.lender} · ${fmtUsd(r.liquidityUsd)}`;
-  const liveRows = live.slice(0, 6);
-  const genRows = generated.slice(0, 6);
+  const section = (chain: ScanChain, view: ChainRoutesView): string[] => {
+    const label = chain === "bnb" ? "⚡ BNB FlashBolt" : "☀️ SOL FlashBolt";
+    const drv = view.source === "server" ? "engine" : view.source === "client" ? "app" : null;
+    const freshness = `${routesFreshness(view.at, now)}${drv && view.at !== null ? ` (${drv})` : ""}`;
+    const lines = [
+      `**${label}** — ${freshness} · routes ${cooldownStateLabel(view.cooldown)}`,
+    ];
+    const live = view.live.slice(0, 4);
+    const generated = view.generated.slice(0, 4);
+    if (live.length) lines.push(...live.map((r) => `⛓ ${routeLine(r)}`));
+    else if (view.liveCount != null) {
+      lines.push(`• ${view.liveCount} live route${view.liveCount === 1 ? "" : "s"} this pass`);
+    } else lines.push("• No live routes above the floor right now.");
+    if (generated.length) lines.push(...generated.map((r) => `🧮 ${routeLine(r)}`));
+    else if (view.generatedCount != null) {
+      lines.push(
+        `• ${view.generatedCount} generated route${view.generatedCount === 1 ? "" : "s"} this pass`,
+      );
+    } else lines.push("• No generated routes this pass.");
+    if (view.opportunities != null) lines.push(`• Open opportunities ${view.opportunities}`);
+    if (view.note) lines.push(`• ${view.note}`);
+    return lines;
+  };
   return {
     text: [
       "🛣 **Live arbitrage routes**",
       "",
-      liveRows.length ? "**LIVE (real feed, above floor)**" : "No live routes above the floor right now.",
-      ...liveRows.map(line),
+      ...section("bnb", input.bnb),
       "",
-      genRows.length ? "**GENERATED (triangular scan)**" : "No generated routes this pass.",
-      ...genRows.map(line),
+      ...section("sol", input.sol),
       "",
-      "_Live data from the same feed the terminal scans._",
+      "_Live data from the same feeds the terminals scan — /routes keeps one budget per chain._",
     ].join("\n"),
     keyboard: [
       [
-        { text: "🔄 Refresh", callback_data: "cmd:/routes" },
+        { text: "🔄 BNB routes", callback_data: "cmd:/routes@bnb" },
+        { text: "🔄 SOL routes", callback_data: "cmd:/routes@sol" },
+      ],
+      [
         { text: "⚡ BNB", callback_data: "cmd:/bnb" },
+        { text: "☀️ SOL", callback_data: "cmd:/sol" },
       ],
       [{ text: "🧭 Menu", callback_data: "menu:main" }],
     ],
@@ -2025,7 +2190,7 @@ export type BotCommand =
   | { kind: "bnb_paper" }
   | { kind: "bnb_live" }
   | { kind: "bnb_scan" }
-  | { kind: "routes" }
+  | { kind: "routes"; chain: ScanChain | "all" }
   | { kind: "execs"; filter: ExecFilter }
   | { kind: "pnl"; filter: ExecFilter }
   | { kind: "sol" }
@@ -2092,7 +2257,16 @@ export function parseBotCommand(text: string | null): BotCommand {
     case "bnb_paper": return { kind: "bnb_paper" };
     case "bnb_live": return { kind: "bnb_live" };
     case "bnb_scan": return { kind: "bnb_scan" };
-    case "routes": return { kind: "routes" };
+    case "routes": {
+      // `/routes` covers BNB and SOL; `/routes@bnb` and `/routes@sol` focus one
+      // chain so a single tap spends only that chain's budget.
+      const f = t
+        .slice(1 + name.length)
+        .trim()
+        .toLowerCase()
+        .replace(/^@/, "");
+      return { kind: "routes", chain: f === "bnb" || f === "sol" ? f : "all" };
+    }
     case "execs": {
       // Suffix after the command name (e.g. "/execs@sim" → "@sim" → "sim").
       const f = t

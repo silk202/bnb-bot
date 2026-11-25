@@ -12,10 +12,13 @@ import {
   SCAN_COOLDOWN_MS,
   cooldownStateLabel,
   enginesMessage,
-  feedCooldownMessage,
+  routesCooldownMessage,
   scanCooldown,
   scanCooldownMessage,
+  scanSlotCooldown,
+  scanSlotStamp,
   type EngineStamp,
+  type ScanSlotChat,
 } from "../telegramBot";
 
 describe("manual scan cooldown", () => {
@@ -90,7 +93,7 @@ describe("cooldown on the boards", () => {
     expect(m.text).toContain(
       "SOL scanner: 🟢 ON · last pass 2m ago (app) · manual scan ready",
     );
-    expect(m.text).toContain("share a 30s budget per chat");
+    expect(m.text).toContain("each keep their own 30s budget per chat and chain");
     // Snipers are not manual-scan engines and carry no cooldown text.
     expect(m.text).toContain("SOL sniper: 🟢 ON · last pass 1h ago (engine)\n");
   });
@@ -107,10 +110,51 @@ describe("cooldown on the boards", () => {
     expect(cooldownStateLabel({ allowed: false, retryInMs: 18_400 })).toBe("in 19s");
   });
 
-  test("/routes refuses on the shared feed budget and says so", () => {
-    const msg = feedCooldownMessage("bnb", 12_000);
-    expect(msg).toContain("BNB live feed is cooling down");
+  test("/routes refuses on its OWN budget and says so", () => {
+    const msg = routesCooldownMessage("bnb", 12_000);
+    expect(msg).toContain("BNB routes are cooling down");
     expect(msg).toContain("try again in 12s");
-    expect(msg).toContain("shared with /bnb_scan");
+    expect(msg).toContain("/bnb_scan keeps its own budget");
+  });
+});
+
+describe("routes hold their own slot, per chain", () => {
+  const NOW = 2_000_000;
+  const chat: ScanSlotChat = {
+    lastBnbScanAt: NOW - 5_000,
+    lastSolScanAt: NOW - 60_000,
+    lastBnbRoutesAt: NOW - 10_000,
+    lastSolRoutesAt: 0,
+  };
+
+  test("a scan stamp and a routes stamp are different slots", () => {
+    // BNB scanned 5s ago: the scan slot is closed...
+    expect(scanSlotCooldown(chat, "bnb", "scan", NOW).allowed).toBe(false);
+    // ...while its routes slot has its own window (10s of 30s used).
+    const routes = scanSlotCooldown(chat, "bnb", "routes", NOW);
+    expect(routes.allowed).toBe(false);
+    expect(routes.retryInMs).toBe(20_000);
+  });
+
+  test("refreshing BNB routes never closes the SOL routes slot", () => {
+    expect(scanSlotCooldown(chat, "bnb", "routes", NOW).allowed).toBe(false);
+    // SOL routes was released (0) — the other chain's refresh did not touch it.
+    expect(scanSlotCooldown(chat, "sol", "routes", NOW).allowed).toBe(true);
+    // And SOL's scan slot is still its own, untouched by either routes stamp.
+    expect(scanSlotCooldown(chat, "sol", "scan", NOW).allowed).toBe(true);
+  });
+
+  test("a released routes stamp (0) opens the slot at once", () => {
+    expect(scanSlotStamp(chat, "sol", "routes")).toBe(0);
+    expect(scanSlotCooldown(chat, "sol", "routes", NOW).allowed).toBe(true);
+  });
+
+  test("a chat that never read routes or scanned is open on every slot", () => {
+    for (const chain of ["bnb", "sol"] as const) {
+      for (const scope of ["scan", "routes"] as const) {
+        expect(scanSlotCooldown(undefined, chain, scope, NOW).allowed).toBe(true);
+        expect(scanSlotCooldown({}, chain, scope, NOW).allowed).toBe(true);
+      }
+    }
   });
 });

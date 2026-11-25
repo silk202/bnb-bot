@@ -163,7 +163,30 @@ function keyboards(): Array<{ label: string; keyboard: TgKeyboard }> {
         NOW,
       ).keyboard,
     },
-    { label: "routes", keyboard: routesMessage([], []).keyboard },
+    {
+      label: "routes",
+      keyboard: routesMessage(
+        {
+          bnb: {
+            live: [],
+            generated: [],
+            opportunities: 0,
+            at: NOW,
+            source: "server",
+            cooldown: { allowed: true, retryInMs: 0 },
+          },
+          sol: {
+            live: [],
+            generated: [],
+            opportunities: 0,
+            at: null,
+            source: null,
+            cooldown: { allowed: true, retryInMs: 0 },
+          },
+        },
+        NOW,
+      ).keyboard,
+    },
     { label: "execs:all", keyboard: executionsMessage([], NOW, "all").keyboard },
     { label: "execs:live", keyboard: executionsMessage([], NOW, "live").keyboard },
     { label: "execs:sim", keyboard: executionsMessage([], NOW, "sim").keyboard },

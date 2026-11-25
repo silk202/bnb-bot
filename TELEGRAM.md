@@ -46,16 +46,25 @@ The menu includes both scan commands:
 The `start_payload` kind (deep-link `/start <CODE>`), bare pairing codes and
 `/pair` are not menu entries; they are handled but not advertised.
 
-Manual feed work shares a **per-chat cooldown**: one pass per chain every 30
-seconds (`SCAN_COOLDOWN_MS`). `/bnb_scan`, `/sol_scan` **and `/routes`** spend it —
-`/routes` reads the same BNB feed, so it is not a bypass. The slot is claimed
-atomically before any feed work, so a double tap (or a Telegram retry) cannot
-fire two passes; a tap inside the window answers with the real remaining seconds
-instead of scanning. A pass that never ran — feed unreachable, or `scanPass`
-yielded to the app, a stopped scanner or an in-flight lease — releases the slot,
-so the chat is not charged for work it did not get. `/engines` and `/status`
-show the readiness ("manual scan ready" / "in 18s") so a cooling-down button is
-explained before it is tapped.
+Manual feed work is rate-limited by **four independent slots per chat** — one
+window per chain *per board*: a scan slot (`/bnb_scan`, `/sol_scan`) and a routes
+slot (`/routes`), each 30 seconds (`SCAN_COOLDOWN_MS` / `ROUTE_COOLDOWN_MS`).
+Scanning and reading routes are different questions, and the BNB feed and the SOL
+engine are different engines, so a scan tap can never grey out the routes board,
+a BNB refresh can never close the SOL window, and vice versa.
+
+`/routes` covers both chains in one board, each section with its own freshness and
+its own budget: BNB lists the live feed's route rows, SOL reports the engine
+pass's live/generated counts (which is what the SOL engine returns — rows are
+never invented for it). `/routes@bnb` and `/routes@sol` refresh one chain and
+spend only that chain's slot. Every slot is claimed atomically before any feed
+work, so a double tap (or a Telegram retry) cannot fire two passes; a tap inside
+the window answers with the real remaining seconds instead of reading. A pass
+that never ran — feed unreachable, or `scanPass` yielded to the app, a stopped
+scanner or an in-flight lease — releases the slot, so the chat is not charged for
+work it did not get, and the section says why. `/engines` and `/status` show the
+readiness of both boards per chain ("manual scan ready · routes in 18s") so a
+cooling-down button is explained before it is tapped.
 
 ## Commands — what they display
 
@@ -66,8 +75,8 @@ explained before it is tapped.
 | `/start` | Linked: engages the BNB engine server-side and shows the boot card (mode + chain, START/STOP/menu/help buttons). Unlinked: pairing card or auto-pair. |
 | `/menu` | Main menu board with inline buttons for every control (start/stop per chain, dashboard, status, engines, settings, deploy, balances, amounts, withdraw, panic, BNB/SOL boards, Trade, routes, executions, PnL, prices, orders, earn, alerts, sound, help). |
 | `/dashboard` | Session window, AI score/rating, route count, average edge, liquidity, volume, gas, fleet metrics. An unreachable feed answers with an explicit warning — numbers are never fabricated. |
-| `/status` | BNB/SOL engine state, mode, network/chain, contract address, wallet count, scans today + last scan source, this chat's manual-scan readiness per chain, opportunities, executions/wins/success rate, lifetime PnL, webhook health, bot username, linked chats, digest/sound/auto-pair prefs. |
-| `/engines`, `/engine` | The 24/7 board for all four engines (BNB scan, BNB sniper, SOL scan, SOL sniper) with per-engine freshness stamps, each scanner's manual-scan cooldown ("manual scan ready" / "in 18s") and start/stop controls. |
+| `/status` | BNB/SOL engine state, mode, network/chain, contract address, wallet count, scans today + last scan source, this chat's scan budget per chain and its routes budget per chain (separate slots), opportunities, executions/wins/success rate, lifetime PnL, webhook health, bot username, linked chats, digest/sound/auto-pair prefs. |
+| `/engines`, `/engine` | The 24/7 board for all four engines (BNB scan, BNB sniper, SOL scan, SOL sniper) with per-engine freshness stamps, each scanner's manual-scan cooldown and routes cooldown ("manual scan ready · routes in 18s"), and start/stop controls. |
 | `/help` | The full command board. Every slash command it names is parsed by `parseBotCommand`; a parity test fails if it advertises something unknown, and the docs-drift gate fails if the board and `TELEGRAM.md` disagree with `BOT_COMMAND_SPECS`. |
 
 ### BNB FlashBolt
@@ -79,8 +88,8 @@ explained before it is tapped.
 | `/bnb_off` | Stops BNB only; the SOL engine keeps its own switch. |
 | `/bnb_paper` | Sets the global mode to paper; reports that executions are simulated. |
 | `/bnb_live` | Sets the global mode to live; reports that real execution arms only with a deployed contract and a connected wallet. |
-| `/bnb_scan` | Runs one live feed scan immediately (subject to the 30s per-chat cooldown), stamps the BNB scan bookkeeping (freshness + opportunity count, the same bump the app's Scan performs) and replies with the live routes board. An unreachable feed returns the explicit warning instead of an empty board and releases the cooldown slot. |
-| `/routes` | Top live arbitrage routes from the current feed (no scan stamp). Reads the same live feed as `/bnb_scan`, so it spends the **same 30s per-chat budget** and refuses with the remaining seconds instead of bypassing the cooldown. |
+| `/bnb_scan` | Runs one live feed scan immediately (subject to its own 30s scan slot), stamps the BNB scan bookkeeping (freshness + opportunity count, the same bump the app's Scan performs) and replies with the routes board — BNB from this read, SOL marked as not read by this tap (`/routes@sol` runs its pass). An unreachable feed returns the explicit warning instead of an empty board and releases the slot. |
+| `/routes` | Live arbitrage routes, **BNB and SOL separately**: the BNB section lists the feed's live and generated route rows, the SOL section reports its engine pass's live/generated counts plus open opportunities. Each section carries its own freshness, its own budget (its own 30s slot, independent of `/bnb_scan` and of the other chain) and a note when it did not run. `/routes@bnb` and `/routes@sol` refresh one chain only. A refused chain shows the real remaining seconds while the other chain still refreshes. |
 | `/execs` | The recent executions trail. Filters: `/execs@live`, `/execs@sim`; the keyboard cycles all → live → sim. A row counts as LIVE when it carries a `txHash`. |
 | `/pnl` | On-chain PnL summary for BNB and SOL plus simulated totals. Same filters as `/execs`. |
 
@@ -162,8 +171,17 @@ row-level abandonment is surfaced on the board instead of being hidden.
   handled kind except the documented unlisted ones is advertised.
 - `bun test src/lib/__tests__/telegram-scan-cooldown.test.ts` — the 30s window,
   the exact boundary, a backwards clock failing closed, the released slot, the
-  reply naming the real remaining seconds, the `/routes` shared-budget refusal,
-  and the readiness shown on the `/engines` board.
+  reply naming the real remaining seconds, the `/routes` own-budget refusal, the
+  four independent slots, and the readiness shown on the `/engines` board.
+- `bun test src/lib/__tests__/telegram-webhook-health.test.ts` — the webhook
+  repair verdict: a missing or moved URL needs registering, and a correct URL
+  that Telegram is answering with a delivery error (the 401 that silence a bot
+  registered without `secret_token`) is NOT healthy.
+- `bun test src/lib/__tests__/telegram-routes-split.test.ts` — the per-chain
+  routes board: each section's own freshness and budget, BNB rows vs SOL counts,
+  the refused section beside a refreshed one, the "not read by this tap" note,
+  every button resolving to a handled command, and `/routes@bnb` / `/routes@sol`
+  parsing.
 - `bun test src/lib/__tests__/telegram-claim-batch.test.ts` — the bounded batch
   reply: per-asset totals, named partial failures, "nothing was changed", the
   remaining count on a truncated pass, and the 8-plan limit.
@@ -175,5 +193,20 @@ row-level abandonment is surfaced on the board instead of being hidden.
 - `bun run typecheck` — the dispatch switch is exhaustive over `BotCommand`, so a
   new kind without a case fails the build.
 
-These prove the contract and the builders. They do not exercise live Telegram
-delivery or rendering; that still needs a real bot token and a paired chat.
+These prove the contract and the builders. Live delivery and rendering are
+checked separately, against the real Bot API:
+
+```bash
+TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=… bun run smoke:telegram
+```
+
+`scripts/telegram-smoke.ts` reads the bot's real identity (`getMe`), its real
+webhook (`getWebhookInfo`), the LIVE command menu (`getMyCommands`, compared
+entry-for-entry with `BOT_COMMAND_SPECS` — names, descriptions and order, so a
+stale push cannot pass), and the target chat (`getChat`), checks that every
+button on the start/help/menu boards resolves to a handled command, then posts
+one real probe with the real main-menu keyboard and verifies Telegram's
+`message_id`. `--dry-run` runs every read-only check and sends nothing;
+`--clean` deletes the probe afterwards. The token and chat id are read from the
+environment and never printed. Exit codes: `0` pass, `1` a check failed, `2`
+missing configuration.

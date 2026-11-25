@@ -4512,3 +4512,113 @@ like the scan commands.
 Not verified here: live Telegram rendering of the new board lines, and the
 concurrent-claim behaviour under real balance contention (Convex retries
 conflicting mutations, but that was reasoned, not load-tested).
+
+---
+
+## Round 49 — Routes get their own per-chain slot, /routes covers BNB + SOL, live smoke
+
+Asked for: cooldown on BNB/SOL, split the routes slot, a flawless live smoke
+script, `/routes` covering BNB and SOL separately, and genuine live boards with
+the operator's bot token + chat id.
+
+### 1. The cooldown is now four slots per chat: chain × board
+
+- `ScanScope = "scan" | "routes"`; `ROUTE_COOLDOWN_MS = 30_000` sits beside
+  `SCAN_COOLDOWN_MS`. `scanWindowMs`, `scanSlotStamp` and `scanSlotCooldown` are
+  the one rule the claim mutation, `/engines` and `/status` all use.
+- Schema: `telegramBotChats.lastBnbRoutesAt` / `lastSolRoutesAt` (0 = released).
+  `claimScan` / `releaseScan` take an optional `scope`; the release is still
+  guarded on the exact stamp the tap wrote.
+- Consequence, pinned by tests: a `/bnb_scan` tap no longer greys out `/routes`,
+  and a BNB routes refresh never closes the SOL routes window.
+- `/engines` shows both per chain (`manual scan ready · routes in 18s`); `/status`
+  has a scan-budget line and a routes-budget line.
+- `feedCooldownMessage` (which named the shared budget) is replaced by
+  `routesCooldownMessage`, which names the routes window and says `/bnb_scan`
+  keeps its own.
+
+### 2. `/routes` covers BNB and SOL, each with its own freshness and budget
+
+- New `ChainRoutesView` + `routesMessage({ bnb, sol }, now)`: per-chain heading
+  with `read just now` / `read 4m ago` / `not read yet`, its own routes budget,
+  then either the feed's rows (BNB, `⛓` live / `🧮` generated) or the engine's
+  pass counts (SOL — that engine returns counts, so no rows are invented), then
+  open opportunities and, when known, why the section did not run.
+- `/routes` claims and reads BOTH chains; `/routes@bnb` and `/routes@sol` refresh
+  one chain and spend only that chain's slot (parser gains the filter). If every
+  requested chain is cooling down the reply is the two real waits; if one is
+  refused, its section states it while the other chain still refreshes.
+- SOL runs the SAME engine body `/sol_scan` runs, so it yields to the app, a
+  stopped scanner or an in-flight lease instead of disrupting them; the yield
+  releases the slot and the section names the reason (`solPassReason`, now shared
+  with `/sol_scan`).
+- `/bnb_scan` replies with the same board: BNB from its read, SOL marked as not
+  read by that tap.
+
+### 3. Live smoke script — and the two defects it found
+
+`scripts/telegram-smoke.ts` (`bun run smoke:telegram`) uses the real Bot API
+only: `getMe`, `getWebhookInfo`, `getMyCommands` compared entry-for-entry with
+`BOT_COMMAND_SPECS` (names, descriptions, order), `getChat`, a keyboard audit of
+the start/help/menu boards, then one real probe with the real main-menu keyboard,
+verified by `message_id`. `--dry-run`, `--clean`, `--chat <id>`; token and chat
+id are never printed; exit 0/1/2.
+
+Run against the configured bot (`@TAEngineBot`) and chat (`TASignal` channel):
+
+- ✔ identity, ✔ chat resolved, ✔ 34 board buttons all answered
+- ✔ live delivery — message 83254 accepted with the main-menu keyboard
+- ✔ cleanup — message 83254 deleted
+- ✗ webhook: `last error at 2026-11-25 08:37 UTC: Wrong response from the
+  webhook: 401 Unauthorized`
+- ✗ menu: 26 registered of 40 — the deployment the bot points at predates
+  rounds 45–48
+
+Both failures are real and both are the PROTECTED deployment
+`shiny-bulldog-311`, which is where this bot's webhook is registered (production,
+per CI, is `flexible-frog-776`). Nothing on `shiny-bulldog-311` was touched.
+
+Two code defects behind the 401, fixed here and tested:
+
+1. `registerWebhookInner` called `setWebhook` WITHOUT `secret_token`, while
+   `handleUpdate` rejects any update whose `X-Telegram-Bot-Api-Secret-Token`
+   differs from the stored `webhookSecret`. Telegram only sends that header when
+   the webhook was registered with it, so every update was answered 401 and the
+   bot was silent while registration reported success. Registration now sends
+   `secret_token` from `ensureConfig`.
+2. `ensureWebhookReady` read `url` off the `{ok, result}` envelope instead of
+   `result.url`, so the URL always looked wrong and every sweep re-registered —
+   and it never treated a Telegram delivery error as unhealthy, so the 401 never
+   healed. The verdict is now the pure, tested `webhookNeedsRepair(health, url)`:
+   a correct URL with `last_error_message` needs repair.
+
+### Tests
+
+- `telegram-routes-split.test.ts` (new, 9): both sections with their own
+  freshness/budget, BNB rows vs SOL counts, net-over-gross, honest empty state,
+  refused chain beside a refreshed one, "not read by this tap", every button
+  resolving, and `/routes@bnb|sol` parsing.
+- `telegram-webhook-health.test.ts` (new, 5): missing/moved URL, healthy URL,
+  the 401 case, whitespace, blanks.
+- `telegram-scan-cooldown.test.ts`: routes-refusal wording, four independent
+  slots, and the engines footer.
+- `telegram-menu.test.ts`: routes keyboard built from the new shape.
+
+### Checks
+
+- `bun run typecheck` → exit 0
+- `bun test telegram` → **77 pass / 0 fail**, 1359 expects
+- `bun run check:telegram-docs` → exit 0 (40 menu commands, 39 on /help)
+- `bun run smoke:telegram --dry-run` / `--clean` → run against the live bot, see above
+
+### Follow-ups opened
+
+3. The operator's bot webhook points at the protected `shiny-bulldog-311`, whose
+   build predates rounds 45–48 (26-command menu, webhook registered without the
+   secret). Until that deployment carries this code — or the webhook is
+   re-registered from `flexible-frog-776` — the bot answers nothing. Owner's call;
+   not touched here.
+4. `/claim` stays chain-agnostic on purpose: earn plans are per ASSET
+   (USDT/USDC), not per chain, so a "BNB/SOL claim" would have no real data
+   behind it. "/claims cover bnb/sol separately" was implemented as the claim
+   SLOTS being per chain and per board.
