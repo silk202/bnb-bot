@@ -3952,3 +3952,139 @@ its effect on a concurrent push (the separate concurrency group) can only be
 watched then. The configuration parses and the same code path was proved by the
 `guard_only` dispatch, which skips verify and Solana in exactly the way the cron
 does.
+
+---
+
+## Round 43 — the last three code follow-ups: JSON verdict, baseline ledger, ring budget
+
+Round 42 listed four remaining follow-ups; three needed no owner action. All
+three are below, each measured against the live deployments, plus one bug the
+measurement caught that would have silently emptied the new ledger.
+
+### 1. `--json`: a verdict a program can read (round 41 #6, round 42 #2)
+
+`bun run check:tasks --json` now writes exactly one JSON document to stdout.
+Everything human — the header, every check line, the summary — goes to stderr,
+and the report and ring entries for that run are `.json` (never a `.txt`
+containing JSON). The tee only merges stderr into the report in text mode, so a
+JSON run's report *is* the document: no stripping, no mixed streams.
+
+```json
+{
+  "schema": "flashbolt.task-guard/1",
+  "timestamp": "2026-11-25T12:10:17Z",
+  "commit": "local", "ref": null, "mode": "verify",
+  "result": "blocked", "exit_code": 2,
+  "counts": { "pass": 14, "fail": 0, "blocked": 3, "skipped": 2, "checks": 19 },
+  "report": "/tmp/guard-json.json",
+  "ring": { "entry": "…/20261125T121017Z.json", "dir": "…", "keep": 3, "max_bytes": 262144 },
+  "checks": [ { "id": "4c", "status": "blocked", "message": "4c. …", "details": ["…"] } ]
+}
+```
+
+How it is built matters more than the shape: the checks are recorded into a
+tab-separated file as they run (`pass`/`fail`/`blocked`/`skipped`, plus `note`
+lines attached to the check they follow), and python3 serializes that with
+`json.dumps`. A document assembled with `printf` from messages that contain
+`"`, `\` and `[Request ID: …]` is a document that eventually stops parsing. The
+exit code is unchanged in every mode: 0 proved, 1 failed, 2 provider-blocked.
+
+Two bugs found while proving it, both by running it rather than reading it:
+
+- **`skip` vs `skipped`.** The printer recorded `skip` while the counter keyed
+  on `skipped`, so a real skipped check counted as zero. The harness fixture
+  caught it (`{'pass': 1, 'fail': 1, 'blocked': 1, 'skipped': 0}` where 1 was
+  expected); the record status is now `skipped` and the text output did not
+  change.
+- **Skipped checks were indistinguishable from notes.** They printed with the
+  same eight-space indent. They still print exactly that way (text output stays
+  byte-identical), but they are now counted and labelled `skipped` instead of
+  being invisible to the machine.
+
+Text mode was not disturbed: the same live run (below) produced the same
+verdicts with the same prefixes, exit 2, and only one new fact in the header
+(`<= 262144 B` for the ring).
+
+### 2. Superseded baseline stamps outlive the cap (round 41 #8, round 42 #3)
+
+`.task-baseline` keeps the newest 10 superseded stamps and the cap used to be a
+single log line: `baseline history capped at 10 line(s); 3 oldest … dropped`.
+The stamps themselves were gone — data loss with a footnote.
+
+They now live in **`reports/baseline-history.md`**: an append-only table the
+guard copies every superseded stamp into *before* it rewrites the baseline, and
+that it backfills from on every run (idempotent, so a deleted ledger heals
+itself and a stamp is never written twice). The cap is now a display limit.
+
+The dedupe for "have I seen this stamp?" was wrong in the first version, and
+only the harness proved it. Each row has a `Replaced by` cell, so a search for
+`| <stamp> |` anywhere in the file matched the row that *superseded* the stamp
+being appended — every second stamp looked present:
+
+```
+| `S0` | R0 | U0 | `S1` | rollout 0 |     <- contains `| `S1` |`
+```
+
+Measured before the fix: 6 of 12 rows written, no warning, no error. The match
+is now anchored to the first cell (`^| \`<stamp>\` |`). Also, a drop is no
+longer reported as a count: each stamp is named with its `recorded`/`superseded`/
+`replaced_by` fields, which is what makes a trimmed baseline auditable.
+
+Harness evidence (network-free):
+
+| Case | Result |
+|---|---|
+| 12 history lines + 1 new stamp | baseline keeps 10, **all 13** stamps in the ledger |
+| drop reporting | each of the 3 dropped stamps named, kept stamps not named |
+| second advance | exactly one new row, no duplicate stamp |
+| idempotent backfill | ledger byte-identical, silent |
+| ledger deleted, baseline unchanged | 10 rows rebuilt, `baseline ledger: copied 10 …` |
+
+The two stamps already in `.task-baseline` are backfilled into the committed
+ledger: `20261113T212057Z-50da370bf26a` and `20261123T234400Z-ab2c2501a060`.
+
+### 3. A ring budget in bytes (round 42 #4)
+
+`TASK_GUARD_KEEP` bounded the ring by count (20 runs). The artifact is uploaded
+by size, so the count alone can't bound it. `TASK_GUARD_MAX_BYTES` (default
+262144 = 256 KiB) is now enforced alongside it.
+
+The trim moved from before the run to **after** it. Trimming beforehand can only
+guess the size of the file about to be written; trimming afterwards counts the
+file just written, which is the file the budget is about. Two invariants:
+
+- The **newest** verdict is never the one trimmed — the ring exists to be read.
+  A single run larger than the whole budget is kept, with a warning that says so.
+- Both limits print what they dropped and why: `guard ring trimmed 3 oldest
+  run(s) … (now 2 file(s), 102 B; limit size 120 B)`.
+
+Measured sizes today: a real text run is **2756 B**, a real JSON run **4528 B**.
+Twenty runs at that size is ~90 KiB, so the count is still the binding limit and
+256 KiB is a backstop, not a behaviour change. The CI artifact path now also
+picks up `*.json` ring entries, so a `--json` run in CI would not lose its log.
+
+### Checks run before pushing
+
+- `bash -n scripts/check-4-tasks.sh` — clean.
+- Harness `/tmp/guard-harness.sh` (network-free, extracts the ring/ledger/JSON
+  functions from the script itself): **all 20 assertions pass**, including the
+  three failure modes above.
+- **Live text run** (real deployments, `SKIP_LOGIN=1`, `/tmp` report + ring so
+  the repo's history is not polluted): 41.7 s, exit **2**, **3 BLOCKED**
+  (unchanged: dev names its plan ceiling, prod answers a bare provider error
+  after 2 attempts), check 6 `reference unchanged`, 4a/4b/7 all PASS. The
+  ledger backfill printed nothing — it had nothing to add, which is the
+  idempotence proof on the real file.
+- **Live JSON run** through `bun run check:tasks --json` — 27.6 s, exit **2**,
+  4528 B of **valid** JSON, `counts 14 pass / 0 fail / 3 blocked / 2 skipped /
+  19 checks`, human lines on stderr, ring entry `20261125T121017Z.json`.
+  Bun forwarded the flag verbatim (`$ bash scripts/check-4-tasks.sh --json` in
+  its own stderr echo), so the documented `bun run check:tasks --json` form is
+  the real invocation.
+
+### Remaining follow-ups
+
+1. **Provider ceiling** (round 41 #1) — unchanged and owner-only: 3 checks stay
+   BLOCKED until dev/prod function serving returns (dev: free-plan disable;
+   prod: bare `[Request ID: …] Server Error`). Nothing in the repo fixes it and
+   nothing here pretends otherwise.

@@ -33,6 +33,8 @@
 #   bun run check:tasks          # verify only
 #   bun run check:tasks --fix    # repair .env.local, re-apply JWKS/JWT + reseed,
 #                                # re-record the protected-deployment baseline
+#   bun run check:tasks --json   # one JSON document on stdout, human lines on
+#                                # stderr, report and ring written as .json
 #
 # Optional inputs (from .env.local or the environment):
 #   OPERATOR_EMAIL / OPERATOR_PASSPHRASE   sign in with these instead of the
@@ -46,10 +48,20 @@
 #   PROTECTED_URL                          deployment that must stay untouched
 #   PROTECTED_BASELINE                     baseline file (default .task-baseline)
 #   PROTECTED_BASELINE_HISTORY             superseded stamps kept there (default 10)
-#   TASK_REPORT                            latest run log (default reports/task-guard-latest.txt)
+#   PROTECTED_BASELINE_LEDGER              append-only copy of every superseded
+#                                          stamp, never trimmed (default
+#                                          reports/baseline-history.md)
+#   TASK_REPORT                            latest run log (default
+#                                          reports/task-guard-latest.txt, or
+#                                          .json with --json)
 #   TASK_GUARD_HISTORY_DIR                 timestamped ring of past runs
 #                                          (default reports/task-guard)
 #   TASK_GUARD_KEEP                        runs kept in that ring (default 20)
+#   TASK_GUARD_MAX_BYTES                   byte budget for that ring (default
+#                                          262144). Both limits are applied
+#                                          after the run, so the file just
+#                                          written counts against them; the
+#                                          newest run is never trimmed
 #
 # Exit code: 0 = all checks pass, 1 = at least one failure, 2 = no check failed
 #            but the provider blocked at least one (nothing was proved false).
@@ -57,53 +69,132 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
 
+# ── arguments ──────────────────────────────────────────────────────────────
+# Parsed first because two of them decide where the verdict goes. The script
+# re-executes itself once (below) and passes its arguments through verbatim, so
+# both the parent and the child see the same flags.
+FIX=0
+JSON_MODE=0
+for arg in "$@"; do
+  case "$arg" in
+    --fix)  FIX=1 ;;
+    --json) JSON_MODE=1 ;;
+    --)     ;;
+    *) printf 'WARN    ignoring unknown argument %s (supported: --fix, --json)\n' "$arg" >&2 ;;
+  esac
+done
+
+# ── ring bookkeeping ───────────────────────────────────────────────────────
+# The timestamped ring bounds itself two ways: a count, and a byte budget. The
+# count is the readable limit; the bytes are what a CI artifact actually pays
+# for. Both are enforced *after* a run, so the file just written is counted
+# against the limit that decides what survives — trimming beforehand can only
+# guess at its size.
+ring_files() { # dir -> one ring file per line, oldest first
+  local dir="$1" f
+  for f in "$dir"/*.txt "$dir"/*.json; do
+    [ -f "$f" ] && printf '%s\n' "$f"
+  done | sort
+}
+ring_stats() { # dir -> "count bytes"
+  local dir="$1" f count=0 bytes=0 size
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+    count=$((count + 1))
+    bytes=$((bytes + ${size:-0}))
+  done <<< "$(ring_files "$dir")"
+  printf '%s %s' "$count" "$bytes"
+}
+trim_ring() { # dir keep max_bytes
+  local dir="$1" keep="$2" max="$3" count=0 bytes=0 oldest="" reason="" dropped=0
+  while :; do
+    read -r count bytes <<< "$(ring_stats "$dir")"
+    if [ "${count:-0}" -gt "$keep" ]; then
+      reason="count ${keep}"
+    elif [ "${max:-0}" -gt 0 ] && [ "${bytes:-0}" -gt "$max" ] && [ "${count:-0}" -gt 1 ]; then
+      reason="size ${max} B"
+    else
+      break
+    fi
+    oldest="$(ring_files "$dir" | head -n 1)"
+    [ -n "$oldest" ] || break
+    rm -f "$oldest" || break
+    dropped=$((dropped + 1))
+  done
+  if [ "$dropped" -gt 0 ]; then
+    printf 'WARN    guard ring trimmed %s oldest run(s) in %s (now %s file(s), %s B; limit %s)\n' \
+      "$dropped" "$dir" "${count:-0}" "${bytes:-0}" "$reason" >&2
+  fi
+  # A single verdict over budget is kept: the newest run is the one a reader is
+  # looking for, and losing it to a size limit is worse than the size.
+  if [ "${max:-0}" -gt 0 ] && [ "${bytes:-0}" -gt "$max" ] && [ "${count:-0}" -eq 1 ]; then
+    printf 'WARN    newest guard run alone is %s B (budget %s B) — kept, never trim the only verdict\n' \
+      "$bytes" "$max" >&2
+  fi
+}
+
 # Every run leaves a timestamped verdict file — "it passed last week" needs a
 # when. The guard re-executes itself once so tee sees the whole output while the
 # parent still returns the child's exact exit status (pipefail alone would not
 # preserve a `blocked` exit code of 2 distinctly enough for the caller's eyes).
 #
-# Two destinations, not one: `task-guard-latest.txt` is rewritten on every run,
+# Two destinations, not one: `task-guard-latest` is rewritten on every run,
 # which is exactly how a green run disappears behind the next red one. Each run
-# therefore also lands in a timestamped ring (last TASK_GUARD_KEEP, default 20)
-# whose filenames are fixed-width UTC stamps, so a plain sort is chronological
-# and "it was green yesterday" stays checkable after today's failure.
+# therefore also lands in a timestamped ring whose filenames are fixed-width UTC
+# stamps, so a plain sort is chronological and "it was green yesterday" stays
+# checkable after today's failure.
 if [ "${TASK_GUARD_TEE:-0}" != "1" ]; then
-  TASK_REPORT="${TASK_REPORT-reports/task-guard-latest.txt}"
+  # `--json` writes JSON, so its report and ring entries are `.json`: a reader
+  # never opens a file whose extension disagrees with what is inside it.
+  if [ "$JSON_MODE" = "1" ]; then
+    default_report="reports/task-guard-latest.json"; ring_ext="json"
+  else
+    default_report="reports/task-guard-latest.txt"; ring_ext="txt"
+  fi
+  TASK_REPORT="${TASK_REPORT-$default_report}"
   mkdir -p "$(dirname "$TASK_REPORT")" 2>/dev/null
   TASK_GUARD_HISTORY_DIR="${TASK_GUARD_HISTORY_DIR-$(dirname "$TASK_REPORT")/task-guard}"
   TASK_GUARD_KEEP="${TASK_GUARD_KEEP:-20}"
   case "$TASK_GUARD_KEEP" in ''|*[!0-9]*) TASK_GUARD_KEEP=20 ;; esac
   [ "$TASK_GUARD_KEEP" -ge 1 ] 2>/dev/null || TASK_GUARD_KEEP=20
+  TASK_GUARD_MAX_BYTES="${TASK_GUARD_MAX_BYTES:-262144}"
+  case "$TASK_GUARD_MAX_BYTES" in ''|*[!0-9]*) TASK_GUARD_MAX_BYTES=262144 ;; esac
   TASK_GUARD_RUN_LOG=""
   if mkdir -p "$TASK_GUARD_HISTORY_DIR" 2>/dev/null; then
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    TASK_GUARD_RUN_LOG="$TASK_GUARD_HISTORY_DIR/${stamp}.txt"
+    TASK_GUARD_RUN_LOG="$TASK_GUARD_HISTORY_DIR/${stamp}.${ring_ext}"
     n=2
     while [ -e "$TASK_GUARD_RUN_LOG" ]; do
-      TASK_GUARD_RUN_LOG="$TASK_GUARD_HISTORY_DIR/${stamp}-${n}.txt"
+      TASK_GUARD_RUN_LOG="$TASK_GUARD_HISTORY_DIR/${stamp}-${n}.${ring_ext}"
       n=$((n + 1))
     done
-    # Trim before writing, so the ring never exceeds KEEP even briefly.
-    while [ "$(find "$TASK_GUARD_HISTORY_DIR" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | wc -l)" -ge "$TASK_GUARD_KEEP" ]; do
-      oldest="$(find "$TASK_GUARD_HISTORY_DIR" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | sort | head -n 1)"
-      [ -n "$oldest" ] || break
-      rm -f "$oldest"
-    done
   else
-    echo "WARN    guard history unavailable (cannot create $TASK_GUARD_HISTORY_DIR) — keeping only $TASK_REPORT" >&2
+    printf 'WARN    guard history unavailable (cannot create %s) — keeping only %s\n' \
+      "$TASK_GUARD_HISTORY_DIR" "$TASK_REPORT" >&2
   fi
   if [ -n "$TASK_GUARD_RUN_LOG" ]; then
-    TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" TASK_GUARD_RUN_LOG="$TASK_GUARD_RUN_LOG" \
-      TASK_GUARD_HISTORY_DIR="$TASK_GUARD_HISTORY_DIR" TASK_GUARD_KEEP="$TASK_GUARD_KEEP" \
-      bash "$0" "$@" 2>&1 | tee "$TASK_REPORT" "$TASK_GUARD_RUN_LOG"
+    if [ "$JSON_MODE" = "1" ]; then
+      # stdout is the JSON document, so stderr is deliberately not merged into
+      # it: a warning must never land inside a report a consumer parses.
+      TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" TASK_GUARD_RUN_LOG="$TASK_GUARD_RUN_LOG" \
+        TASK_GUARD_HISTORY_DIR="$TASK_GUARD_HISTORY_DIR" TASK_GUARD_KEEP="$TASK_GUARD_KEEP" \
+        TASK_GUARD_MAX_BYTES="$TASK_GUARD_MAX_BYTES" \
+        bash "$0" "$@" | tee "$TASK_REPORT" "$TASK_GUARD_RUN_LOG"
+    else
+      TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" TASK_GUARD_RUN_LOG="$TASK_GUARD_RUN_LOG" \
+        TASK_GUARD_HISTORY_DIR="$TASK_GUARD_HISTORY_DIR" TASK_GUARD_KEEP="$TASK_GUARD_KEEP" \
+        TASK_GUARD_MAX_BYTES="$TASK_GUARD_MAX_BYTES" \
+        bash "$0" "$@" 2>&1 | tee "$TASK_REPORT" "$TASK_GUARD_RUN_LOG"
+    fi
   else
     TASK_GUARD_TEE=1 TASK_REPORT="$TASK_REPORT" bash "$0" "$@" 2>&1 | tee "$TASK_REPORT"
   fi
-  exit "${PIPESTATUS[0]}"
+  rc="${PIPESTATUS[0]}"
+  # Trim after the run — see ring bookkeeping above.
+  trim_ring "$TASK_GUARD_HISTORY_DIR" "$TASK_GUARD_KEEP" "$TASK_GUARD_MAX_BYTES"
+  exit "$rc"
 fi
-
-FIX=0
-[ "${1:-}" = "--fix" ] && FIX=1
 
 # The Convex CLI retries (and effectively hangs) against a deployment the
 # provider has disabled, so every CLI call gets a hard ceiling. Measured
@@ -115,10 +206,15 @@ CLI_TIMEOUT="${CLI_TIMEOUT:-20}"
 EXPORT_TIMEOUT="${EXPORT_TIMEOUT:-120}"
 
 CONVEX_BIN="./node_modules/.bin/convex"
-[ -x "$CONVEX_BIN" ] || { echo "FAIL  dependencies missing — run: bun install"; exit 1; }
+# Everything human goes to stderr in --json mode, so a missing prerequisite must
+# too — stdout belongs to the JSON document alone.
+early() { if [ "$JSON_MODE" = "1" ]; then printf 'FAIL    %s\n' "$1" >&2; else printf 'FAIL  %s\n' "$1"; fi; }
+[ -x "$CONVEX_BIN" ] || { early "dependencies missing — run: bun install"; exit 1; }
 # The guard deliberately owns no URL rule of its own: it calls the app's module
 # (src/lib/convex-url.ts) and the login probe (scripts/operator-login.mjs).
-command -v bun >/dev/null 2>&1 || { echo "FAIL  bun is required to run the shared URL rule and login probe"; exit 1; }
+command -v bun >/dev/null 2>&1 || { early "bun is required to run the shared URL rule and login probe"; exit 1; }
+[ "$JSON_MODE" = "1" ] && ! command -v python3 >/dev/null 2>&1 && { early "--json needs python3 to serialize the verdict"; exit 1; }
+
 
 # shellcheck disable=SC1091
 set -a; . ./.env.local 2>/dev/null; set +a
@@ -132,17 +228,123 @@ EXPECTED_URL="${VITE_CONVEX_URL_EXPECTED:-https://${DEV_SITE}.convex.cloud}"
 OVERLAY_EXPECTED="${OVERLAY_EXPECTED:-https://${PROD_SITE}.convex.site}"
 REQUIRED_ENVS="VLY_CONVEX_AUTH_ISSUER JWKS JWT_PRIVATE_KEY SITE_URL"
 PROTECTED_BASELINE="${PROTECTED_BASELINE:-.task-baseline}"
+PROTECTED_BASELINE_LEDGER="${PROTECTED_BASELINE_LEDGER:-reports/baseline-history.md}"
 
 FAIL=0
 BLOCKED=0
+SKIPPED=0
 PROVIDER_BLOCKED=0
-pass() { printf 'PASS    %s\n' "$1"; }
-fail() { printf 'FAIL    %s\n' "$1"; FAIL=$((FAIL + 1)); }
-info() { printf '        %s\n' "$1"; }
+# ── output ─────────────────────────────────────────────────────────────────
+# Text mode prints exactly what it always printed. `--json` sends every human
+# line to stderr so stdout carries one JSON document; the report is the tee of
+# stdout, so a JSON run's report is the JSON itself.
+say() { if [ "$JSON_MODE" = "1" ]; then printf '%s\n' "$*" >&2; else printf '%s\n' "$*"; fi; }
+# One record per verdict, so the JSON does not have to reconstruct structured
+# results from prose. Tabs are the field separator (neither status nor id can
+# contain one); a message is flattened onto one line.
+CHECKS_FILE="${TMPDIR:-/tmp}/fbt-task-guard-checks.$$"
+if ! : > "$CHECKS_FILE" 2>/dev/null; then CHECKS_FILE=/dev/null; fi
+trap 'rm -f "$CHECKS_FILE" 2>/dev/null' EXIT INT TERM
+LAST_CHECK_ID="-"
+check_id() { # "4c. message" -> "4c"; anything without that prefix -> "-"
+  local token="${1%% *}"
+  token="${token%.}"
+  case "$token" in
+    [0-9]|[0-9][0-9]|[0-9][a-z]|[0-9][0-9][a-z]) printf '%s' "$token" ;;
+    *) printf '%s' "-" ;;
+  esac
+}
+record() { # status id message — a note attaches to the check it belongs to
+  local status="$1" id="$2" msg="$3"
+  case "$status" in note) id="$LAST_CHECK_ID" ;; *) LAST_CHECK_ID="$id" ;; esac
+  [ "$CHECKS_FILE" = "/dev/null" ] && return 0
+  printf '%s\t%s\t%s\n' "$status" "$id" "${msg//$'\t'/ }" >> "$CHECKS_FILE" 2>/dev/null
+}
+pass() { say "PASS    $1"; record pass "$(check_id "$1")" "$1"; }
+fail() { say "FAIL    $1"; FAIL=$((FAIL + 1)); record fail "$(check_id "$1")" "$1"; }
+info() { say "        $1"; record note - "$1"; }
+# A skipped check is not a pass and not a note: it prints like a note (the text
+# output is unchanged) but is counted and labelled `skipped` in the JSON.
+skip() { say "        $1"; SKIPPED=$((SKIPPED + 1)); record skipped "$(check_id "$1")" "$1"; }
 # A provider-side outage or plan ceiling is not a code verdict. Counting it
 # separately keeps a billing window from reading as a broken migration, while
 # still never printing green for something that was not proved.
-blocked() { printf 'BLOCKED %s\n' "$1"; BLOCKED=$((BLOCKED + 1)); PROVIDER_BLOCKED=1; }
+blocked() { say "BLOCKED $1"; BLOCKED=$((BLOCKED + 1)); PROVIDER_BLOCKED=1; record blocked "$(check_id "$1")" "$1"; }
+# The machine-readable verdict. Built by python3 from the records file rather
+# than by hand: a message can contain quotes, slashes and `->`, and a JSON
+# document assembled with printf is a JSON document that eventually is not one.
+emit_json() { # result exit_code
+  GUARD_CHECKS_FILE="$CHECKS_FILE" \
+  GUARD_TIMESTAMP="${RUN_TS:-unknown}" \
+  GUARD_COMMIT="${COMMIT_LABEL:-local}" \
+  GUARD_REF="${GITHUB_REF_NAME:-}" \
+  GUARD_FIX="$FIX" \
+  GUARD_RESULT="$1" \
+  GUARD_EXIT_CODE="$2" \
+  GUARD_REPORT="${TASK_REPORT:-}" \
+  GUARD_RING_LOG="${TASK_GUARD_RUN_LOG:-}" \
+  GUARD_RING_DIR="${TASK_GUARD_HISTORY_DIR:-}" \
+  GUARD_KEEP="${TASK_GUARD_KEEP:-0}" \
+  GUARD_MAX_BYTES="${TASK_GUARD_MAX_BYTES:-0}" \
+  python3 - <<'PY'
+import json, os, sys
+
+def env(name):
+    value = os.environ.get(name)
+    return value if value else None
+
+def as_int(name, default=0):
+    value = env(name)
+    return int(value) if value and value.isdigit() else default
+
+checks = []
+notes_at_top = []
+with open(env("GUARD_CHECKS_FILE") or "/dev/null", encoding="utf-8", errors="replace") as handle:
+    for raw in handle:
+        line = raw.rstrip("\n")
+        if not line:
+            continue
+        status, _, rest = line.partition("\t")
+        check, _, message = rest.partition("\t")
+        if status == "note":
+            # A note belongs to the check it follows; one that precedes every
+            # check is kept where it cannot be mistaken for a verdict.
+            if checks:
+                checks[-1]["details"].append(message)
+            else:
+                notes_at_top.append(message)
+            continue
+        checks.append({"id": check or "-", "status": status, "message": message, "details": []})
+
+counts = {"pass": 0, "fail": 0, "blocked": 0, "skipped": 0}
+for entry in checks:
+    if entry["status"] in counts:
+        counts[entry["status"]] += 1
+counts["checks"] = sum(1 for entry in checks if entry["id"] != "-")
+
+document = {
+    "schema": "flashbolt.task-guard/1",
+    "tool": "scripts/check-4-tasks.sh",
+    "timestamp": env("GUARD_TIMESTAMP"),
+    "commit": env("GUARD_COMMIT"),
+    "ref": env("GUARD_REF"),
+    "mode": "fix" if env("GUARD_FIX") == "1" else "verify",
+    "result": env("GUARD_RESULT"),
+    "exit_code": as_int("GUARD_EXIT_CODE", 1),
+    "counts": counts,
+    "report": env("GUARD_REPORT"),
+    "ring": {
+        "entry": env("GUARD_RING_LOG"),
+        "dir": env("GUARD_RING_DIR"),
+        "keep": as_int("GUARD_KEEP"),
+        "max_bytes": as_int("GUARD_MAX_BYTES"),
+    },
+    "notes": notes_at_top,
+    "checks": checks,
+    }
+sys.stdout.write(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+PY
+}
 
 site_of() { [ "$1" = "dev" ] && echo "$DEV_SITE" || echo "$PROD_SITE"; }
 key_of()  { [ "$1" = "dev" ] && echo "$DEV_KEY" || echo "$PROD_KEY"; }
@@ -207,15 +409,17 @@ unwrap_status() { # envelope -> sets STATUS_BODY and STATUS_TRIES
   STATUS_BODY="${1#*$'\n'}"
 }
 
-echo "task guard — 4 migration + 3 deployment checks — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RUN_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+COMMIT_LABEL="${GITHUB_SHA:-local}${GITHUB_REF_NAME:+ (${GITHUB_REF_NAME})}"
+say "task guard — 4 migration + 3 deployment checks — $RUN_TS"
 # Which push produced this verdict: a ring file named only by its timestamp
 # cannot be tied to the commit that ran it, and CI already exports the SHA.
-echo "commit: ${GITHUB_SHA:-local}${GITHUB_REF_NAME:+ (${GITHUB_REF_NAME})}"
-echo "run log: ${TASK_REPORT:-stdout only}"
+say "commit: $COMMIT_LABEL"
+say "run log: ${TASK_REPORT:-stdout only}"
 if [ -n "${TASK_GUARD_RUN_LOG:-}" ]; then
-  echo "history: ${TASK_GUARD_RUN_LOG} (ring: ${TASK_GUARD_HISTORY_DIR}, last ${TASK_GUARD_KEEP} runs)"
+  say "history: ${TASK_GUARD_RUN_LOG} (ring: ${TASK_GUARD_HISTORY_DIR}, last ${TASK_GUARD_KEEP} runs, <= ${TASK_GUARD_MAX_BYTES:-262144} B)"
 fi
-echo
+say ""
 
 # ── 1. build target ────────────────────────────────────────────────────────
 # Check 1 is a developer-machine invariant: it inspects the untracked
@@ -223,7 +427,7 @@ echo
 # six checks run there and this one says so instead of failing on a file that is
 # intentionally absent.
 if [ "${SKIP_BUILD_TARGET:-0}" = "1" ]; then
-  info "1. build-target check skipped (SKIP_BUILD_TARGET=1 — .env.local is a developer-machine file)"
+  skip "1. build-target check skipped (SKIP_BUILD_TARGET=1 — .env.local is a developer-machine file)"
 else
 # Cosmetic drift (a secret sync writing `' url'`) is repaired in place even
 # without --fix: the sanitized value is provably the intended deployment, and
@@ -364,7 +568,7 @@ for env_name in dev prod; do
   # deployment's 5/minute login slots (per deployment, so dev and prod do not
   # compete); SKIP_LOGIN=1 opts out.
   if [ "${SKIP_LOGIN:-0}" = "1" ]; then
-    info "4d. ${env_name} operator sign-in skipped (SKIP_LOGIN=1)"
+    skip "4d. ${env_name} operator sign-in skipped (SKIP_LOGIN=1)"
   else
     login_out="$(CONVEX_DEPLOY_KEY="$key" OPERATOR_SITE="$site" bun scripts/operator-login.mjs 2>&1)"
     case "$login_out" in
@@ -400,7 +604,7 @@ done
 if ! command -v curl >/dev/null 2>&1; then
   fail "5. curl unavailable — cannot probe the preview"
 elif [ "${SKIP_PREVIEW:-0}" = "1" ] || { [ "${PREVIEW_URL+set}" = "set" ] && [ -z "$PREVIEW_URL" ]; }; then
-  info "5. preview check skipped (SKIP_PREVIEW=1 or PREVIEW_URL empty)"
+  skip "5. preview check skipped (SKIP_PREVIEW=1 or PREVIEW_URL empty)"
 else
   PREVIEW_URL="${PREVIEW_URL-https://site-09ea3529142e4b119d3b827e34b84856.freebuff.page}"
   PREVIEW_URL="${PREVIEW_URL%/}"
@@ -470,13 +674,72 @@ fi
 # The baseline names the platform build the fleet last agreed on. When the whole
 # fleet moves, the reference advances by itself and the superseded value is
 # appended as `history=`, so re-baselining never erases what it replaced.
+#
+# `history=` is still a bounded list — platform rollouts accumulate stamps, and
+# an unbounded list makes the committed file unreadable — but a cap that only
+# logs a count is data loss with a footnote. Every superseded stamp is therefore
+# copied to PROTECTED_BASELINE_LEDGER (append-only, one row per stamp, never
+# trimmed) *before* the baseline is rewritten, so the cap is a display limit and
+# the stamp itself is never gone.
+ledger_row() { # history=<stamp> recorded=<ts> superseded=<ts> replaced_by=<stamp> (<note>)
+  local line="$1" stamp recorded superseded replaced note
+  stamp="$(printf '%s' "$line" | sed -n 's/^history=\([^ ]*\).*/\1/p')"
+  recorded="$(printf '%s' "$line" | sed -n 's/.* recorded=\([^ ]*\).*/\1/p')"
+  superseded="$(printf '%s' "$line" | sed -n 's/.* superseded=\([^ ]*\).*/\1/p')"
+  replaced="$(printf '%s' "$line" | sed -n 's/.* replaced_by=\([^ ]*\).*/\1/p')"
+  note="$(printf '%s' "$line" | sed -n 's/.*(\(.*\))[[:space:]]*$/\1/p')"
+  printf '| `%s` | %s | %s | `%s` | %s |\n' \
+    "$stamp" "${recorded:-unknown}" "${superseded:-unknown}" "${replaced:-none}" "${note:-—}"
+}
+# Append one row for a stamp the ledger does not have yet. Silent: the caller
+# decides whether extending the trail is worth a line of output. Sets
+# LEDGER_ADDED so that decision can name a count instead of guessing.
+ledger_append() { # history-line
+  local stamp row
+  LEDGER_ADDED=0
+  stamp="$(printf '%s' "$1" | sed -n 's/^history=\([^ ]*\).*/\1/p')"
+  [ -n "$stamp" ] || return 0
+  if [ ! -f "$PROTECTED_BASELINE_LEDGER" ]; then
+    mkdir -p "$(dirname "$PROTECTED_BASELINE_LEDGER")" 2>/dev/null
+    {
+      printf '# Baseline history — every platform build stamp the guard has superseded\n\n'
+      printf '`.task-baseline` is the reference of record and stays short: check 6 keeps\n'
+      printf 'the newest `PROTECTED_BASELINE_HISTORY` (default 10) superseded stamps in it.\n'
+      printf 'This file is the complete, append-only record: the guard copies every\n'
+      printf 'superseded stamp here *before* it trims, so the cap is a display limit and\n'
+      printf 'never data loss. Written by `scripts/check-4-tasks.sh` (check 6); rows are\n'
+      printf 'appended as the guard sees them, and a stamp is never added twice.\n\n'
+      printf '| Stamp | Recorded | Superseded | Replaced by | Note |\n'
+      printf '|---|---|---|---|---|\n'
+    } > "$PROTECTED_BASELINE_LEDGER" 2>/dev/null || return 0
+  fi
+  # Anchored on the first cell. A plain substring match looks right and is not:
+  # a stamp also appears in the `Replaced by` cell of the row that superseded
+  # it, so searching for `| <stamp> |` anywhere made every other stamp look
+  # already present and silently skipped it (measured: 6 of 12 rows written).
+  grep -q "^| \`$stamp\` |" "$PROTECTED_BASELINE_LEDGER" 2>/dev/null && return 0
+  row="$(ledger_row "$1")"
+  printf '%s\n' "$row" >> "$PROTECTED_BASELINE_LEDGER" 2>/dev/null || return 0
+  LEDGER_ADDED=1
+}
+# Copy whatever the baseline still remembers. Idempotent on purpose: every run
+# heals a ledger that was deleted or that was added after the baseline had
+# already moved, and a duplicate is impossible (stamps are deduplicated).
+ledger_backfill() {
+  local line added=0
+  [ -f "$PROTECTED_BASELINE" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    ledger_append "$line"
+    [ "$LEDGER_ADDED" = "1" ] && added=$((added + 1))
+  done <<< "$(grep '^history=' "$PROTECTED_BASELINE" 2>/dev/null)"
+  [ "$added" -gt 0 ] && info "baseline ledger: copied ${added} superseded stamp(s) to ${PROTECTED_BASELINE_LEDGER}"
+  return 0
+}
+
 write_baseline() { # new_stamp superseded_stamp superseded_recorded note
-  local kept="" now keep limit total drop
+  local kept="" now keep limit total drop line dropped=0
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # The superseded stamps are history, not a ledger: platform rollouts accumulate
-  # them, and an unbounded list makes the committed file unreadable. Keep the
-  # newest PROTECTED_BASELINE_HISTORY (default 10), and say what was dropped so
-  # capping never looks like the value never existed.
   keep="${PROTECTED_BASELINE_HISTORY:-10}"
   case "$keep" in ''|*[!0-9]*) keep=10 ;; esac
   [ "$keep" -ge 1 ] 2>/dev/null || keep=10
@@ -487,7 +750,23 @@ write_baseline() { # new_stamp superseded_stamp superseded_recorded note
     total="${total:-0}"
     kept="$(grep '^history=' "$PROTECTED_BASELINE" 2>/dev/null | tail -n "$limit")"
     drop=$((total > limit ? total - limit : 0))
-    [ "$drop" -gt 0 ] && info "baseline history capped at ${keep} line(s); ${drop} oldest superseded stamp(s) dropped"
+    # Before any trim: this is the copy that never loses a stamp.
+    while IFS= read -r line; do
+      [ -n "$line" ] && ledger_append "$line"
+    done <<< "$(grep '^history=' "$PROTECTED_BASELINE" 2>/dev/null)"
+    if [ "$drop" -gt 0 ]; then
+      info "baseline history capped at ${keep} line(s); ${drop} oldest superseded stamp(s) dropped from the baseline"
+      # Name them. A count alone is exactly the footnote this ledger exists for.
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        dropped=$((dropped + 1))
+        [ "$dropped" -le "$drop" ] && info "dropped from the baseline, kept in ${PROTECTED_BASELINE_LEDGER}: ${line#history=}"
+      done <<< "$(grep '^history=' "$PROTECTED_BASELINE" 2>/dev/null)"
+    fi
+  fi
+  # The stamp being superseded right now is history too.
+  if [ -n "${2:-}" ]; then
+    ledger_append "history=${2} recorded=${3:-unknown} superseded=${now} replaced_by=${1} (${4:-re-baselined})"
   fi
   {
     printf 'url=%s\nstamp=%s\nrecorded=%s\n' "$PROTECTED_URL" "$1" "$now"
@@ -500,10 +779,14 @@ write_baseline() { # new_stamp superseded_stamp superseded_recorded note
 }
 
 if [ "${SKIP_PROTECTED:-0}" = "1" ]; then
-  info "6. protected-deployment check skipped (SKIP_PROTECTED=1)"
+  skip "6. protected-deployment check skipped (SKIP_PROTECTED=1)"
 else
   PROTECTED_URL="${PROTECTED_URL-https://shiny-bulldog-311.convex.cloud}"
   PROTECTED_URL="${PROTECTED_URL%/}"
+  # Keep the append-only ledger in step even on a run that does not move the
+  # baseline (a passing run heals a missing or deleted ledger).
+  LAST_CHECK_ID=6
+  ledger_backfill
   stamp="$(curl -sS -m 15 "${PROTECTED_URL}/version" 2>/dev/null | tr -d '\n\r')"
   pcode="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${PROTECTED_URL}/version" 2>/dev/null || echo 000)"
   pseeded="$(curl -sS -m 15 -X POST "${PROTECTED_URL}/api/query" -H 'Content-Type: application/json' \
@@ -629,16 +912,30 @@ else
   done
 fi
 
-echo
 if [ "$FAIL" -eq 0 ] && [ "$BLOCKED" -eq 0 ]; then
-  echo "RESULT all checks passed"
-  exit 0
+  RESULT=passed; EXIT_CODE=0
+elif [ "$FAIL" -eq 0 ]; then
+  RESULT=blocked; EXIT_CODE=2
+else
+  RESULT=failed; EXIT_CODE=1
 fi
-if [ "$FAIL" -eq 0 ]; then
-  echo "RESULT no failures; ${BLOCKED} check(s) blocked by the provider"
-  echo "hint   the provider disabled function serving on its own schedule — an upgrade or the next usage window lifts it"
-  exit 2
+
+if [ "$JSON_MODE" = "1" ]; then
+  emit_json "$RESULT" "$EXIT_CODE"
+else
+  say ""
+  case "$RESULT" in
+    passed)
+      say "RESULT all checks passed"
+      ;;
+    blocked)
+      say "RESULT no failures; ${BLOCKED} check(s) blocked by the provider"
+      say "hint   the provider disabled function serving on its own schedule — an upgrade or the next usage window lifts it"
+      ;;
+    failed)
+      say "RESULT ${FAIL} check(s) failed, ${BLOCKED} blocked"
+      [ "$FIX" = "0" ] && say "hint   re-run with: bun run check:tasks --fix"
+      ;;
+  esac
 fi
-echo "RESULT ${FAIL} check(s) failed, ${BLOCKED} blocked"
-[ "$FIX" = "0" ] && echo "hint   re-run with: bun run check:tasks --fix"
-exit 1
+exit "$EXIT_CODE"
