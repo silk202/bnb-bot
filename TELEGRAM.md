@@ -48,23 +48,27 @@ The `start_payload` kind (deep-link `/start <CODE>`), bare pairing codes and
 
 Manual feed work is rate-limited by **four independent slots per chat** — one
 window per chain *per board*: a scan slot (`/bnb_scan`, `/sol_scan`) and a routes
-slot (`/routes`), each 30 seconds (`SCAN_COOLDOWN_MS` / `ROUTE_COOLDOWN_MS`).
+slot (`/routes@bnb`, `/routes@sol`), each 30 seconds (`SCAN_COOLDOWN_MS` /
+`ROUTE_COOLDOWN_MS`).
 Scanning and reading routes are different questions, and the BNB feed and the SOL
 engine are different engines, so a scan tap can never grey out the routes board,
 a BNB refresh can never close the SOL window, and vice versa.
 
-`/routes` covers both chains in one board, each section with its own freshness and
-its own budget: BNB lists the live feed's route rows, SOL reports the engine
-pass's live/generated counts (which is what the SOL engine returns — rows are
-never invented for it). `/routes@bnb` and `/routes@sol` refresh one chain and
-spend only that chain's slot. Every slot is claimed atomically before any feed
-work, so a double tap (or a Telegram retry) cannot fire two passes; a tap inside
-the window answers with the real remaining seconds instead of reading. A pass
-that never ran — feed unreachable, or `scanPass` yielded to the app, a stopped
-scanner or an in-flight lease — releases the slot, so the chat is not charged for
-work it did not get, and the section says why. `/engines` and `/status` show the
-readiness of both boards per chain ("manual scan ready · routes in 18s") so a
-cooling-down button is explained before it is tapped.
+Plain `/routes` is the **light board**: it reads nothing and spends no slot. It
+shows each chain's real last read, its open-opportunity count and its own
+remaining budget, and names the refresh that reads it. `/routes@bnb` reads the
+BNB feed and lists its live and generated route rows; `/routes@sol` runs one SOL
+engine pass and reports its live/generated counts (which is what the SOL engine
+returns — rows are never invented for it). Each focused refresh spends only that
+chain's slot. Every slot is claimed atomically before any feed work, so a double
+tap (or a Telegram retry) cannot fire two passes; a tap inside the window answers
+with the real remaining seconds instead of reading. A pass that never ran — feed
+unreachable, or `scanPass` yielded to the app, a stopped scanner or an in-flight
+lease — releases the slot, so the chat is not charged for work it did not get,
+and the section says why. A chain this tap did not read keeps its real last read
+and never claims an empty feed. `/engines` and `/status` show the readiness of
+both boards per chain ("manual scan ready · routes in 18s") so a cooling-down
+button is explained before it is tapped.
 
 ## Commands — what they display
 
@@ -89,7 +93,7 @@ cooling-down button is explained before it is tapped.
 | `/bnb_paper` | Sets the global mode to paper; reports that executions are simulated. |
 | `/bnb_live` | Sets the global mode to live; reports that real execution arms only with a deployed contract and a connected wallet. |
 | `/bnb_scan` | Runs one live feed scan immediately (subject to its own 30s scan slot), stamps the BNB scan bookkeeping (freshness + opportunity count, the same bump the app's Scan performs) and replies with the routes board — BNB from this read, SOL marked as not read by this tap (`/routes@sol` runs its pass). An unreachable feed returns the explicit warning instead of an empty board and releases the slot. |
-| `/routes` | Live arbitrage routes, **BNB and SOL separately**: the BNB section lists the feed's live and generated route rows, the SOL section reports its engine pass's live/generated counts plus open opportunities. Each section carries its own freshness, its own budget (its own 30s slot, independent of `/bnb_scan` and of the other chain) and a note when it did not run. `/routes@bnb` and `/routes@sol` refresh one chain only. A refused chain shows the real remaining seconds while the other chain still refreshes. |
+| `/routes` | **Light board** — reads nothing: BNB and SOL each show their real last read, open-opportunity count and remaining routes budget, plus which refresh reads them. `/routes@bnb` reads the BNB feed and lists its live and generated rows; `/routes@sol` runs one SOL engine pass and reports its live/generated counts. A focused refresh spends only that chain's 30s routes slot (independent of `/bnb_scan` and of the other chain); a refusal names the real remaining seconds. A section that was not read never claims an empty feed. |
 | `/execs` | The recent executions trail. Filters: `/execs@live`, `/execs@sim`; the keyboard cycles all → live → sim. A row counts as LIVE when it carries a `txHash`. |
 | `/pnl` | On-chain PnL summary for BNB and SOL plus simulated totals. Same filters as `/execs`. |
 

@@ -27,6 +27,7 @@ const view = (over: Partial<ChainRoutesView> = {}): ChainRoutesView => ({
   at: null,
   source: null,
   cooldown: { allowed: true, retryInMs: 0 },
+  readNow: true,
   note: null,
   ...over,
 });
@@ -108,16 +109,51 @@ describe("/routes renders both chains", () => {
     expect(m.text).toContain("read 20s ago");
   });
 
-  test("a chain this tap skipped says it was not read", () => {
+  test("a chain this tap skipped says it was not read, and claims nothing", () => {
     const m = routesMessage(
       {
         bnb: view({ at: NOW }),
-        sol: view({ at: NOW - 300_000, note: "not read by this tap — use its refresh button." }),
+        sol: view({
+          readNow: false,
+          at: NOW - 300_000,
+          note: "not read by this tap — use its refresh button.",
+        }),
       },
       NOW,
     );
     expect(m.text).toContain("not read by this tap — use its refresh button.");
     expect(m.text).toContain("read 5m ago");
+    // The unread SOL section carries no route/emptiness claim of its own: its
+    // heading is followed only by its open count and the skip note.
+    const solSection = m.text.slice(m.text.indexOf("**☀️ SOL FlashBolt**"));
+    expect(solSection).not.toContain("No live routes");
+    expect(solSection).not.toContain("No generated routes");
+  });
+
+  test("the light board shows last reads and spends nothing", () => {
+    const m = routesMessage(
+      {
+        bnb: view({
+          readNow: false,
+          at: NOW - 60_000,
+          source: "server",
+          opportunities: 2,
+          note: "not refreshed here — /routes@bnb reads it now.",
+        }),
+        sol: view({ readNow: false, note: "not refreshed here — /routes@sol runs a pass." }),
+      },
+      NOW,
+    );
+    // Both chains render, each with its own real last read and open count.
+    expect(m.text).toContain("**⚡ BNB FlashBolt** — read 1m ago (engine) · routes ready");
+    expect(m.text).toContain("**☀️ SOL FlashBolt** — not read yet · routes ready");
+    expect(m.text).toContain("• Open opportunities 2");
+    expect(m.text).toContain("not refreshed here — /routes@bnb reads it now.");
+    expect(m.text).toContain("not refreshed here — /routes@sol runs a pass.");
+    // Nothing was read, so nothing may be claimed about the feed's contents.
+    expect(m.text).not.toContain("No live routes");
+    expect(m.text).not.toContain("No generated routes");
+    expect(m.text).toContain("Last read per chain");
   });
 
   test("every button on the board is a live control", () => {

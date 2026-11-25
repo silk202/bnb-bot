@@ -1497,6 +1497,12 @@ export interface ChainRoutesView {
   source: "client" | "server" | null;
   /** This chat's `/routes` budget for THIS chain — never the other chain's. */
   cooldown: ScanCooldownState;
+  /**
+   * Did THIS tap read the chain? Only a read may say what the feed holds: an
+   * unread chain renders its real last read and open count, never "no routes"
+   * (which would be a claim nobody asked the feed to answer).
+   */
+  readNow: boolean;
   /** Why the read did not run, or came back empty, when that is known. */
   note?: string | null;
 }
@@ -1528,6 +1534,14 @@ export function routesMessage(
     const lines = [
       `**${label}** — ${freshness} · routes ${cooldownStateLabel(view.cooldown)}`,
     ];
+    // Only a chain THIS tap read may state what the feed holds. An unread
+    // chain shows its real last read, its open count and why it was skipped —
+    // never "no routes", which would be an answer nobody asked the feed for.
+    if (!view.readNow) {
+      if (view.opportunities != null) lines.push(`• Open opportunities ${view.opportunities}`);
+      if (view.note) lines.push(`• ${view.note}`);
+      return lines;
+    }
     const live = view.live.slice(0, 4);
     const generated = view.generated.slice(0, 4);
     if (live.length) lines.push(...live.map((r) => `⛓ ${routeLine(r)}`));
@@ -1544,6 +1558,7 @@ export function routesMessage(
     if (view.note) lines.push(`• ${view.note}`);
     return lines;
   };
+  const read = input.bnb.readNow || input.sol.readNow;
   return {
     text: [
       "🛣 **Live arbitrage routes**",
@@ -1552,7 +1567,9 @@ export function routesMessage(
       "",
       ...section("sol", input.sol),
       "",
-      "_Live data from the same feeds the terminals scan — /routes keeps one budget per chain._",
+      read
+        ? "_Rows come from this tap's read — each chain keeps its own 30s routes budget._"
+        : "_Last read per chain — tap a chain's refresh to read it now; it spends only that chain's 30s budget._",
     ].join("\n"),
     keyboard: [
       [

@@ -2545,6 +2545,7 @@ function idleRoutesView(
     at: chain === "sol" ? (st?.solLastScanAt ?? null) : (st?.lastScanAt ?? null),
     source: chain === "sol" ? (st?.solLastScanSource ?? null) : (st?.lastScanSource ?? null),
     cooldown: scanSlotCooldown(chat, chain, "routes", now),
+    readNow: false,
     note,
   };
 }
@@ -2563,6 +2564,7 @@ function bnbRoutesView(
     at: now,
     source: "server",
     cooldown: { allowed: false, retryInMs: ROUTE_COOLDOWN_MS },
+    readNow: true,
     note: null,
   };
 }
@@ -2583,6 +2585,7 @@ function solRoutesView(
     at: now,
     source: "server",
     cooldown: { allowed: false, retryInMs: ROUTE_COOLDOWN_MS },
+    readNow: true,
     note: null,
   };
 }
@@ -3112,89 +3115,95 @@ export const handleUpdate = internalAction({
       }
 
       case "routes": {
-        // /routes covers BNB and SOL separately. Each chain spends its OWN
-        // routes budget — never /bnb_scan's window, never the other chain's —
-        // so one board can never make the other look unavailable.
-        const wanted: ScanChain[] = cmd.chain === "all" ? ["bnb", "sol"] : [cmd.chain];
+        // Plain /routes is the LIGHT board: it reads nothing and spends no
+        // slot. It shows each chain's REAL last read, its open count and its
+        // own budget, then names the refresh that actually reads it. One
+        // glance used to hit the BNB feed AND run a SOL engine pass — two live
+        // reads, and two budgets, for a board the operator was only opening.
         const now = Date.now();
         const st = await ctx.runQuery(internal.terminal.botGetState, {});
-        const views: Partial<Record<ScanChain, ChainRoutesView>> = {};
-        const refused: Array<{ chain: ScanChain; retryInMs: number }> = [];
         const idle = (chain: ScanChain, note: string | null): ChainRoutesView =>
           // A chain this tap did not read still renders, with its REAL last read.
           idleRoutesView(chat, st, chain, now, note);
 
-        for (const chain of wanted) {
-          const claimedAt = Date.now();
-          const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
-            chatId,
-            chain,
-            scope: "routes",
-            now: claimedAt,
-          });
-          if (!claim.allowed) {
-            refused.push({ chain, retryInMs: claim.retryInMs });
-            views[chain] = idle(
+        if (cmd.chain === "all") {
+          const m = routesMessage(
+            {
+              bnb: idle("bnb", "not refreshed here — /routes@bnb reads it now."),
+              sol: idle("sol", "not refreshed here — /routes@sol runs a pass."),
+            },
+            Date.now(),
+          );
+          await reply(m.text, m.keyboard);
+          return done("routes:summary");
+        }
+
+        // /routes@bnb|sol DOES read that chain, and spends only its OWN routes
+        // slot — never /bnb_scan's window, never the other chain's.
+        const chain: ScanChain = cmd.chain;
+        const claimedAt = Date.now();
+        const claim = await ctx.runMutation(internal.telegramBot.claimScan, {
+          chatId,
+          chain,
+          scope: "routes",
+          now: claimedAt,
+        });
+        if (!claim.allowed) {
+          await reply(routesCooldownMessage(chain, claim.retryInMs), mainMenu().keyboard);
+          return done("routes:cooldown");
+        }
+
+        let view: ChainRoutesView;
+        if (chain === "bnb") {
+          const read = await scanRoutes(ctx);
+          if (read) {
+            view = bnbRoutesView(read, Date.now());
+          } else {
+            // Nothing was read, so nothing is charged to this budget.
+            await ctx.runMutation(internal.telegramBot.releaseScan, {
+              chatId,
               chain,
-              `cooling down — its routes refresh is back in ${Math.max(1, Math.ceil(claim.retryInMs / 1000))}s.`,
-            );
-            continue;
+              scope: "routes",
+              claimedAt,
+            });
+            view = {
+              ...idle(
+                "bnb",
+                "live feed unreachable right now — nothing was read, the budget was not spent.",
+              ),
+              cooldown: { allowed: true, retryInMs: 0 },
+            };
           }
-          if (chain === "bnb") {
-            const view = await scanRoutes(ctx);
-            if (!view) {
-              // Nothing was read, so nothing is charged to this budget.
-              await ctx.runMutation(internal.telegramBot.releaseScan, {
-                chatId,
-                chain,
-                scope: "routes",
-                claimedAt,
-              });
-              views.bnb = {
-                ...idle(
-                  "bnb",
-                  "live feed unreachable right now — nothing was read, the budget was not spent.",
-                ),
-                cooldown: { allowed: true, retryInMs: 0 },
-              };
-              continue;
-            }
-            views.bnb = bnbRoutesView(view, Date.now());
-            continue;
-          }
+        } else {
           // SOL: one real pass through the SAME engine body /sol_scan runs. It
           // yields to the app and to its own lease rather than disrupting them.
           const res = await ctx.runAction(internal.terminal.scanPass, { chain: "sol" });
-          if (!res.ran) {
+          if (res.ran) {
+            view = solRoutesView(res, Date.now());
+          } else {
             await ctx.runMutation(internal.telegramBot.releaseScan, {
               chatId,
               chain: "sol",
               scope: "routes",
               claimedAt,
             });
-            views.sol = idle(
-              "sol",
-              `pass did not run: ${solPassReason(res.reason)} — the budget was not spent.`,
-            );
-            continue;
+            view = {
+              ...idle(
+                "sol",
+                `pass did not run: ${solPassReason(res.reason)} — the budget was not spent.`,
+              ),
+              cooldown: { allowed: true, retryInMs: 0 },
+            };
           }
-          views.sol = solRoutesView(res, Date.now());
         }
 
-        if (refused.length === wanted.length) {
-          await reply(
-            refused
-              .map((entry) => routesCooldownMessage(entry.chain, entry.retryInMs))
-              .join("\n\n"),
-            mainMenu().keyboard,
-          );
-          return done("routes:cooldown");
-        }
+        // The unread chain keeps its real last read and says why it was skipped.
+        const other: ChainRoutesView =
+          chain === "bnb"
+            ? idle("sol", "not refreshed by this tap — /routes@sol runs a pass.")
+            : idle("bnb", "not refreshed by this tap — /routes@bnb reads it now.");
         const m = routesMessage(
-          {
-            bnb: views.bnb ?? idle("bnb", "not read by this tap — use its refresh button."),
-            sol: views.sol ?? idle("sol", "not read by this tap — use its refresh button."),
-          },
+          { bnb: chain === "bnb" ? view : other, sol: chain === "sol" ? view : other },
           Date.now(),
         );
         await reply(m.text, m.keyboard);

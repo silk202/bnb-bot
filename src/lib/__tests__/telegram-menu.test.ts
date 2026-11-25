@@ -174,6 +174,7 @@ function keyboards(): Array<{ label: string; keyboard: TgKeyboard }> {
             at: NOW,
             source: "server",
             cooldown: { allowed: true, retryInMs: 0 },
+            readNow: true,
           },
           sol: {
             live: [],
@@ -182,6 +183,7 @@ function keyboards(): Array<{ label: string; keyboard: TgKeyboard }> {
             at: null,
             source: null,
             cooldown: { allowed: true, retryInMs: 0 },
+            readNow: true,
           },
         },
         NOW,

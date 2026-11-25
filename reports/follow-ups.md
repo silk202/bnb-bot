@@ -4622,3 +4622,65 @@ Two code defects behind the 401, fixed here and tested:
    (USDT/USDC), not per chain, so a "BNB/SOL claim" would have no real data
    behind it. "/claims cover bnb/sol separately" was implemented as the claim
    SLOTS being per chain and per board.
+
+## Round 50 — 2026-11-25: light plain /routes, webhook repointed to production
+
+### Plain `/routes` is now the light board
+
+`/routes` used to spend BOTH chains on one tap: a BNB feed scan AND a SOL engine
+pass, two live reads and two budgets for a board the operator was only opening.
+It now reads nothing and spends no slot. Each chain renders its REAL last read,
+its own open-opportunity count and its own remaining routes budget, plus the
+refresh that reads it (`/routes@bnb`, `/routes@sol`). A focused refresh keeps its
+previous behavior — one chain, one read, one slot, release on feed-down/yield —
+and the chain it did not touch keeps its real last read.
+
+`ChainRoutesView` gained `readNow`. Only a read may state what the feed holds, so
+an unread chain never renders "No live routes above the floor right now" (that is
+an answer nobody asked the feed for). Its section carries only the open count,
+the budget and the skip note.
+
+### Webhook repointed — and the deployment it points at is disabled
+
+- `setWebhook` → `https://flexible-frog-776.convex.site/api/telegram/webhook`
+  with production's own stored `webhookSecret` (read from its config row, never
+  printed), `allowed_updates: [message, callback_query]`.
+- `getWebhookInfo` → `ok: true`, url is that origin, pending 0, no last error.
+  The old `shiny-bulldog-311` registration (401: registered without the secret)
+  is gone; nothing on that deployment was touched.
+
+BLOCKER, observed live: production and dev deployments both reject functions
+with `You have exceeded the free plan limits, so your deployments have been
+disabled. Please upgrade to a Pro plan or reach out to support@convex.dev`.
+Bodies:
+- `POST https://flexible-frog-776.convex.site/api/telegram/webhook` → HTTP 500
+- `GET  https://pastel-pelican-634.convex.site/api/telegram/webhook` → HTTP 500
+  with the plan-limit message
+- `convex run` against either deployment → the same plan-limit error
+
+So the bot is now pointed at the right deployment with the right secret, but that
+deployment cannot answer an update until the Convex plan is resolved. The moment
+it is, the handler authenticates (secret matches) and the fixed code answers.
+The command menu stays at 26/40 meanwhile, because `setMyCommands` is a function
+call on the same disabled deployment.
+
+### Checks
+
+- `bun run typecheck` → exit 0
+- `bun test telegram` → **78 pass / 0 fail**, 1369 expects
+- `bun run check:telegram-docs` → exit 0 (40 menu commands, 39 on /help)
+- Live: `getWebhookInfo` as above (no secrets printed)
+
+### Follow-ups opened
+
+5. **Resolve the Convex free-plan limit.** Both deployments are disabled at the
+   function layer, so no board, no menu push and no webhook delivery can run.
+   After the plan is fixed, tap a command once: the handler answers with the
+   secret already registered here, and the 10-minute self-heal repairs anything
+   Telegram reported while the deployment was down.
+6. **`shiny-bulldog-311` may reclaim the webhook.** Its build re-registers
+   itself every 10 minutes (the pre-round-49 `ensureWebhookReady` always thought
+   the URL was wrong), which is how the webhook kept pointing there. If the URL
+   flips back, that deployment has to be retired/paused (owner's call — it is
+   protected) or the bot token rotated; a manual repoint cannot outrun a
+   10-minute cron.
